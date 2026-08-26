@@ -1,0 +1,26 @@
+{
+	"name": "workspace-server",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "A thin local hub: versioned JSON documents on disk for the apps on this machine.",
+	"engines": {
+		"node": ">=22"
+	},
+	"scripts": {
+		"start": "node src/index.ts",
+		"build": "tsc --noEmit",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"format": "prettier --write ."
+	},
+	"dependencies": {
+		"@fastify/cors": "^11.1.0",
+		"fastify": "^5.6.0"
+	},
+	"devDependencies": {
+		"@types/node": "^24.3.0",
+		"typescript": "^5.9.2",
+		"vitest": "^4.0.0"
+	}
+}
