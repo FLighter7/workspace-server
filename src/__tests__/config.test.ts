@@ -53,6 +53,45 @@ describe('loadConfig', () => {
 		expect(config.allowedOrigins.filter((o) => o === 'http://localhost:5173')).toHaveLength(1);
 	});
 
+	/**
+	 * A browser sends the Origin header with scheme and host lowercased, per
+	 * the URL spec, whatever the user typed into the address bar. An
+	 * allowlist entry written as it was typed would therefore never match a
+	 * host with capitals in it — and the failure looks exactly like the
+	 * server being unreachable.
+	 */
+	it('lowercases an origin the way a browser will send it', () => {
+		const config = loadConfig(env({ ALLOWED_ORIGINS: 'https://WIN-BH8HTPC8AQ0.local:4173' }));
+
+		expect(config.allowedOrigins).toContain('https://win-bh8htpc8aq0.local:4173');
+	});
+
+	it('drops a trailing slash, which is never part of an origin', () => {
+		const config = loadConfig(env({ ALLOWED_ORIGINS: 'https://example.test:8443/' }));
+
+		expect(config.allowedOrigins).toContain('https://example.test:8443');
+	});
+
+	it('reduces an address with a path to just its origin', () => {
+		const config = loadConfig(env({ ALLOWED_ORIGINS: 'https://you.github.io/todo/' }));
+
+		expect(config.allowedOrigins).toContain('https://you.github.io');
+	});
+
+	it('does not collapse two different origins into one', () => {
+		const config = loadConfig(env({ ALLOWED_ORIGINS: 'https://a.test,https://b.test' }));
+
+		expect(config.allowedOrigins).toEqual(
+			expect.arrayContaining(['https://a.test', 'https://b.test']),
+		);
+	});
+
+	it('keeps something unparseable rather than silently dropping it', () => {
+		const config = loadConfig(env({ ALLOWED_ORIGINS: 'not-a-url' }));
+
+		expect(config.allowedOrigins).toContain('not-a-url');
+	});
+
 	it('defaults the body limit to 5 MB', () => {
 		expect(loadConfig(env()).maxBodyBytes).toBe(5 * 1024 * 1024);
 	});

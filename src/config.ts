@@ -66,10 +66,29 @@ function readPort(value: string | undefined): number {
 function readOrigins(value: string | undefined): string[] {
 	const configured = (value ?? '')
 		.split(',')
-		.map((origin) => origin.trim())
+		.map((origin) => normalizeOrigin(origin.trim()))
 		.filter((origin) => origin !== '');
 
 	return [...new Set([...configured, ...DEFAULT_ORIGINS])];
+}
+
+/**
+ * A browser sends `Origin` with the scheme and host lowercased and no path,
+ * whatever the user typed. Comparing against the raw configured string would
+ * therefore never match a host with capitals in it — and because CORS is
+ * enforced in the browser, the failure arrives as a bare "load failed" that
+ * looks exactly like the server being switched off.
+ *
+ * Anything that will not parse is kept as-is rather than dropped: silently
+ * removing an entry the user meant would be a worse way to fail than not
+ * matching it.
+ */
+function normalizeOrigin(value: string): string {
+	try {
+		return new URL(value).origin;
+	} catch {
+		return value;
+	}
 }
 
 /**
