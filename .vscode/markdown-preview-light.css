@@ -1,0 +1,54 @@
+/*
+ * Forces the built-in Markdown preview to render in a light palette
+ * regardless of the active editor color theme (VS Code has no separate
+ * "preview theme" setting — this is the standard workaround via
+ * `markdown.styles`).
+ */
+
+body.vscode-dark,
+body.vscode-high-contrast {
+	background-color: #ffffff;
+	color: #24292e;
+}
+
+body.vscode-dark a,
+body.vscode-high-contrast a {
+	color: #0366d6;
+}
+
+body.vscode-dark code,
+body.vscode-dark pre,
+body.vscode-high-contrast code,
+body.vscode-high-contrast pre {
+	background-color: #f6f8fa;
+	color: #24292e;
+}
+
+body.vscode-dark blockquote,
+body.vscode-high-contrast blockquote {
+	color: #6a737d;
+	border-left-color: #dfe2e5;
+}
+
+body.vscode-dark table tr,
+body.vscode-high-contrast table tr {
+	background-color: #ffffff;
+	border-top-color: #c6cbd1;
+}
+
+body.vscode-dark table tr:nth-child(2n),
+body.vscode-high-contrast table tr:nth-child(2n) {
+	background-color: #f6f8fa;
+}
+
+body.vscode-dark table th,
+body.vscode-dark table td,
+body.vscode-high-contrast table th,
+body.vscode-high-contrast table td {
+	border-color: #dfe2e5;
+}
+
+body.vscode-dark hr,
+body.vscode-high-contrast hr {
+	background-color: #e1e4e8;
+}

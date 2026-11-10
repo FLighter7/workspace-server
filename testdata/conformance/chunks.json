@@ -1,0 +1,36 @@
+{
+	"about": "A body of this many bytes goes out as binary messages of these sizes, after the frame that announces it.",
+	"cases": [
+		{
+			"bytes": 0,
+			"chunks": []
+		},
+		{
+			"bytes": 1,
+			"chunks": [
+				1
+			]
+		},
+		{
+			"bytes": 16384,
+			"chunks": [
+				16384
+			]
+		},
+		{
+			"bytes": 16385,
+			"chunks": [
+				16384,
+				1
+			]
+		},
+		{
+			"bytes": 40000,
+			"chunks": [
+				16384,
+				16384,
+				7232
+			]
+		}
+	]
+}

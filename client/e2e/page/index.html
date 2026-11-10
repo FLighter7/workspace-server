@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<title>workspace-client e2e</title>
+	</head>
+	<body>
+		<script type="module">
+			import * as harness from './harness.js';
+
+			window.harness = harness;
+			document.body.dataset.ready = 'true';
+		</script>
+	</body>
+</html>

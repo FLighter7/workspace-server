@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # release.yml runs these checks before it builds anything.
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: vet
+        run: go vet ./...
+      - name: vet for Windows
+        run: GOOS=windows go vet ./...
+      - name: vet for macOS
+        run: GOOS=darwin go vet ./...
+      - name: vet for FreeBSD (the "not supported" autostart path)
+        run: GOOS=freebsd go vet ./...
+      - name: test
+        run: go test -race ./...
+
+  client:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: client/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: lint, format, typecheck, tests, build
+        run: pnpm run check
+      # The e2e builds the server from this checkout with Go.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: e2e
+        run: pnpm run test:e2e

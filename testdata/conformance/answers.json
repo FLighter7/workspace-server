@@ -1,0 +1,104 @@
+{
+	"about": "The SDP answer a client builds for the server, from its own offer (whose a=mid it copies), the pairing data, a fresh ICE ufrag and the time in milliseconds. offer and answer are lists of lines: join them with CRLF and end with CRLF.",
+	"cases": [
+		{
+			"name": "the .local name first, then two LAN addresses; the offer names its media \"data\"",
+			"offer": [
+				"v=0",
+				"o=- 1 2 IN IP4 127.0.0.1",
+				"s=-",
+				"t=0 0",
+				"a=group:BUNDLE data",
+				"m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
+				"c=IN IP4 0.0.0.0",
+				"a=mid:data"
+			],
+			"target": {
+				"password": "abcdefghijklmnopqrstuvwx",
+				"fingerprint": "0A:1B:2C:3D:4E:5F:60:71:82:93:A4:B5:C6:D7:E8:F9:0A:1B:2C:3D:4E:5F:60:71:82:93:A4:B5:C6:D7:E8:F9",
+				"port": 47800,
+				"hosts": [
+					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+					"192.168.1.20",
+					"10.0.0.5"
+				]
+			},
+			"ufrag": "Ab12Cd34",
+			"now": 1762790400000,
+			"answer": [
+				"v=0",
+				"o=- 1762790400000 2 IN IP4 127.0.0.1",
+				"s=-",
+				"t=0 0",
+				"a=group:BUNDLE data",
+				"a=ice-lite",
+				"a=msid-semantic: WMS",
+				"m=application 47800 UDP/DTLS/SCTP webrtc-datachannel",
+				"c=IN IP4 0.0.0.0",
+				"a=candidate:1 1 udp 2130706431 0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local 47800 typ host",
+				"a=candidate:2 1 udp 2130706430 192.168.1.20 47800 typ host",
+				"a=candidate:3 1 udp 2130706429 10.0.0.5 47800 typ host",
+				"a=end-of-candidates",
+				"a=ice-ufrag:Ab12Cd34",
+				"a=ice-pwd:abcdefghijklmnopqrstuvwx",
+				"a=fingerprint:sha-256 0A:1B:2C:3D:4E:5F:60:71:82:93:A4:B5:C6:D7:E8:F9:0A:1B:2C:3D:4E:5F:60:71:82:93:A4:B5:C6:D7:E8:F9",
+				"a=setup:passive",
+				"a=mid:data",
+				"a=sctp-port:5000",
+				"a=max-message-size:262144"
+			]
+		},
+		{
+			"name": "a browser-like offer with media id 0 and one host",
+			"offer": [
+				"v=0",
+				"o=- 4611731400430051336 2 IN IP4 127.0.0.1",
+				"s=-",
+				"t=0 0",
+				"a=group:BUNDLE 0",
+				"a=extmap-allow-mixed",
+				"a=msid-semantic: WMS",
+				"m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
+				"c=IN IP4 0.0.0.0",
+				"a=ice-ufrag:x9Yz",
+				"a=ice-pwd:abcdefghijklmnopqrstuvwxyz",
+				"a=ice-options:trickle",
+				"a=fingerprint:sha-256 0A:1B:2C:3D:4E:5F:60:71:82:93:A4:B5:C6:D7:E8:F9:0A:1B:2C:3D:4E:5F:60:71:82:93:A4:B5:C6:D7:E8:F9",
+				"a=setup:actpass",
+				"a=mid:0",
+				"a=sctp-port:5000",
+				"a=max-message-size:262144"
+			],
+			"target": {
+				"password": "ZYXWVUTSRQPONMLKJIHGFEDC",
+				"fingerprint": "FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF",
+				"port": 1,
+				"hosts": [
+					"7c9e6679-7425-40de-944b-e07fc1f90ae7.local"
+				]
+			},
+			"ufrag": "zzzzzzzz",
+			"now": 1,
+			"answer": [
+				"v=0",
+				"o=- 1 2 IN IP4 127.0.0.1",
+				"s=-",
+				"t=0 0",
+				"a=group:BUNDLE 0",
+				"a=ice-lite",
+				"a=msid-semantic: WMS",
+				"m=application 1 UDP/DTLS/SCTP webrtc-datachannel",
+				"c=IN IP4 0.0.0.0",
+				"a=candidate:1 1 udp 2130706431 7c9e6679-7425-40de-944b-e07fc1f90ae7.local 1 typ host",
+				"a=end-of-candidates",
+				"a=ice-ufrag:zzzzzzzz",
+				"a=ice-pwd:ZYXWVUTSRQPONMLKJIHGFEDC",
+				"a=fingerprint:sha-256 FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF",
+				"a=setup:passive",
+				"a=mid:0",
+				"a=sctp-port:5000",
+				"a=max-message-size:262144"
+			]
+		}
+	]
+}

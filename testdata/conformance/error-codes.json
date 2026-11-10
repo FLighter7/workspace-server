@@ -1,0 +1,14 @@
+{
+	"about": "Every code the server sends in an error frame. A client reads any other code as internal, a temporary error.",
+	"server": [
+		"protocol",
+		"unknownApp",
+		"badSecret",
+		"badToken",
+		"blocked",
+		"tooLarge",
+		"notJson",
+		"notAuthenticated",
+		"internal"
+	]
+}

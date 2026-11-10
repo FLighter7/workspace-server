@@ -1,0 +1,8 @@
+{
+	"about": "Numbers both sides hold as constants.",
+	"proto": 1,
+	"pairingCodePrefix": "wsrv1.",
+	"chunkBytes": 16384,
+	"bufferHighBytes": 1048576,
+	"bufferLowBytes": 262144
+}

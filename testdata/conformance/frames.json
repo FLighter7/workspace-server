@@ -1,0 +1,617 @@
+{
+	"about": [
+		"Exchanges. A session is new, or authenticated as device \"d1\" of app \"todo\". With the backend in the state given, a client call sends the client frame (and clientBody, if any); the server answers with the server frames (and serverBody); the call resolves with result or fails with the error code. push is a changed frame the server sends unasked.",
+		"closes: the server closes the channel after its frames. An error frame also carries a message, English text for a developer whose wording is the server's; it is not compared.",
+		"Bodies are UTF-8 text. backend keys: welcome, helloError, paired, pairError, head, doc, put ({stored} or {conflict}), putError.",
+		"tolerated: frames one side accepts although the other side never sends them."
+	],
+	"exchanges": [
+		{
+			"name": "hello",
+			"session": "new",
+			"backend": {
+				"welcome": {
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": "e1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					]
+				}
+			},
+			"call": {
+				"method": "hello",
+				"app": "todo",
+				"device": "Dev0123456789ab",
+				"token": "tok-hello"
+			},
+			"client": {
+				"t": "hello",
+				"proto": 1,
+				"app": "todo",
+				"device": "Dev0123456789ab",
+				"token": "tok-hello"
+			},
+			"server": [
+				{
+					"t": "welcome",
+					"proto": 1,
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": "e1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					]
+				}
+			],
+			"result": {
+				"serverId": "Ab3dEf6hIj9k",
+				"name": "Desk",
+				"etag": "e1",
+				"hosts": [
+					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+					"192.168.1.20"
+				]
+			}
+		},
+		{
+			"name": "hello for another app, which has no document yet",
+			"session": "new",
+			"backend": {
+				"welcome": {
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": null,
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					]
+				}
+			},
+			"call": {
+				"method": "hello",
+				"app": "notes",
+				"device": "Dev0123456789ab",
+				"token": "tok-hello"
+			},
+			"client": {
+				"t": "hello",
+				"proto": 1,
+				"app": "notes",
+				"device": "Dev0123456789ab",
+				"token": "tok-hello"
+			},
+			"server": [
+				{
+					"t": "welcome",
+					"proto": 1,
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": null,
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					]
+				}
+			],
+			"result": {
+				"serverId": "Ab3dEf6hIj9k",
+				"name": "Desk",
+				"etag": null,
+				"hosts": [
+					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+					"192.168.1.20"
+				]
+			}
+		},
+		{
+			"name": "hello with a token the server does not know",
+			"session": "new",
+			"backend": {
+				"helloError": "badToken"
+			},
+			"call": {
+				"method": "hello",
+				"app": "todo",
+				"device": "Dev0123456789ab",
+				"token": "stale"
+			},
+			"client": {
+				"t": "hello",
+				"proto": 1,
+				"app": "todo",
+				"device": "Dev0123456789ab",
+				"token": "stale"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "badToken"
+				}
+			],
+			"closes": true,
+			"error": "badToken"
+		},
+		{
+			"name": "pair",
+			"session": "new",
+			"backend": {
+				"paired": {
+					"device": "Dev0123456789ab",
+					"token": "tok-paired"
+				},
+				"welcome": {
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": "e1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					]
+				}
+			},
+			"call": {
+				"method": "pair",
+				"app": "todo",
+				"secret": "q83vEjRWeJCrze8SNFZ4kA",
+				"name": "iPhone Safari (app)"
+			},
+			"client": {
+				"t": "pair",
+				"proto": 1,
+				"app": "todo",
+				"secret": "q83vEjRWeJCrze8SNFZ4kA",
+				"name": "iPhone Safari (app)"
+			},
+			"server": [
+				{
+					"t": "paired",
+					"device": "Dev0123456789ab",
+					"token": "tok-paired"
+				},
+				{
+					"t": "welcome",
+					"proto": 1,
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": "e1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					]
+				}
+			],
+			"result": {
+				"device": "Dev0123456789ab",
+				"token": "tok-paired",
+				"welcome": {
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": "e1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					]
+				}
+			}
+		},
+		{
+			"name": "pair for an app the server does not serve yet",
+			"session": "new",
+			"backend": {
+				"pairError": "unknownApp"
+			},
+			"call": {
+				"method": "pair",
+				"app": "notes",
+				"secret": "q83vEjRWeJCrze8SNFZ4kA",
+				"name": "Windows Edge"
+			},
+			"client": {
+				"t": "pair",
+				"proto": 1,
+				"app": "notes",
+				"secret": "q83vEjRWeJCrze8SNFZ4kA",
+				"name": "Windows Edge"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "unknownApp"
+				}
+			],
+			"closes": false,
+			"error": "unknownApp"
+		},
+		{
+			"name": "pair with a used secret",
+			"session": "new",
+			"backend": {
+				"pairError": "badSecret"
+			},
+			"call": {
+				"method": "pair",
+				"app": "todo",
+				"secret": "used",
+				"name": "Windows Edge"
+			},
+			"client": {
+				"t": "pair",
+				"proto": 1,
+				"app": "todo",
+				"secret": "used",
+				"name": "Windows Edge"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "badSecret"
+				}
+			],
+			"closes": true,
+			"error": "badSecret"
+		},
+		{
+			"name": "head",
+			"session": "authenticated",
+			"backend": {
+				"head": "e1"
+			},
+			"call": {
+				"method": "head"
+			},
+			"client": {
+				"t": "head"
+			},
+			"server": [
+				{
+					"t": "head",
+					"etag": "e1"
+				}
+			],
+			"result": "e1"
+		},
+		{
+			"name": "head when there is no document",
+			"session": "authenticated",
+			"backend": {
+				"head": null
+			},
+			"call": {
+				"method": "head"
+			},
+			"client": {
+				"t": "head"
+			},
+			"server": [
+				{
+					"t": "head",
+					"etag": null
+				}
+			],
+			"result": null
+		},
+		{
+			"name": "head before hello",
+			"session": "new",
+			"backend": {},
+			"call": {
+				"method": "head"
+			},
+			"client": {
+				"t": "head"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "notAuthenticated"
+				}
+			],
+			"closes": false,
+			"error": "notAuthenticated"
+		},
+		{
+			"name": "get",
+			"session": "authenticated",
+			"backend": {
+				"doc": {
+					"etag": "e1",
+					"body": "{\"items\":[]}"
+				}
+			},
+			"call": {
+				"method": "get"
+			},
+			"client": {
+				"t": "get"
+			},
+			"server": [
+				{
+					"t": "doc",
+					"etag": "e1",
+					"bytes": 12
+				}
+			],
+			"serverBody": "{\"items\":[]}",
+			"result": {
+				"etag": "e1",
+				"body": "{\"items\":[]}"
+			}
+		},
+		{
+			"name": "get when there is no document",
+			"session": "authenticated",
+			"backend": {
+				"doc": {
+					"etag": null,
+					"body": ""
+				}
+			},
+			"call": {
+				"method": "get"
+			},
+			"client": {
+				"t": "get"
+			},
+			"server": [
+				{
+					"t": "doc",
+					"etag": null,
+					"bytes": 0
+				}
+			],
+			"serverBody": "",
+			"result": {
+				"etag": null,
+				"body": ""
+			}
+		},
+		{
+			"name": "put",
+			"session": "authenticated",
+			"backend": {
+				"put": {
+					"stored": "e2"
+				}
+			},
+			"call": {
+				"method": "put",
+				"ifEtag": "e1",
+				"body": "{\"a\":1}"
+			},
+			"client": {
+				"t": "put",
+				"ifEtag": "e1",
+				"bytes": 7
+			},
+			"clientBody": "{\"a\":1}",
+			"server": [
+				{
+					"t": "stored",
+					"etag": "e2"
+				}
+			],
+			"result": {
+				"stored": true,
+				"etag": "e2"
+			}
+		},
+		{
+			"name": "put when the client believes there is no document",
+			"session": "authenticated",
+			"backend": {
+				"put": {
+					"stored": "e1"
+				}
+			},
+			"call": {
+				"method": "put",
+				"ifEtag": null,
+				"body": "{}"
+			},
+			"client": {
+				"t": "put",
+				"ifEtag": null,
+				"bytes": 2
+			},
+			"clientBody": "{}",
+			"server": [
+				{
+					"t": "stored",
+					"etag": "e1"
+				}
+			],
+			"result": {
+				"stored": true,
+				"etag": "e1"
+			}
+		},
+		{
+			"name": "put after another device wrote first",
+			"session": "authenticated",
+			"backend": {
+				"put": {
+					"conflict": "e3"
+				}
+			},
+			"call": {
+				"method": "put",
+				"ifEtag": "e1",
+				"body": "{}"
+			},
+			"client": {
+				"t": "put",
+				"ifEtag": "e1",
+				"bytes": 2
+			},
+			"clientBody": "{}",
+			"server": [
+				{
+					"t": "conflict",
+					"etag": "e3"
+				}
+			],
+			"result": {
+				"stored": false,
+				"etag": "e3"
+			}
+		},
+		{
+			"name": "put that conflicts with no document",
+			"session": "authenticated",
+			"backend": {
+				"put": {
+					"conflict": null
+				}
+			},
+			"call": {
+				"method": "put",
+				"ifEtag": "e1",
+				"body": "{}"
+			},
+			"client": {
+				"t": "put",
+				"ifEtag": "e1",
+				"bytes": 2
+			},
+			"clientBody": "{}",
+			"server": [
+				{
+					"t": "conflict",
+					"etag": null
+				}
+			],
+			"result": {
+				"stored": false,
+				"etag": null
+			}
+		},
+		{
+			"name": "put of a body that is not JSON",
+			"session": "authenticated",
+			"backend": {
+				"putError": "notJson"
+			},
+			"call": {
+				"method": "put",
+				"ifEtag": "e1",
+				"body": "nope"
+			},
+			"client": {
+				"t": "put",
+				"ifEtag": "e1",
+				"bytes": 4
+			},
+			"clientBody": "nope",
+			"server": [
+				{
+					"t": "error",
+					"code": "notJson"
+				}
+			],
+			"closes": false,
+			"error": "notJson"
+		},
+		{
+			"name": "forget",
+			"session": "authenticated",
+			"backend": {},
+			"call": {
+				"method": "forget"
+			},
+			"client": {
+				"t": "forget"
+			},
+			"server": [],
+			"closes": true,
+			"result": null
+		},
+		{
+			"name": "changed",
+			"session": "authenticated",
+			"backend": {},
+			"push": "e2",
+			"server": [
+				{
+					"t": "changed",
+					"etag": "e2"
+				}
+			],
+			"result": "e2"
+		}
+	],
+	"tolerated": {
+		"client": [
+			{
+				"name": "a put with no ifEtag reads as null",
+				"frame": {
+					"t": "put",
+					"bytes": 2
+				},
+				"body": "{}",
+				"ifEtag": null
+			},
+			{
+				"name": "a hello with a field the server does not know",
+				"frame": {
+					"t": "hello",
+					"proto": 1,
+					"app": "todo",
+					"device": "Dev0123456789ab",
+					"token": "tok-hello",
+					"future": true
+				}
+			}
+		],
+		"server": [
+			{
+				"name": "a welcome with a field the client does not know",
+				"call": {
+					"method": "hello",
+					"app": "todo",
+					"device": "Dev0123456789ab",
+					"token": "tok-hello"
+				},
+				"frames": [
+					{
+						"t": "welcome",
+						"proto": 1,
+						"serverId": "Ab3dEf6hIj9k",
+						"name": "Desk",
+						"etag": "e1",
+						"hosts": [
+							"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+							"192.168.1.20"
+						],
+						"future": 1
+					}
+				],
+				"result": {
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": "e1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					]
+				}
+			},
+			{
+				"name": "an error code the client does not know reads as internal",
+				"call": {
+					"method": "head"
+				},
+				"frames": [
+					{
+						"t": "error",
+						"code": "somethingNew",
+						"message": "a code from a newer server"
+					}
+				],
+				"error": "internal"
+			}
+		]
+	}
+}

@@ -1,0 +1,61 @@
+{
+	"name": "@flighter7/workspace-client",
+	"version": "0.1.0",
+	"description": "The client for workspace-server: pair a device, reach the server over WebRTC on the local network, and keep an app's document in sync.",
+	"license": "CC-BY-NC-ND-4.0",
+	"author": "Alexander Gerasimov (FLighter)",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/FLighter7/workspace-server.git",
+		"directory": "client"
+	},
+	"homepage": "https://github.com/FLighter7/workspace-server/tree/main/client#readme",
+	"keywords": [
+		"workspace-server",
+		"webrtc",
+		"sync",
+		"local-first"
+	],
+	"type": "module",
+	"sideEffects": false,
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		},
+		"./testing": {
+			"types": "./dist/testing/index.d.ts",
+			"default": "./dist/testing/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"src"
+	],
+	"packageManager": "pnpm@10.33.0",
+	"scripts": {
+		"build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"test:e2e": "pnpm run build && playwright test",
+		"lint": "eslint .",
+		"format": "prettier --write .",
+		"format:check": "prettier --check .",
+		"check": "pnpm run lint && pnpm run format:check && pnpm run typecheck && pnpm run test && pnpm run build",
+		"prepublishOnly": "pnpm run check",
+		"prepack": "node -e \"require('fs').copyFileSync('../LICENSE','LICENSE')\"",
+		"postpack": "node -e \"require('fs').rmSync('LICENSE',{force:true})\""
+	},
+	"devDependencies": {
+		"@eslint/js": "^10.0.1",
+		"@playwright/test": "^1.62.1",
+		"@types/node": "^26.1.2",
+		"eslint": "^10.8.0",
+		"globals": "^16.5.0",
+		"prettier": "^3.9.6",
+		"typescript": "~6.0.3",
+		"typescript-eslint": "^8.66.0",
+		"vitest": "^4.1.10"
+	}
+}

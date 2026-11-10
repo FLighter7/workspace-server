@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+test-results/
+playwright-report/
+# Copied from the repository root while packing; see prepack in package.json.
+LICENSE
+*.tgz

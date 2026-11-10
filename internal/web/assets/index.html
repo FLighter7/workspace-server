@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="{{.Lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>workspace-server</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/assets/style.css">
+<script type="application/json" id="strings">{{.T}}</script>
+<script src="/assets/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <p class="brand">workspace-server</p>
+    <nav aria-label="{{.T.sections}}">
+      <a href="#server" aria-current="page">{{.T.tabServer}}</a>
+      <a href="#apps">{{.T.tabApps}}</a>
+      <a href="#devices">{{.T.tabDevices}}</a>
+      <a href="#pair">{{.T.tabPair}}</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section id="server" aria-labelledby="server-h">
+    <h1 id="server-h">{{.T.tabServer}}</h1>
+    <p class="msg" id="server-msg" role="status"></p>
+    <dl class="facts" id="server-facts"></dl>
+
+    <form id="server-form" class="form">
+      <div class="field">
+        <label for="server-name">{{.T.serverName}}</label>
+        <input id="server-name" name="name" required autocomplete="off" aria-describedby="server-name-hint">
+        <p class="hint" id="server-name-hint">{{.T.serverNameHint}}</p>
+      </div>
+      <div class="field">
+        <label for="udp-port">{{.T.udpPort}}</label>
+        <input id="udp-port" name="udpPort" type="number" inputmode="numeric" min="1" max="65535" step="1" required aria-describedby="udp-warning">
+        <p class="warning" id="udp-warning">{{.T.udpWarning}}</p>
+      </div>
+      <div class="field">
+        <label for="http-port">{{.T.httpPort}}</label>
+        <input id="http-port" name="httpPort" type="number" inputmode="numeric" min="1" max="65535" step="1" required aria-describedby="http-hint">
+        <p class="hint" id="http-hint">{{.T.httpHint}}</p>
+      </div>
+      <div class="actions start">
+        <button type="submit" class="primary">{{.T.save}}</button>
+      </div>
+    </form>
+
+    <form id="data-form" class="form">
+      <div class="field wide">
+        <label for="data-dir">{{.T.dataDirLabel}}</label>
+        <input id="data-dir" name="dataDir" required autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="data-dir-hint">
+        <p class="hint" id="data-dir-hint">{{.T.dataDirHint}}</p>
+      </div>
+      <div class="actions start">
+        <button type="submit" id="data-dir-change">{{.T.dataDirChange}}</button>
+      </div>
+      <p class="msg" id="data-msg" role="status"></p>
+    </form>
+
+    <div id="manage">
+      <h2>{{.T.manageTitle}}</h2>
+      <p class="hint">{{.T.manageIntro}}</p>
+      <div class="actions start">
+        <button type="button" id="btn-stop">{{.T.stopButton}}</button>
+        <button type="button" class="danger" id="btn-reset">{{.T.resetButton}}</button>
+        <button type="button" class="danger" id="btn-delete-server">{{.T.deleteServerButton}}</button>
+      </div>
+      <p class="msg" id="manage-msg" role="status"></p>
+    </div>
+  </section>
+
+  <section id="apps" aria-labelledby="apps-h" hidden>
+    <h1 id="apps-h">{{.T.tabApps}}</h1>
+    <p class="msg" id="apps-msg" role="status"></p>
+    <p class="empty" id="apps-empty" hidden>{{.T.noApps}}</p>
+    <ul class="cards" id="apps-list"></ul>
+
+    <h2>{{.T.addApp}}</h2>
+    <form id="add-form" class="form">
+      <div class="field">
+        <label for="add-id">{{.T.appId}}</label>
+        <input id="add-id" name="id" required maxlength="64" pattern="[a-z0-9\-]{1,64}" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="add-id-hint">
+        <p class="hint" id="add-id-hint">{{.T.appIdHint}}</p>
+      </div>
+      <div class="field">
+        <label for="add-name">{{.T.appName}}</label>
+        <input id="add-name" name="name" autocomplete="off" aria-describedby="add-name-hint">
+        <p class="hint" id="add-name-hint">{{.T.appNameHint}}</p>
+      </div>
+      <div class="field">
+        <label for="add-history">{{.T.history}}</label>
+        <input id="add-history" name="history" type="number" inputmode="numeric" min="1" max="100" step="1" value="{{.History}}" required>
+      </div>
+      <div class="field">
+        <label for="add-max">{{.T.maxBytes}}</label>
+        <input id="add-max" name="maxBytes" type="number" inputmode="numeric" min="1024" max="1073741824" step="1" value="{{.MaxBytes}}" required>
+      </div>
+      <div class="actions start">
+        <button type="submit" class="primary">{{.T.add}}</button>
+      </div>
+      <p class="msg" id="add-msg" role="status"></p>
+    </form>
+  </section>
+
+  <section id="devices" aria-labelledby="devices-h" hidden>
+    <h1 id="devices-h">{{.T.tabDevices}}</h1>
+    <p class="msg" id="devices-msg" role="status"></p>
+    <p class="empty" id="devices-empty" hidden>{{.T.noDevices}}</p>
+    <div id="devices-list"></div>
+  </section>
+
+  <section id="pair" aria-labelledby="pair-h" hidden>
+    <h1 id="pair-h">{{.T.tabPair}}</h1>
+    <p>{{.T.pairIntro}}</p>
+    <p class="hint">{{.T.pairRules}}</p>
+    <div class="actions start">
+      <button type="button" class="primary" id="pair-create">{{.T.newCode}}</button>
+    </div>
+    <p class="msg" id="pair-msg" role="status"></p>
+    <div class="code" id="pair-code" hidden>
+      <img class="qr" id="pair-qr" alt="{{.T.qrAlt}}" width="512" height="512">
+      <p class="timer" id="pair-timer"></p>
+      <div class="field wide">
+        <label for="pair-text">{{.T.codeText}}</label>
+        <textarea id="pair-text" rows="4" readonly spellcheck="false"></textarea>
+      </div>
+      <div class="actions start">
+        <button type="button" id="pair-copy">{{.T.copy}}</button>
+      </div>
+    </div>
+    <p id="pair-expired" hidden>{{.T.expired}}</p>
+
+    <div id="refusals" hidden>
+      <h2>{{.T.refusedTitle}}</h2>
+      <ul class="cards" id="refusals-list"></ul>
+    </div>
+  </section>
+
+  <section id="stopped" aria-labelledby="stopped-h" hidden>
+    <h1 id="stopped-h" tabindex="-1">{{.T.stoppedTitle}}</h1>
+    <p id="stopped-text"></p>
+  </section>
+</main>
+
+<dialog id="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-text">
+  <h2 id="confirm-title"></h2>
+  <p id="confirm-text"></p>
+  <div class="actions">
+    <button type="button" id="confirm-cancel">{{.T.cancel}}</button>
+    <button type="button" class="danger" id="confirm-ok"></button>
+  </div>
+</dialog>
+
+<dialog id="wipe" aria-labelledby="wipe-title" aria-describedby="wipe-text">
+  <h2 id="wipe-title"></h2>
+  <p id="wipe-text"></p>
+  <dl class="facts" id="wipe-facts"></dl>
+  <p class="msg" id="wipe-msg" role="status"></p>
+  <div class="actions">
+    <button type="button" id="wipe-cancel">{{.T.cancel}}</button>
+    <button type="button" class="danger" id="wipe-ok"></button>
+  </div>
+</dialog>
+
+<dialog id="delete" aria-labelledby="delete-title">
+  <h2 id="delete-title"></h2>
+  <p>{{.T.deleteText}}</p>
+  <dl class="facts" id="delete-facts"></dl>
+  <p id="delete-download"></p>
+  <form id="delete-form" class="form">
+    <div class="field wide">
+      <label for="delete-confirm" id="delete-label"></label>
+      <input id="delete-confirm" required autocomplete="off" autocapitalize="none" spellcheck="false">
+    </div>
+    <p class="msg" id="delete-msg" role="status"></p>
+    <div class="actions">
+      <button type="button" id="delete-cancel">{{.T.cancel}}</button>
+      <button type="submit" class="danger" id="delete-ok" disabled>{{.T.deleteForGood}}</button>
+    </div>
+  </form>
+</dialog>
+</body>
+</html>

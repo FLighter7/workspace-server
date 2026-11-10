@@ -1,0 +1,172 @@
+{
+	"about": "Pairing codes: a valid code decodes to fields (the JSON inside it) and parses to what a client keeps; an invalid one is refused with the client error code given. The server never decodes a code, so invalid codes are the client's verdicts.",
+	"valid": [
+		{
+			"name": "a server with a .local name and two LAN addresses",
+			"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOlsiMGI3YzVhNTItNmEzZS00ZDJiLTlmMWUtN2QyYzNiNGE1ZjYwLmxvY2FsIiwiMTkyLjE2OC4xLjIwIiwiMTAuMC4wLjUiXSwicyI6InE4M3ZFalJXZUpDcnplOFNORlo0a0EifQ",
+			"fields": {
+				"v": 1,
+				"id": "Ab3dEf6hIj9k",
+				"n": "Desk",
+				"p": "abcdefghijklmnopqrstuvwx",
+				"f": "ChssPU5fYHGCk6S1xtfo-QobLD1OX2BxgpOktcbX6Pk",
+				"o": 47800,
+				"h": [
+					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+					"192.168.1.20",
+					"10.0.0.5"
+				],
+				"s": "q83vEjRWeJCrze8SNFZ4kA"
+			},
+			"parsed": {
+				"serverId": "Ab3dEf6hIj9k",
+				"name": "Desk",
+				"secret": "q83vEjRWeJCrze8SNFZ4kA",
+				"password": "abcdefghijklmnopqrstuvwx",
+				"fingerprint": "0A:1B:2C:3D:4E:5F:60:71:82:93:A4:B5:C6:D7:E8:F9:0A:1B:2C:3D:4E:5F:60:71:82:93:A4:B5:C6:D7:E8:F9",
+				"port": 47800,
+				"hosts": [
+					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+					"192.168.1.20",
+					"10.0.0.5"
+				]
+			}
+		},
+		{
+			"name": "a non-ASCII server name, port 1, a fingerprint of 0xff bytes",
+			"code": "wsrv1.eyJ2IjoxLCJpZCI6Ilp6OVl5OFh4N1d3NiIsIm4iOiLQoNCw0LHQvtGH0LjQuSDRgdGC0L7QuyIsInAiOiJaWVhXVlVUU1JRUE9OTUxLSklIR0ZFREMiLCJmIjoiX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fOCIsIm8iOjEsImgiOlsiN2M5ZTY2NzktNzQyNS00MGRlLTk0NGItZTA3ZmMxZjkwYWU3LmxvY2FsIl0sInMiOiJBQUFBQUFBQUFBQUFBQUFBQUFBQUFBIn0",
+			"fields": {
+				"v": 1,
+				"id": "Zz9Yy8Xx7Ww6",
+				"n": "Рабочий стол",
+				"p": "ZYXWVUTSRQPONMLKJIHGFEDC",
+				"f": "__________________________________________8",
+				"o": 1,
+				"h": [
+					"7c9e6679-7425-40de-944b-e07fc1f90ae7.local"
+				],
+				"s": "AAAAAAAAAAAAAAAAAAAAAA"
+			},
+			"parsed": {
+				"serverId": "Zz9Yy8Xx7Ww6",
+				"name": "Рабочий стол",
+				"secret": "AAAAAAAAAAAAAAAAAAAAAA",
+				"password": "ZYXWVUTSRQPONMLKJIHGFEDC",
+				"fingerprint": "FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF:FF",
+				"port": 1,
+				"hosts": [
+					"7c9e6679-7425-40de-944b-e07fc1f90ae7.local"
+				]
+			}
+		}
+	],
+	"invalid": [
+		{
+			"name": "plain text",
+			"code": "hello",
+			"error": "notPairingCode"
+		},
+		{
+			"name": "a web address",
+			"code": "https://example.com/",
+			"error": "notPairingCode"
+		},
+		{
+			"name": "base64 padding is not allowed",
+			"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOlsiMGI3YzVhNTItNmEzZS00ZDJiLTlmMWUtN2QyYzNiNGE1ZjYwLmxvY2FsIiwiMTkyLjE2OC4xLjIwIiwiMTAuMC4wLjUiXSwicyI6InE4M3ZFalJXZUpDcnplOFNORlo0a0EifQ=",
+			"error": "notPairingCode"
+		},
+		{
+			"name": "a newer code version",
+			"code": "wsrv2.e30",
+			"error": "tooNew"
+		},
+		{
+			"name": "a length no base64 string has",
+			"code": "wsrv1.a",
+			"error": "damaged"
+		},
+		{
+			"name": "not JSON",
+			"code": "wsrv1.bm90IGpzb24",
+			"error": "damaged"
+		},
+		{
+			"name": "a JSON array",
+			"code": "wsrv1.W10",
+			"error": "damaged"
+		},
+		{
+			"name": "bytes that are not UTF-8",
+			"code": "wsrv1.__79",
+			"error": "damaged"
+		},
+		{
+			"name": "v is not 1",
+			"code": "wsrv1.eyJ2IjoyLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOlsiMGI3YzVhNTItNmEzZS00ZDJiLTlmMWUtN2QyYzNiNGE1ZjYwLmxvY2FsIiwiMTkyLjE2OC4xLjIwIiwiMTAuMC4wLjUiXSwicyI6InE4M3ZFalJXZUpDcnplOFNORlo0a0EifQ",
+			"error": "damaged"
+		},
+		{
+			"name": "an empty server id",
+			"code": "wsrv1.eyJ2IjoxLCJpZCI6IiIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOlsiMGI3YzVhNTItNmEzZS00ZDJiLTlmMWUtN2QyYzNiNGE1ZjYwLmxvY2FsIiwiMTkyLjE2OC4xLjIwIiwiMTAuMC4wLjUiXSwicyI6InE4M3ZFalJXZUpDcnplOFNORlo0a0EifQ",
+			"error": "damaged"
+		},
+		{
+			"name": "no secret",
+			"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOlsiMGI3YzVhNTItNmEzZS00ZDJiLTlmMWUtN2QyYzNiNGE1ZjYwLmxvY2FsIiwiMTkyLjE2OC4xLjIwIiwiMTAuMC4wLjUiXX0",
+			"error": "damaged"
+		},
+		{
+			"name": "an ICE password shorter than 22 characters",
+			"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dSIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOlsiMGI3YzVhNTItNmEzZS00ZDJiLTlmMWUtN2QyYzNiNGE1ZjYwLmxvY2FsIiwiMTkyLjE2OC4xLjIwIiwiMTAuMC4wLjUiXSwicyI6InE4M3ZFalJXZUpDcnplOFNORlo0a0EifQ",
+			"error": "damaged"
+		},
+		{
+			"name": "a fingerprint of 31 bytes",
+			"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNkEiLCJvIjo0NzgwMCwiaCI6WyIwYjdjNWE1Mi02YTNlLTRkMmItOWYxZS03ZDJjM2I0YTVmNjAubG9jYWwiLCIxOTIuMTY4LjEuMjAiLCIxMC4wLjAuNSJdLCJzIjoicTgzdkVqUldlSkNyemU4U05GWjRrQSJ9",
+			"error": "damaged"
+		},
+		{
+			"name": "a fingerprint that is not base64url",
+			"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJub3QrYmFzZTY0LyIsIm8iOjQ3ODAwLCJoIjpbIjBiN2M1YTUyLTZhM2UtNGQyYi05ZjFlLTdkMmMzYjRhNWY2MC5sb2NhbCIsIjE5Mi4xNjguMS4yMCIsIjEwLjAuMC41Il0sInMiOiJxODN2RWpSV2VKQ3J6ZThTTkZaNGtBIn0",
+			"error": "damaged"
+		},
+		{
+			"name": "port 0",
+			"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6MCwiaCI6WyIwYjdjNWE1Mi02YTNlLTRkMmItOWYxZS03ZDJjM2I0YTVmNjAubG9jYWwiLCIxOTIuMTY4LjEuMjAiLCIxMC4wLjAuNSJdLCJzIjoicTgzdkVqUldlSkNyemU4U05GWjRrQSJ9",
+			"error": "damaged"
+		},
+		{
+			"name": "port 65536",
+			"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NjU1MzYsImgiOlsiMGI3YzVhNTItNmEzZS00ZDJiLTlmMWUtN2QyYzNiNGE1ZjYwLmxvY2FsIiwiMTkyLjE2OC4xLjIwIiwiMTAuMC4wLjUiXSwicyI6InE4M3ZFalJXZUpDcnplOFNORlo0a0EifQ",
+			"error": "damaged"
+		},
+		{
+			"name": "a fractional port",
+			"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAuNSwiaCI6WyIwYjdjNWE1Mi02YTNlLTRkMmItOWYxZS03ZDJjM2I0YTVmNjAubG9jYWwiLCIxOTIuMTY4LjEuMjAiLCIxMC4wLjAuNSJdLCJzIjoicTgzdkVqUldlSkNyemU4U05GWjRrQSJ9",
+			"error": "damaged"
+		},
+		{
+			"name": "a port given as a string",
+			"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6IjQ3ODAwIiwiaCI6WyIwYjdjNWE1Mi02YTNlLTRkMmItOWYxZS03ZDJjM2I0YTVmNjAubG9jYWwiLCIxOTIuMTY4LjEuMjAiLCIxMC4wLjAuNSJdLCJzIjoicTgzdkVqUldlSkNyemU4U05GWjRrQSJ9",
+			"error": "damaged"
+		},
+		{
+			"name": "no hosts",
+			"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOltdLCJzIjoicTgzdkVqUldlSkNyemU4U05GWjRrQSJ9",
+			"error": "damaged"
+		},
+		{
+			"name": "an empty host",
+			"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOlsiIl0sInMiOiJxODN2RWpSV2VKQ3J6ZThTTkZaNGtBIn0",
+			"error": "damaged"
+		}
+	],
+	"tolerated": [
+		{
+			"name": "whitespace around the code is ignored",
+			"input": "  wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOlsiMGI3YzVhNTItNmEzZS00ZDJiLTlmMWUtN2QyYzNiNGE1ZjYwLmxvY2FsIiwiMTkyLjE2OC4xLjIwIiwiMTAuMC4wLjUiXSwicyI6InE4M3ZFalJXZUpDcnplOFNORlo0a0EifQ\n",
+			"same": "a server with a .local name and two LAN addresses"
+		}
+	]
+}
