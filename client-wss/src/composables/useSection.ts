@@ -1,15 +1,14 @@
 import { readonly, ref } from 'vue';
 import type { MessageKey } from '@/i18n';
 
-/** The page's sections, by the hash that shows each: #server, #apps, #devices, #pair. */
-export const SECTIONS = ['server', 'apps', 'devices', 'pair'] as const;
+/** The page's sections in the header's order, by hash: #server, #devices, #apps. */
+export const SECTIONS = ['server', 'devices', 'apps'] as const;
 export type Section = (typeof SECTIONS)[number];
 
 export const SECTION_TITLES: Record<Section, MessageKey> = {
 	server: 'tabServer',
-	apps: 'tabApps',
 	devices: 'tabDevices',
-	pair: 'tabPair',
+	apps: 'tabApps',
 };
 
 /** The section a hash shows; an unknown or empty one shows the server. */

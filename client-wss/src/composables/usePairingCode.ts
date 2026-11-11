@@ -2,8 +2,8 @@ import { reactive } from 'vue';
 import { serverApi } from '@/api/client';
 
 /**
- * The pairing code on screen. It outlives the Pair section, so that coming
- * back to it does not revoke a code still valid, and the Server section can
+ * The pairing code on screen. It outlives the pairing dialog, so that opening
+ * it again does not revoke a code still valid, and the Server section can
  * drop it when a change makes it wrong.
  */
 export const pairingCode = reactive({

@@ -5,6 +5,20 @@
 	--v-font-heading: var(--v-font-body);
 }
 
+// The scrollbar's room stays reserved, so a long section, a short one and an
+// open dialog lay the page out at the same width; reserved on both edges, the
+// centred column stays in the window's middle.
+html {
+	scrollbar-gutter: stable both-edges;
+}
+
+// Vuetify locks the page's scroll under a dialog and sets this, inline, to the
+// scrollbar's width, by which the page and the app bar are then padded; with
+// the room already kept, that padding would shift them a second time.
+html.v-overlay-scroll-blocked {
+	--v-scrollbar-offset: 0px !important;
+}
+
 code {
 	font-family: ui-monospace, 'Cascadia Mono', Consolas, 'Liberation Mono', monospace;
 	font-size: 0.9em;

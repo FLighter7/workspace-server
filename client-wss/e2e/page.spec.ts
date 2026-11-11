@@ -164,10 +164,10 @@ test('every section opens from the header, and the CSP blocks nothing', async ({
 	await expect(page.getByText('Server ID')).toBeVisible();
 	await expect(page.getByLabel('UDP port')).not.toHaveValue('');
 
+	await expect(nav(page).getByRole('link')).toHaveText(['Server', 'Devices', 'Apps']);
 	for (const [link, heading] of [
-		['Apps', 'Apps'],
 		['Devices', 'Devices'],
-		['Pair a device', 'Pair a device'],
+		['Apps', 'Apps'],
 		['Server', 'Server'],
 	]) {
 		await nav(page).getByRole('link', { name: link }).click();
@@ -228,14 +228,25 @@ test('an app is added and deleted', async ({ browser }) => {
 	await page.context().close();
 });
 
-test('the Pair section shows a code with its QR and countdown', async ({ browser }) => {
-	const page = await openPage(browser, '#pair');
+test('the pairing dialog on Devices shows a code with its QR and countdown', async ({
+	browser,
+}) => {
+	const page = await openPage(browser, '#devices');
 
-	const qr = page.getByRole('img', { name: 'The pairing code as a QR code' });
+	const open = page.getByRole('button', { name: 'Pair a device' });
+	await open.click();
+	const dialog = page.getByRole('dialog', { name: 'Pair a device' });
+	await expect(dialog.getByRole('heading', { level: 2, name: 'Pair a device' })).toBeFocused();
+
+	const qr = dialog.getByRole('img', { name: 'The pairing code as a QR code' });
 	await expect(qr).toBeVisible();
 	expect(await qr.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0);
-	await expect(page.getByText(/Valid for \d+:\d\d/)).toBeVisible();
-	await expect(page.getByLabel('The code as text')).not.toHaveValue('');
+	await expect(dialog.getByText(/Valid for \d+:\d\d/)).toBeVisible();
+	await expect(dialog.getByLabel('The code as text')).not.toHaveValue('');
+
+	await dialog.getByRole('button', { name: 'Close' }).click();
+	await expect(dialog).toBeHidden();
+	await expect(open).toBeFocused();
 
 	await expectNoCspViolations(page);
 	await page.context().close();
@@ -245,9 +256,9 @@ test('the language follows the browser and then the choice, which a reload keeps
 	browser,
 }) => {
 	for (const [locale, text, lang] of [
-		['ru-RU', 'Подключить устройство', 'ru'],
-		['pl-PL', 'Sparuj urządzenie', 'pl'],
-		['de-DE', 'Pair a device', 'en'],
+		['ru-RU', 'Устройства', 'ru'],
+		['pl-PL', 'Urządzenia', 'pl'],
+		['de-DE', 'Devices', 'en'],
 	]) {
 		const page = await openPage(browser, '', { locale });
 		await expect(nav(page).getByText(text)).toBeVisible();
@@ -258,11 +269,11 @@ test('the language follows the browser and then the choice, which a reload keeps
 	const page = await openPage(browser);
 	await page.getByRole('button', { name: 'Choose language' }).click();
 	await page.getByRole('dialog', { name: 'Language' }).getByText('Polski').click();
-	await expect(nav(page).getByText('Sparuj urządzenie')).toBeVisible();
+	await expect(nav(page).getByText('Urządzenia')).toBeVisible();
 	await expect(page.locator('html')).toHaveAttribute('lang', 'pl');
 
 	await page.reload();
-	await expect(nav(page).getByText('Sparuj urządzenie')).toBeVisible();
+	await expect(nav(page).getByText('Urządzenia')).toBeVisible();
 	await expectNoCspViolations(page);
 	await page.context().close();
 });

@@ -19,6 +19,16 @@
 
 .tab {
 	flex: none;
+
+	// Centred while they fit; auto margins, unlike justify-content, still let
+	// the first link scroll into view when they do not.
+	&:first-child {
+		margin-inline-start: auto;
+	}
+
+	&:last-child {
+		margin-inline-end: auto;
+	}
 	height: 100% !important;
 	text-transform: none;
 	letter-spacing: normal;
@@ -39,7 +49,7 @@
 <template>
 	<VApp>
 		<VAppBar border="b">
-			<p :class="$style.brand">workspace-server</p>
+			<p :class="$style.brand">Workspace Server</p>
 			<VSpacer />
 			<template #append>
 				<ThemeMenu />
@@ -67,9 +77,8 @@
 			<div :class="$style.main">
 				<StoppedPanel v-if="stopped" :text="stopped" />
 				<ServerSection v-else-if="section === 'server'" />
-				<AppsSection v-else-if="section === 'apps'" />
 				<DevicesSection v-else-if="section === 'devices'" />
-				<PairSection v-else />
+				<AppsSection v-else />
 			</div>
 		</VMain>
 
@@ -87,7 +96,6 @@ import { useAppLocale, useAppTheme } from '@/composables/useAppearance';
 import { SECTIONS, SECTION_TITLES, section, stopped } from '@/composables/useSection';
 import AppsSection from '@/sections/AppsSection.vue';
 import DevicesSection from '@/sections/DevicesSection.vue';
-import PairSection from '@/sections/PairSection.vue';
 import ServerSection from '@/sections/ServerSection.vue';
 import StoppedPanel from '@/sections/StoppedPanel.vue';
 

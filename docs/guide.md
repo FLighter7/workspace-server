@@ -101,7 +101,7 @@ On the first start the server creates its folder and an entry for the `todo` app
 
 ## The web page
 
-`http://localhost:47800/` opens only on this computer; other devices cannot reach it. It starts in the browser's language (English, Russian or Polish) and the system's light or dark theme; the two buttons at the top right change them, and the browser remembers the choice. It has four sections:
+`http://localhost:47800/` opens only on this computer; other devices cannot reach it. It starts in the browser's language (English, Russian or Polish) and the system's light or dark theme; the two buttons at the top right change them, and the browser remembers the choice. It has three sections:
 
 - **Server** (Сервер):
   - shows the name devices see, the computer's addresses, the server's `.local` name and whether it is published, and the two ports; a warning under the addresses means devices cannot connect at the moment (the reason is in `server.log`), and the server keeps trying;
@@ -111,17 +111,17 @@ On the first start the server creates its folder and an entry for the `todo` app
     - **Stop the server** stops it and stops it starting at login, like `stop`. Your data is kept.
     - **Delete data** starts the server over as if it were new: every app's documents and versions, the list of apps and the paired devices are deleted, and every device must pair again. The name, the ports and the data folder are kept. The question lists each app's data and lets you download it first.
     - **Delete the server and all data** stops the server and removes it from the computer, like `delete`: its data, its folders, the program file and the autostart.
+- **Devices** (Устройства):
+  - **Pair a device** at the top opens the pairing code;
+  - lists, for each app, its paired devices: when each paired, when it was last seen, and whether it is connected now;
+  - **Remove** disconnects a device and ends its access.
 - **Apps** (Приложения):
   - lists each app with its document size, last change, number of saved versions and number of devices;
   - here you add an app, or delete one together with its data and devices. Deleting shows exactly what goes, offers to download the current document first, and asks you to type the app's id.
-- **Devices** (Устройства):
-  - lists, for each app, its paired devices: when each paired, when it was last seen, and whether it is connected now;
-  - **Remove** disconnects a device and ends its access.
-- **Pair a device** (Подключить устройство): shows the pairing code.
 
 ## Pairing a device
 
-1. Open **Pair a device** on the web page. It shows a pairing code as a QR code and as text with a Copy button.
+1. On the web page, open **Devices** and press **Pair a device**. It shows a pairing code as a QR code and as text with a Copy button.
 2. In the app on your device, open its sync settings, and scan the QR code or paste the text.
 3. The device connects and is paired. From now on it syncs by itself whenever the app is open and the server is reachable.
 
@@ -222,7 +222,7 @@ To run a second, separate server, or one on other ports for one run:
 - **"another workspace-server is already using …":** a server is already running on that folder, but not on the port in its settings. Stop it, or open its page at the port you gave it.
 - **The window closes at once:** a server is probably running already, and its page opened in the browser. Otherwise run the file from a terminal to see the message.
 - **The pairing code expired:** press "New code".
-- **The app says the server does not know it:** the Pair a device page offers to add the app. Add it, then pair again.
+- **The app says the server does not know it:** the Pair a device window offers to add the app. Add it, then pair again.
 - **The web page does not open:** check that the server is running. If you changed the HTTP port, use the new one. `server.log` names the page's address.
 
 ## Known limits

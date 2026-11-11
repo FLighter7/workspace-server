@@ -4,6 +4,23 @@
 	color: rgb(var(--v-theme-warning));
 	opacity: 1;
 }
+
+// The danger zone, set apart by the theme's error colour.
+.danger {
+	min-width: 0;
+	margin: 2rem 0 0;
+	padding: 0.5rem 1rem 1rem;
+	border: 1px solid rgb(var(--v-theme-error));
+	border-radius: 0.5rem;
+}
+
+.legend {
+	padding-inline: 0.5rem;
+
+	h2 {
+		margin: 0;
+	}
+}
 </style>
 
 <template>
@@ -90,8 +107,11 @@
 			<StatusLine :message="dataMessage" />
 		</VForm>
 
-		<div>
-			<h2 :class="['text-title-large', s.subtitle]">{{ t('manageTitle') }}</h2>
+		<!-- The danger zone: every button here stops or wipes the server. -->
+		<fieldset :class="$style.danger">
+			<legend :class="$style.legend">
+				<h2 class="text-title-large">{{ t('manageTitle') }}</h2>
+			</legend>
 			<p class="text-medium-emphasis mb-4">{{ t('manageIntro') }}</p>
 			<div :class="s.actions">
 				<VBtn @click="stopServer">{{ t('stopButton') }}</VBtn>
@@ -99,7 +119,7 @@
 				<VBtn color="error" @click="deleteServer">{{ t('deleteServerButton') }}</VBtn>
 			</div>
 			<StatusLine :message="manageMessage" />
-		</div>
+		</fieldset>
 
 		<WipeDialog v-model="wipeOpen" :wipe="wipe" />
 	</section>
@@ -205,8 +225,8 @@ async function saveServer(): Promise<void> {
 		return;
 	}
 
-	// A code on screen carries the old port and name; the next visit to Pair
-	// issues a new one.
+	// A code on screen carries the old port and name; the pairing dialog
+	// issues a new one the next time it opens.
 	if (change.udpPort !== undefined || change.name !== undefined) dropCode();
 
 	if (change.httpPort !== undefined) {

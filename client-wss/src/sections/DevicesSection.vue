@@ -3,6 +3,9 @@
 		<h1 id="devices-h" tabindex="-1" :class="['text-headline-small', s.title]">
 			{{ t('tabDevices') }}
 		</h1>
+		<div :class="[s.actions, 'mb-4']">
+			<VBtn color="primary" variant="flat" @click="pairOpen = true">{{ t('pairDevice') }}</VBtn>
+		</div>
 		<StatusLine :message="message" />
 		<p v-if="loaded && devices.length === 0" class="text-medium-emphasis">{{ t('noDevices') }}</p>
 
@@ -32,6 +35,8 @@
 				</ItemCard>
 			</ul>
 		</div>
+
+		<PairDialog v-model="pairOpen" />
 	</section>
 </template>
 
@@ -51,6 +56,7 @@ import { useFormat } from '@/composables/useFormat';
 import { usePolling } from '@/composables/usePolling';
 import { rescueFocus } from '@/composables/useReturnFocus';
 import s from '@/styles/section.module.scss';
+import PairDialog from './PairDialog.vue';
 
 const { t } = useI18n();
 const format = useFormat();
@@ -59,6 +65,7 @@ const devices = ref<DeviceInfo[]>([]);
 const apps = ref<AppInfo[]>([]);
 const loaded = ref(false);
 const message = ref<Message | null>(null);
+const pairOpen = ref(false);
 
 /** The devices by app, each group under the app's name. */
 const groups = computed(() => {

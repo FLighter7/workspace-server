@@ -40,11 +40,12 @@ export function useReturnFocus(open: Ref<boolean>): void {
 
 /**
  * After a list reloads under an action of the user's, moves the focus to the
- * section's heading if the element that had it left with its row.
+ * section's heading, or to the given element, if the element that had it left
+ * with its row.
  */
-export async function rescueFocus(): Promise<void> {
+export async function rescueFocus(target?: HTMLElement | null): Promise<void> {
 	await nextTick();
 	if (document.activeElement === null || document.activeElement === document.body) {
-		document.querySelector<HTMLElement>('main h1')?.focus();
+		(target ?? document.querySelector<HTMLElement>('main h1'))?.focus();
 	}
 }

@@ -24,8 +24,7 @@
 </style>
 
 <template>
-	<section aria-labelledby="pair-h">
-		<h1 id="pair-h" tabindex="-1" :class="['text-headline-small', s.title]">{{ t('tabPair') }}</h1>
+	<div ref="panel">
 		<p class="mb-2">{{ t('pairIntro') }}</p>
 		<p class="text-medium-emphasis mb-4">{{ t('pairRules') }}</p>
 		<div :class="s.actions">
@@ -58,7 +57,7 @@
 		<p v-if="pairingCode.expired">{{ t('expired') }}</p>
 
 		<div v-if="refusals.length">
-			<h2 :class="['text-title-large', s.subtitle]">{{ t('refusedTitle') }}</h2>
+			<h3 :class="['text-title-large', s.subtitle]">{{ t('refusedTitle') }}</h3>
 			<ul :class="s.cards">
 				<ItemCard
 					v-for="refusal in refusals"
@@ -89,7 +88,7 @@
 				</ItemCard>
 			</ul>
 		</div>
-	</section>
+	</div>
 </template>
 
 <script setup lang="ts">
@@ -114,6 +113,7 @@ const format = useFormat();
 const message = ref<Message | null>(null);
 const refusals = ref<Refusal[]>([]);
 const codeField = useTemplateRef<HTMLElement>('codeField');
+const panel = useTemplateRef<HTMLElement>('panel');
 
 async function newCode(): Promise<void> {
 	try {
@@ -125,9 +125,9 @@ async function newCode(): Promise<void> {
 	message.value = null;
 }
 
-// Entering the section issues a code unless the one on screen is still valid,
-// so coming back does not revoke it. An expired code is replaced only on
-// entering again or by the New code button, never by itself.
+// Opening the dialog issues a code unless the one on screen is still valid,
+// so opening it again does not revoke it. An expired code is replaced only on
+// opening again or by the New code button, never by itself.
 onMounted(() => {
 	if (!codeValid()) void newCode();
 });
@@ -161,6 +161,7 @@ async function addRefused(id: string): Promise<void> {
 	}
 	message.value = info('addedRetry');
 	await loadRefusals();
-	await rescueFocus();
+	// The panel lives in a dialog: the focus stays there, on the dialog's title.
+	await rescueFocus(panel.value?.closest('[role="dialog"]')?.querySelector<HTMLElement>('h2'));
 }
 </script>
