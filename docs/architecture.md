@@ -109,11 +109,11 @@ The page `internal/web` serves: Vue 3, Vuetify 4 and vue-i18n, built with Vite. 
 
 - **The build goes to `internal/web/ui/dist/`, which git never holds.** `pnpm --dir client-wss build` writes it; `go build` embeds it. A binary built without it still compiles (`ui/.gitkeep` keeps `//go:embed all:ui` valid) and answers `/` with 503 and how to build the page; the API works. The release builds the page once and refuses to build a binary without it.
 - **The strings** are in `src/i18n/locales/{en,ru,pl}.json`, precompiled by `@intlify/unplugin-vue-i18n` (the runtime compiler needs `eval`, which the CSP forbids). The type checker holds every `t()` key to the English catalog; the unit tests hold the other languages to the same keys and placeholders, and fail on a key nothing names.
-- **Language and theme are the viewer's:** the language comes from the choice saved in this browser, else `navigator.languages`, else English; the theme is system, light or dark, `system` following the OS live. Two buttons at the right of the header open their pickers, as in the todo app. The choice lives in `localStorage['workspace-server.preferences']`, every access guarded. The origin includes the port, so a new HTTP port, or `localhost` instead of `127.0.0.1`, starts from the defaults again; accepted for a page on loopback.
+- **Language and theme are the viewer's:** the language comes from the choice saved in this browser, else `navigator.languages`, else English; the theme is system, light or dark, `system` following the OS live. Two buttons at the right of the header open their pickers, as in the todo app. The choice lives in `localStorage['workspace-server.preferences']`, every access guarded. The origin includes the port, so a new HTTP port, or `127.0.0.1` instead of `localhost`, starts from the defaults again; accepted for a page on loopback.
 - **The sections are links, not tabs:** a `<nav>` of `VBtn` links to `#server`, `#apps`, `#devices`, `#pair`, the current one with `aria-current="page"`. `VTabs` would give each link `role="tab"`, `aria-selected` and `tabindex="-1"`, which are wrong for navigation.
 - **Nothing is parsed as HTML:** names, device names and refused ids are text in `<bdi>`, and `vue/no-v-html` is an error.
 - **Dialogs** focus their safe button (Cancel) or their input on open and give the focus back on close; when the element that had it is gone with its row (a deleted app, a removed device), the section's `h1` gets it, never the body.
-- **Development:** `pnpm --dir client-wss dev` proxies `/api` to `WSS_TARGET` (default `http://127.0.0.1:47811`, a throwaway server). The guard wants its own `Host` and `Origin`, so the proxy rewrites both; the server still sends no CORS headers. The boot block is then unfilled, and the page falls back to the defaults in `src/boot.ts`, which mirror `internal/apps`.
+- **Development:** `pnpm --dir client-wss dev` proxies `/api` to `WSS_TARGET` (default `http://127.0.0.1:47810`, a throwaway server). The guard wants its own `Host` and `Origin`, so the proxy rewrites both; the server still sends no CORS headers. The boot block is then unfilled, and the page falls back to the defaults in `src/boot.ts`, which mirror `internal/apps`.
 - **Tests:** Vitest for the logic and components (happy-dom), Playwright e2e against a real server built with the page embedded, which also checks that no CSP violation happens on any section, dialog or theme.
 
 ### The client package (`client/`)
@@ -393,7 +393,7 @@ apps/<id>/history/     previous documents
   - The certificate is ECDSA P-256 in Pion's `Certificate.PEM()` form, valid for 20 years. Clients pin its SHA-256 fingerprint.
   - Losing the file means every device pairs again. Copying the server folder (and the data folder) to another machine keeps every pairing.
   - On load every field is checked as it was made: `serverId` 12 and `icePwd` 24 characters of `[A-Za-z0-9]`, `mdnsName` a lowercase `<uuid v4>.local`, and the certificate. A damaged file stops the server with its path and the field (never the password's value) and is left untouched, instead of failing later as an rtc or mDNS error.
-- **`config.json`** is `{name, udpPort, httpPort, dataDir}`, with defaults host name, 47800, 47801 and no `dataDir` (the server folder). `dataDir` must be absolute.
+- **`config.json`** is `{name, udpPort, httpPort, dataDir}`, with defaults host name, UDP 47801, HTTP 47800 and no `dataDir` (the server folder). The page has the round number, since a person types it; devices take theirs from the pairing code. The defaults apply only to a new `config.json`: an existing one keeps its ports, so paired devices keep working. `dataDir` must be absolute.
 - **`apps.json`** is `{apps: [{id, name, history, maxBytes}]}`.
   - `id` matches `^[a-z0-9-]{1,64}$`. It becomes a path segment and never changes.
   - `history` defaults to 10 (range 1–100).
@@ -420,7 +420,7 @@ apps/<id>/history/     previous documents
 
 ## The web page (`internal/web`)
 
-- **Address:** `http://127.0.0.1:<httpPort>/`, listening on `127.0.0.1` only.
+- **Address:** `http://localhost:<httpPort>/`, listening on `127.0.0.1` only. The browser, the log and the commands show `localhost`, which reads better; the program's own requests to the page (the probe, `stop`, the wait before opening the browser) go to `127.0.0.1`, so they never depend on how `localhost` resolves. A browser tries `::1` for `localhost` first, is refused at once (the page listens on IPv4 only) and falls back to `127.0.0.1`.
 - **Content:** the page built from `client-wss/` (see above), embedded from `ui/dist`:
   - `GET /` is its `index.html`, run once per request as an `html/template`: `{{.Boot}}` in `<script type="application/json" id="boot">` becomes `{nonce, history, maxBytes}`, the CSP nonce and the add form's defaults (`apps.DefaultHistory`, `apps.DefaultMaxBytes`);
   - `GET /assets/{file}` serves Vite's hashed files by extension (`.js`, `.css`, `.svg`, `.png`, `.woff2`); anything else, `index.html` included, is 404 `notFound`;

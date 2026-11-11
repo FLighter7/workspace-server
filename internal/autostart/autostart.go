@@ -354,9 +354,12 @@ func runSteps(steps []step, run func(name string, args ...string) error) (did bo
 	return did, err
 }
 
-// PageURL is the address of the web page for httpPort.
+// PageURL is the address of the web page for httpPort, as the user sees it:
+// localhost reads better than 127.0.0.1, and the guard accepts both. The
+// program's own requests to the page go to 127.0.0.1 (pageBase, OpenPage's
+// wait), so they never depend on how localhost resolves.
 func PageURL(httpPort int) string {
-	return "http://127.0.0.1:" + strconv.Itoa(httpPort) + "/"
+	return "http://localhost:" + strconv.Itoa(httpPort) + "/"
 }
 
 // OpenPage waits for the server to answer on httpPort for up to wait and

@@ -73,7 +73,7 @@ The file is not code-signed, so the system asks for confirmation once:
 
 **Open the program file:** double-click it, or run `./workspace-server` (macOS, Linux) or `.\workspace-server.exe` (Windows) in a terminal from its folder.
 
-- A window with the server's log opens, and the browser opens the server's web page, `http://127.0.0.1:47801/` by default.
+- A window with the server's log opens, and the browser opens the server's web page, `http://localhost:47800/` by default.
 - On macOS, a double click in Finder opens the file in Terminal.
 - **If the server is already running,** no second one starts: the browser opens the running server's page, and the second program ends at once. On macOS, Terminal keeps its window open with the message `workspace-server is already running`; close it, or set Terminal → Settings → Profiles → Shell → "When the shell exits" to close the window.
 - **To stop it,** press Ctrl+C in its window, or close the window.
@@ -101,7 +101,7 @@ On the first start the server creates its folder and an entry for the `todo` app
 
 ## The web page
 
-`http://127.0.0.1:47801/` opens only on this computer; other devices cannot reach it. It starts in the browser's language (English, Russian or Polish) and the system's light or dark theme; the two buttons at the top right change them, and the browser remembers the choice. It has four sections:
+`http://localhost:47800/` opens only on this computer; other devices cannot reach it. It starts in the browser's language (English, Russian or Polish) and the system's light or dark theme; the two buttons at the top right change them, and the browser remembers the choice. It has four sections:
 
 - **Server** (Сервер):
   - shows the name devices see, the computer's addresses, the server's `.local` name and whether it is published, and the two ports; a warning under the addresses means devices cannot connect at the moment (the reason is in `server.log`), and the server keeps trying;
@@ -205,9 +205,9 @@ To run a second, separate server, or one on other ports for one run:
 
 ## Ports and network
 
-- **UDP 47800** is for devices: they connect here.
+- **UDP 47801** is for devices: they connect here.
   - Changing it means **every device must pair again**, because devices remember it. The page warns you.
-- **HTTP 47801** is for the web page, on `127.0.0.1` only.
+- **HTTP 47800** is for the web page, on this computer only.
   - You can change it freely; the page moves to the new port.
 - **Address changes are picked up by themselves.** The server checks the computer's addresses every 30 seconds. On a change, devices reconnect by themselves.
 - **VPNs:** a VPN on the computer does not get in the way of devices on the local network.

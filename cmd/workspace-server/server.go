@@ -602,7 +602,7 @@ func (s *server) start() error {
 	s.logf("devices connect on UDP port %d at %s", udpPort, formatAddrs(withLoopback(addrs)))
 	s.startResponder()
 	s.page = s.serveHTTP(ln)
-	s.logf("the web page is at http://127.0.0.1:%d/", httpPort)
+	s.logf("the web page is at http://localhost:%d/", httpPort)
 	return nil
 }
 

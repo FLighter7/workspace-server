@@ -62,7 +62,7 @@ func TestStartSaysTheServerIsStillStarting(t *testing.T) {
 	if code := f.run("start"); code != 0 {
 		t.Fatalf("exit code %d", code)
 	}
-	if !strings.Contains(f.out.String(), "The server is still starting; open http://127.0.0.1:47801/ in a moment.") {
+	if !strings.Contains(f.out.String(), "The server is still starting; open http://localhost:47800/ in a moment.") {
 		t.Errorf("stdout %q", f.out.String())
 	}
 	if strings.Contains(f.out.String(), "Opened") {

@@ -100,7 +100,8 @@ test.beforeAll(async () => {
 	const binary = buildServer();
 	const httpPort = await freeTcpPort();
 	const udpPort = await freeUdpPort();
-	base = `http://127.0.0.1:${httpPort}`;
+	// localhost, as the program opens it: the browser tries ::1 first and falls back.
+	base = `http://localhost:${httpPort}`;
 
 	server = spawn(
 		binary,

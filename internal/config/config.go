@@ -17,8 +17,8 @@ import (
 
 // Default ports, used when config.json is first created.
 const (
-	DefaultUDPPort  = 47800
-	DefaultHTTPPort = 47801
+	DefaultUDPPort  = 47801
+	DefaultHTTPPort = 47800
 )
 
 const maxNameRunes = 64

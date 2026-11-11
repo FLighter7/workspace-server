@@ -14,7 +14,7 @@ func TestLoadCreatesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Config{Name: "my-host", UDPPort: 47800, HTTPPort: 47801}
+	want := Config{Name: "my-host", UDPPort: 47801, HTTPPort: 47800}
 	if *c != want {
 		t.Errorf("got %+v, want %+v", *c, want)
 	}
@@ -66,7 +66,7 @@ func TestSaveAndReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Config{Name: "Desk", UDPPort: 47800, HTTPPort: 5000}
+	want := Config{Name: "Desk", UDPPort: 47801, HTTPPort: 5000}
 	if *got != want {
 		t.Errorf("got %+v, want %+v", *got, want)
 	}
@@ -166,18 +166,18 @@ func TestWithOverridesDoesNotTouchFile(t *testing.T) {
 	}
 
 	o := c.WithOverrides(1234, 0)
-	if o.UDPPort != 1234 || o.HTTPPort != 47801 || o.Name != "host" {
+	if o.UDPPort != 1234 || o.HTTPPort != 47800 || o.Name != "host" {
 		t.Errorf("override udp only: got %+v", o)
 	}
 	o = c.WithOverrides(0, 4321)
-	if o.UDPPort != 47800 || o.HTTPPort != 4321 {
+	if o.UDPPort != 47801 || o.HTTPPort != 4321 {
 		t.Errorf("override http only: got %+v", o)
 	}
 	o = c.WithOverrides(0, 0)
 	if o != *c {
 		t.Errorf("no override: got %+v, want %+v", o, *c)
 	}
-	if c.UDPPort != 47800 || c.HTTPPort != 47801 {
+	if c.UDPPort != 47801 || c.HTTPPort != 47800 {
 		t.Errorf("receiver changed: %+v", *c)
 	}
 	after, err := os.ReadFile(path)

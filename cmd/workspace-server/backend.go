@@ -126,7 +126,7 @@ func (s *server) SetConfig(name *string, udpPort, httpPort *int) error {
 			// and the one asking for this move is among them.
 			s.httpWG.Go(func() { s.stopHTTP(prev) })
 		}
-		s.logf("the web page moved to http://127.0.0.1:%d/", eff.HTTPPort)
+		s.logf("the web page moved to http://localhost:%d/", eff.HTTPPort)
 	}
 	return nil
 }

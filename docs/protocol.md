@@ -32,7 +32,7 @@ The **pairing code** is `wsrv1.` followed by the base64url encoding, without pad
   "n": "<server name>",
   "p": "<icePwd>",
   "f": "<base64url, no padding, of the 32-byte SHA-256 certificate fingerprint>",
-  "o": 47800,
+  "o": 47801,
   "h": ["<uuid>.local", "192.168.1.10"],
   "s": "<secret>"
 }

@@ -53,7 +53,7 @@ func newFakeDeps(t *testing.T) *fakeDeps {
 	return &fakeDeps{
 		defaultDir: filepath.Join(t.TempDir(), "workspace-server"),
 		exe:        "/opt/ws/workspace-server",
-		port:       47801,
+		port:       47800,
 		stopWorks:  true,
 		terminal:   true,
 		failRemove: map[string]error{},
@@ -225,7 +225,7 @@ func TestInteractiveOpensTheRunningServer(t *testing.T) {
 	if got := f.got(); !slices.Equal(got, []string{"openPage"}) {
 		t.Errorf("calls %v, want openPage only", got)
 	}
-	if want := "workspace-server is already running; opened http://127.0.0.1:47801/\n"; f.out.String() != want {
+	if want := "workspace-server is already running; opened http://localhost:47800/\n"; f.out.String() != want {
 		t.Errorf("stdout %q, want %q", f.out.String(), want)
 	}
 }
@@ -371,10 +371,10 @@ func TestInstallHTTPPort(t *testing.T) {
 		want          int
 		warns         bool
 	}{
-		{"missing", "", 47801, false},
+		{"missing", "", 47800, false},
 		{"custom", `{"name":"pc","udpPort":50000,"httpPort":50001}`, 50001, false},
-		{"invalid json", `{`, 47801, true},
-		{"invalid values", `{"name":"pc","udpPort":50000,"httpPort":0}`, 47801, true},
+		{"invalid json", `{`, 47800, true},
+		{"invalid values", `{"name":"pc","udpPort":50000,"httpPort":0}`, 47800, true},
 	}
 	for _, c := range cases {
 		dir := t.TempDir()
