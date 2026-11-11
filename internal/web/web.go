@@ -1,16 +1,22 @@
 // Package web serves the page on 127.0.0.1 that manages the server: its name
 // and ports, the apps it serves, the paired devices, and pairing. The page and
-// its JSON API answer only requests that come from the page itself.
+// its JSON API answer only requests that come from the page itself. The page
+// is built from client-wss into ui/dist and embedded; its strings and language
+// choice live there, not here.
 package web
 
 import (
 	"bytes"
+	"crypto/rand"
 	"embed"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
+	"io/fs"
 	"net/http"
-	"strings"
+	"path"
 	"time"
 
 	"github.com/FLighter7/workspace-server/internal/apps"
@@ -134,28 +140,35 @@ type Backend interface {
 	Restart()
 }
 
-//go:embed assets
-var assetFS embed.FS
+//go:embed all:ui
+var embedded embed.FS
 
-// assetTypes lists the files served under /assets/ with their types. The
-// page's template is not among them.
-var assetTypes = map[string]string{
-	"app.js":    "text/javascript; charset=utf-8",
-	"style.css": "text/css; charset=utf-8",
+// builtPage is the page client-wss builds into ui/dist. The folder is never
+// committed: ui/ holds a placeholder, so the package compiles without it, and
+// the page then answers 503 with how to build it.
+func builtPage() fs.FS {
+	page, err := fs.Sub(embedded, "ui/dist")
+	if err != nil {
+		panic(fmt.Sprintf("web: the embedded page: %v", err))
+	}
+	return page
 }
 
 // NewHandler returns the page and its API. port reports the HTTP port the
 // page is served on; it is read on every request, since the port can change
 // while the server runs.
 func NewHandler(b Backend, port func() int) http.Handler {
-	return newHandler(b, port, time.Now)
+	return newHandler(b, port, time.Now, builtPage())
 }
 
-func newHandler(b Backend, port func() int, now func() time.Time) http.Handler {
+// newHandler serves the page from ui: index.html at its root, the files it
+// loads under assets/.
+func newHandler(b Backend, port func() int, now func() time.Time, ui fs.FS) http.Handler {
 	a := &api{b: b, now: now}
+	p := newPage(ui)
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", servePage)
-	mux.HandleFunc("GET /assets/{file}", serveAsset)
+	mux.HandleFunc("GET /{$}", p.serve)
+	mux.HandleFunc("GET /assets/{file}", p.serveAsset)
 	mux.HandleFunc("GET /api/status", a.status)
 	mux.HandleFunc("PUT /api/config", a.setConfig)
 	mux.HandleFunc("GET /api/apps", a.listApps)
@@ -207,57 +220,113 @@ func (s *statusRecorder) Header() http.Header         { return s.header }
 func (s *statusRecorder) Write(b []byte) (int, error) { return len(b), nil }
 func (s *statusRecorder) WriteHeader(status int)      { s.status = status }
 
-var pageTemplate = template.Must(template.New("index.html").
-	Option("missingkey=error").
-	ParseFS(assetFS, "assets/index.html"))
+// assetTypes lists the extensions served under /assets/ with their types.
+// Anything else there is not found, index.html included.
+var assetTypes = map[string]string{
+	".js":    "text/javascript; charset=utf-8",
+	".css":   "text/css; charset=utf-8",
+	".svg":   "image/svg+xml",
+	".png":   "image/png",
+	".woff2": "font/woff2",
+}
 
-// pageData is what the page's template reads. T holds the strings; the
-// template also embeds all of them as JSON for the script.
+// notBuilt is what the page answers when the binary was built without it.
+const notBuilt = "The web page of this workspace-server was not built into it.\n\n" +
+	"Build the page, then the server again:\n\n" +
+	"    pnpm --dir client-wss install\n" +
+	"    pnpm --dir client-wss build\n" +
+	"    go build ./cmd/workspace-server\n\n" +
+	"The API under /api/ works without it.\n"
+
+// page serves the built page: index.html as a template, the rest as files.
+type page struct {
+	assets fs.FS
+	tmpl   *template.Template // nil: the page was not built
+}
+
+// pageBoot is what the page reads from its boot block before it starts.
+type pageBoot struct {
+	// Nonce lets Vuetify's theme stylesheet past the CSP; a new one on every
+	// request.
+	Nonce    string `json:"nonce"`
+	History  int    `json:"history"`  // the add form's default
+	MaxBytes int64  `json:"maxBytes"` // the add form's default
+}
+
+// pageData is what index.html's template reads: {{.Boot}} in a
+// <script type="application/json">, which html/template writes as escaped JSON.
 type pageData struct {
-	Lang     string
-	T        map[string]string
-	History  int
-	MaxBytes int64
+	Boot pageBoot
 }
 
-// renderPage renders the page in one language. html/template escapes every
-// string for where it lands, the JSON block for the script included.
-func renderPage(lang string, strs map[string]string) ([]byte, error) {
-	var buf bytes.Buffer
-	err := pageTemplate.Execute(&buf, pageData{
-		Lang: lang, T: strs, History: apps.DefaultHistory, MaxBytes: apps.DefaultMaxBytes,
-	})
-	return buf.Bytes(), err
-}
-
-// pages holds the page rendered once in each language.
-var pages = func() map[string][]byte {
-	out := make(map[string][]byte, len(messages))
-	for lang, strs := range messages {
-		page, err := renderPage(lang, strs)
-		if err != nil {
-			panic(fmt.Sprintf("web: render the %s page: %v", lang, err))
-		}
-		out[lang] = page
+func newPage(ui fs.FS) *page {
+	p := &page{assets: ui}
+	src, err := fs.ReadFile(ui, "index.html")
+	if errors.Is(err, fs.ErrNotExist) {
+		return p
 	}
-	return out
-}()
-
-func servePage(w http.ResponseWriter, r *http.Request) {
-	lang := pickLanguage(strings.Join(r.Header.Values("Accept-Language"), ","))
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Add("Vary", "Accept-Language")
-	w.Write(pages[lang])
+	if err == nil {
+		p.tmpl, err = template.New("index.html").Option("missingkey=error").Parse(string(src))
+	}
+	if err != nil {
+		panic(fmt.Sprintf("web: the built page's index.html: %v", err))
+	}
+	return p
 }
 
-func serveAsset(w http.ResponseWriter, r *http.Request) {
+// pageCSP is the page's own policy: the guard's, plus the one inline
+// stylesheet that carries nonce. Scripts still come from the page's own files
+// only.
+func pageCSP(nonce string) string {
+	return "default-src 'self'; style-src 'self' 'nonce-" + nonce + "'; img-src 'self' data:; " +
+		"frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+}
+
+func newNonce() (string, error) {
+	b := make([]byte, 18)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(b), nil
+}
+
+func (p *page) serve(w http.ResponseWriter, r *http.Request) {
+	if p.tmpl == nil {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		io.WriteString(w, notBuilt)
+		return
+	}
+	nonce, err := newNonce()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, codeInternal, "nonce: "+err.Error())
+		return
+	}
+	var buf bytes.Buffer
+	err = p.tmpl.Execute(&buf, pageData{Boot: pageBoot{
+		Nonce: nonce, History: apps.DefaultHistory, MaxBytes: apps.DefaultMaxBytes,
+	}})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, codeInternal, "page: "+err.Error())
+		return
+	}
+	w.Header().Set("Content-Security-Policy", pageCSP(nonce))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(buf.Bytes())
+}
+
+func (p *page) serveAsset(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("file")
-	ctype, ok := assetTypes[name]
+	ctype, ok := assetTypes[path.Ext(name)]
 	if !ok {
 		notFound(w, "asset "+name)
 		return
 	}
-	data, err := assetFS.ReadFile("assets/" + name)
+	data, err := fs.ReadFile(p.assets, "assets/"+name)
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrInvalid) {
+		notFound(w, "asset "+name)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 		return

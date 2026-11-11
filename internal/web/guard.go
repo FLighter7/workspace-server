@@ -12,6 +12,7 @@ const markerHeader = "X-Workspace-Server"
 
 // csp lets the page load only its own files, plus the QR code as a data: URL,
 // and forbids framing it, so no other site can show it and click its buttons.
+// The page itself is served with pageCSP, which adds its nonced stylesheet.
 const csp = "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 
 // guard answers 403 to any request that did not come from the page itself:

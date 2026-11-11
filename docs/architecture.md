@@ -98,10 +98,23 @@ Module `github.com/FLighter7/workspace-server`, Go 1.27. Dependencies:
 | `internal/rtc` | The UDP listener and the signaling-free accept path. It creates a peer connection per unknown ufrag. |
 | `internal/mdns` | The minimal mDNS responder for the `<uuid>.local` name. |
 | `internal/netaddr` | LAN IPv4 addresses and interfaces. |
-| `internal/web` | The localhost page: embedded assets, the API, the guard, ru/en/pl strings. |
+| `internal/web` | The localhost page: serves the page built from `client-wss/` (embedded from `ui/dist`), the API, the guard. |
 | `internal/autostart` | LaunchAgent, `systemd --user` unit, Windows logon task; opening the page. |
 | `internal/program` | The program file itself: the Windows Apps & features entry, and deleting the file. |
 | `internal/conformance` | Reads the contract vectors in `testdata/conformance/`, for tests. |
+
+### The web page (`client-wss/`)
+
+The page `internal/web` serves: Vue 3, Vuetify 4 and vue-i18n, built with Vite. It is a private pnpm package of its own, beside `client/` and not a workspace with it, and it does not depend on the client package: it speaks only the page's JSON API. Its conventions follow the todo app: tabs, single quotes, width 100; SFC blocks in the order style, template, script; `<style lang="scss" module>`, `<script setup lang="ts">`, the `@/` alias.
+
+- **The build goes to `internal/web/ui/dist/`, which git never holds.** `pnpm --dir client-wss build` writes it; `go build` embeds it. A binary built without it still compiles (`ui/.gitkeep` keeps `//go:embed all:ui` valid) and answers `/` with 503 and how to build the page; the API works. The release builds the page once and refuses to build a binary without it.
+- **The strings** are in `src/i18n/locales/{en,ru,pl}.json`, precompiled by `@intlify/unplugin-vue-i18n` (the runtime compiler needs `eval`, which the CSP forbids). The type checker holds every `t()` key to the English catalog; the unit tests hold the other languages to the same keys and placeholders, and fail on a key nothing names.
+- **Language and theme are the viewer's:** the language comes from the choice saved in this browser, else `navigator.languages`, else English; the theme is system, light or dark, `system` following the OS live. Two buttons at the right of the header open their pickers, as in the todo app. The choice lives in `localStorage['workspace-server.preferences']`, every access guarded. The origin includes the port, so a new HTTP port, or `localhost` instead of `127.0.0.1`, starts from the defaults again; accepted for a page on loopback.
+- **The sections are links, not tabs:** a `<nav>` of `VBtn` links to `#server`, `#apps`, `#devices`, `#pair`, the current one with `aria-current="page"`. `VTabs` would give each link `role="tab"`, `aria-selected` and `tabindex="-1"`, which are wrong for navigation.
+- **Nothing is parsed as HTML:** names, device names and refused ids are text in `<bdi>`, and `vue/no-v-html` is an error.
+- **Dialogs** focus their safe button (Cancel) or their input on open and give the focus back on close; when the element that had it is gone with its row (a deleted app, a removed device), the section's `h1` gets it, never the body.
+- **Development:** `pnpm --dir client-wss dev` proxies `/api` to `WSS_TARGET` (default `http://127.0.0.1:47811`, a throwaway server). The guard wants its own `Host` and `Origin`, so the proxy rewrites both; the server still sends no CORS headers. The boot block is then unfilled, and the page falls back to the defaults in `src/boot.ts`, which mirror `internal/apps`.
+- **Tests:** Vitest for the logic and components (happy-dom), Playwright e2e against a real server built with the page embedded, which also checks that no CSP violation happens on any section, dialog or theme.
 
 ### The client package (`client/`)
 
@@ -408,11 +421,12 @@ apps/<id>/history/     previous documents
 ## The web page (`internal/web`)
 
 - **Address:** `http://127.0.0.1:<httpPort>/`, listening on `127.0.0.1` only.
-- **Content:**
-  - plain HTML, CSS and JS, embedded;
-  - light and dark themes following the system;
-  - English, Russian or Polish from `Accept-Language`, English by default.
-- **Russian control names,** which the todo app's instructions quote: «Подключить устройство», «Приложения», «Устройства», «Сервер». Polish: «Sparuj urządzenie», «Aplikacje», «Urządzenia», «Serwer».
+- **Content:** the page built from `client-wss/` (see above), embedded from `ui/dist`:
+  - `GET /` is its `index.html`, run once per request as an `html/template`: `{{.Boot}}` in `<script type="application/json" id="boot">` becomes `{nonce, history, maxBytes}`, the CSP nonce and the add form's defaults (`apps.DefaultHistory`, `apps.DefaultMaxBytes`);
+  - `GET /assets/{file}` serves Vite's hashed files by extension (`.js`, `.css`, `.svg`, `.png`, `.woff2`); anything else, `index.html` included, is 404 `notFound`;
+  - without a build, `GET /` is 503 in plain text, saying how to build it.
+- **Language and theme** are chosen on the page, not by the server: it no longer reads `Accept-Language`.
+- **Russian control names,** which the todo app's instructions quote: «Подключить устройство», «Приложения», «Устройства», «Сервер». Polish: «Sparuj urządzenie», «Aplikacje», «Urządzenia», «Serwer». They live in `client-wss/src/i18n/locales/`.
 - **API routes** (JSON, lowerCamelCase keys):
   - `GET /api/status`;
   - `PUT /api/config`;
@@ -436,6 +450,7 @@ apps/<id>/history/     previous documents
 - **Response headers:**
   - `X-Frame-Options: DENY`;
   - CSP `default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, so no inline scripts and no form posts;
+  - the page itself adds `style-src 'self' 'nonce-<n>'`, with a new nonce on every request: Vuetify writes its theme into a `<style>` element, and `theme.cspNonce` gives it that nonce. Nothing else inline gets in: no `unsafe-inline`, no `eval`, scripts only from the page's own files. Styles that Vue and Vuetify set go through the CSSOM (`element.style`), which the CSP does not govern;
   - `Referrer-Policy: same-origin`;
   - `Cache-Control: no-store`.
 - **Deleting an app** removes its entry, its folder and its devices, and closes their sessions. The confirmation shows what goes, offers a download, and asks the user to type the id.
@@ -513,6 +528,7 @@ Each step runs even if an earlier one failed; failures go to stderr (the log may
 - **`.github/workflows/ci.yml`:** runs on `ubuntu-latest`: `gofmt`, `go vet ./...` natively and for Windows, macOS and FreeBSD, `go test -race ./...`. The cross-vets compile the other systems' code but run none of it.
 - **`.github/workflows/release.yml`:** on a `v*` tag:
   - runs `ci.yml` first, and builds nothing if it fails;
+  - builds the web page once (`client-wss`) and hands it to every binary's job, which stops if `internal/web/ui/dist/index.html` is missing;
   - builds the five binaries with `CGO_ENABLED=0 -trimpath -ldflags "-s -w -X main.version=<tag>"`;
   - writes `SHA256SUMS`;
   - publishes a release, a pre-release when the tag has a `-` (`v1.0.0-rc1`).
@@ -524,6 +540,7 @@ Each step runs even if an earlier one failed; failures go to stderr (the log may
   - then the e2e, which builds the server from the same checkout.
 
   `release.yml` runs it with the rest of `ci.yml`, so binaries are built only after the package passes.
+- **The web page in CI:** `ci.yml`'s `page` job does the same for `client-wss/`: `pnpm run check` (lint, Prettier, unit tests, typecheck, build), then the e2e against a server built with the page embedded. The Go job never builds the page: `internal/web`'s tests serve a stand-in from `fstest.MapFS`, and read `client-wss/index.html` itself to check it is the template the server fills.
 - **Publishing the package: by the user, by hand.** No workflow and no agent publishes it.
   1. Set `client/package.json`'s `version` to the server's tag, `0.1.0` for `v0.1.0`.
   2. Run `pnpm --dir client publish --access public`; add `--tag next` for a pre-release. `prepublishOnly` runs `check` first.

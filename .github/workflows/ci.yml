@@ -53,3 +53,30 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium
       - name: e2e
         run: pnpm run test:e2e
+
+  # The server's web page. The Go job above tests the server without it; this
+  # one builds it, and its e2e builds the server with the page embedded.
+  page:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client-wss
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: client-wss/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+          cache-dependency-path: client-wss/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: lint, format, tests, typecheck, build
+        run: pnpm run check
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: pnpm exec playwright install --with-deps chromium
+      - name: e2e
+        run: pnpm run test:e2e

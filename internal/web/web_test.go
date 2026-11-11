@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"image/png"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/FLighter7/workspace-server/internal/apps"
@@ -192,7 +194,7 @@ func (f *fakeBackend) IssuePairing() (string, time.Time, error) {
 func (f *fakeBackend) Refusals() []pairing.Refusal { return f.refusals }
 
 func newTestHandler(f *fakeBackend) http.Handler {
-	return newHandler(f, func() int { return testPort }, func() time.Time { return testNow })
+	return newHandler(f, func() int { return testPort }, func() time.Time { return testNow }, testUI)
 }
 
 // request builds a request the way the page sends it: to 127.0.0.1 on the
@@ -271,7 +273,7 @@ func TestGuardHost(t *testing.T) {
 		{"", http.StatusForbidden},
 	}
 	// The page and its assets are guarded too: DNS rebinding reads them.
-	for _, path := range []string{"/", "/assets/app.js", "/api/status"} {
+	for _, path := range []string{"/", "/assets/index-abc123.js", "/api/status"} {
 		for _, tc := range cases {
 			r := request(http.MethodGet, path, "")
 			r.Host = tc.host
@@ -287,7 +289,7 @@ func TestGuardHost(t *testing.T) {
 
 func TestGuardReadsThePortOnEveryRequest(t *testing.T) {
 	port := testPort
-	h := newHandler(newFake(), func() int { return port }, time.Now)
+	h := newHandler(newFake(), func() int { return port }, time.Now, testUI)
 	get := func(host string) int {
 		r := request(http.MethodGet, "/api/status", "")
 		r.Host = host
@@ -578,7 +580,7 @@ func TestSecurityHeaders(t *testing.T) {
 	foreign.Host = "evil.example"
 	for name, r := range map[string]*http.Request{
 		"page":      request(http.MethodGet, "/", ""),
-		"asset":     request(http.MethodGet, "/assets/style.css", ""),
+		"asset":     request(http.MethodGet, "/assets/index-abc123.css", ""),
 		"api":       request(http.MethodGet, "/api/apps", ""),
 		"not found": request(http.MethodGet, "/nope", ""),
 		"forbidden": foreign,
@@ -747,7 +749,7 @@ func TestDocumentDownloadUsesTheLocalDate(t *testing.T) {
 	time.Local = time.FixedZone("UTC+10", 10*60*60)
 	t.Cleanup(func() { time.Local = saved })
 	evening := time.Date(2026, 11, 9, 20, 0, 0, 0, time.UTC) // 06:00 on the 10th, local
-	h := newHandler(newFake(), func() int { return testPort }, func() time.Time { return evening })
+	h := newHandler(newFake(), func() int { return testPort }, func() time.Time { return evening }, testUI)
 	w := serve(h, request(http.MethodGet, "/api/apps/todo/document", ""))
 	wantStatus(t, w, http.StatusOK)
 	if got, want := w.Header().Get("Content-Disposition"), `attachment; filename="todo-2026-11-10.json"`; got != want {
@@ -929,96 +931,145 @@ func TestShortenKeepsIDValidity(t *testing.T) {
 
 // --- The page --------------------------------------------------------------
 
-func getPage(t *testing.T, acceptLanguage string) string {
+// testIndex stands in for client-wss's built index.html: the boot block, a
+// module script and a stylesheet, as Vite writes them.
+const testIndex = `<!doctype html>
+<html lang="en">
+<head>
+<script type="application/json" id="boot">{{.Boot}}</script>
+<script type="module" crossorigin src="/assets/index-abc123.js"></script>
+<link rel="stylesheet" crossorigin href="/assets/index-abc123.css">
+</head>
+<body><div id="app"></div></body>
+</html>
+`
+
+// testUI is the built page the tests serve, so that they need no Node.
+var testUI = fstest.MapFS{
+	"index.html":              {Data: []byte(testIndex)},
+	"assets/index-abc123.js":  {Data: []byte("console.log('page')")},
+	"assets/index-abc123.css": {Data: []byte("body{}")},
+	"assets/flag-xyz.svg":     {Data: []byte("<svg xmlns='http://www.w3.org/2000/svg'/>")},
+	"assets/notes.txt":        {Data: []byte("not served")},
+}
+
+func getPage(t *testing.T, h http.Handler) (page, csp string) {
 	t.Helper()
-	r := request(http.MethodGet, "/", "")
-	if acceptLanguage != "" {
-		r.Header.Set("Accept-Language", acceptLanguage)
-	}
-	w := serve(newTestHandler(newFake()), r)
+	w := serve(h, request(http.MethodGet, "/", ""))
 	wantStatus(t, w, http.StatusOK)
 	if ct := w.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
 		t.Errorf("Content-Type = %q", ct)
 	}
-	return w.Body.String()
+	return w.Body.String(), w.Header().Get("Content-Security-Policy")
 }
 
-func TestLanguage(t *testing.T) {
-	for _, tc := range []struct{ header, lang, want string }{
-		{"ru-RU,ru;q=0.9", "ru", "Подключить устройство"},
-		{"pl", "pl", "Sparuj urządzenie"},
-		{"de", "en", "Pair a device"},
-		{"", "en", "Pair a device"},
+var bootBlock = regexp.MustCompile(`(?s)<script type="application/json" id="boot">(.*?)</script>`)
+
+func readBoot(t *testing.T, page string) pageBoot {
+	t.Helper()
+	m := bootBlock.FindStringSubmatch(page)
+	if m == nil {
+		t.Fatal("no boot block in the page")
+	}
+	var boot pageBoot
+	if err := json.Unmarshal([]byte(m[1]), &boot); err != nil {
+		t.Fatalf("the boot block is not JSON: %v\n%s", err, m[1])
+	}
+	return boot
+}
+
+// The boot block carries the app defaults and the nonce the CSP lets in.
+func TestPageBoot(t *testing.T) {
+	page, csp := getPage(t, newTestHandler(newFake()))
+	boot := readBoot(t, page)
+	if boot.History != apps.DefaultHistory || boot.MaxBytes != apps.DefaultMaxBytes {
+		t.Errorf("boot defaults = %d, %d; want %d, %d",
+			boot.History, boot.MaxBytes, apps.DefaultHistory, apps.DefaultMaxBytes)
+	}
+	if len(boot.Nonce) < 16 {
+		t.Fatalf("nonce %q is too short", boot.Nonce)
+	}
+	if want := "style-src 'self' 'nonce-" + boot.Nonce + "'"; !strings.Contains(csp, want) {
+		t.Errorf("CSP %q lacks %q", csp, want)
+	}
+}
+
+// Only the stylesheet with this response's nonce gets in: no unsafe-inline,
+// scripts from the page's own files only, and a new nonce on every request.
+func TestPageCSP(t *testing.T) {
+	h := newTestHandler(newFake())
+	page1, csp1 := getPage(t, h)
+	page2, csp2 := getPage(t, h)
+	if readBoot(t, page1).Nonce == readBoot(t, page2).Nonce || csp1 == csp2 {
+		t.Error("two requests got the same nonce")
+	}
+	for _, want := range []string{
+		"default-src 'self'", "img-src 'self' data:", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'none'",
 	} {
-		page := getPage(t, tc.header)
-		if !strings.Contains(page, tc.want) {
-			t.Errorf("Accept-Language %q: the page lacks %q", tc.header, tc.want)
+		if !strings.Contains(csp1, want) {
+			t.Errorf("CSP %q lacks %q", csp1, want)
 		}
-		if !strings.Contains(page, `<html lang="`+tc.lang+`">`) {
-			t.Errorf("Accept-Language %q: the page is not marked lang=%q", tc.header, tc.lang)
+	}
+	for _, bad := range []string{"unsafe-inline", "unsafe-eval", "script-src"} {
+		if strings.Contains(csp1, bad) {
+			t.Errorf("CSP %q has %q", csp1, bad)
 		}
+	}
+	// Everything else keeps the guard's policy, with no nonce.
+	w := serve(h, request(http.MethodGet, "/api/status", ""))
+	if got := w.Header().Get("Content-Security-Policy"); got != csp {
+		t.Errorf("API CSP = %q, want %q", got, csp)
 	}
 }
 
-var stringsBlock = regexp.MustCompile(`(?s)<script type="application/json" id="strings">(.*?)</script>`)
-
-func TestPageEmbedsTheLanguagesStrings(t *testing.T) {
-	for lang, accept := range map[string]string{"en": "en-GB", "ru": "ru", "pl": "pl-PL"} {
-		m := stringsBlock.FindStringSubmatch(getPage(t, accept))
-		if m == nil {
-			t.Fatalf("%s: no strings block in the page", lang)
-		}
-		var got map[string]string
-		if err := json.Unmarshal([]byte(m[1]), &got); err != nil {
-			t.Fatalf("%s: strings block is not JSON: %v", lang, err)
-		}
-		if !reflect.DeepEqual(got, messages[lang]) {
-			t.Errorf("%s: the page embeds other strings", lang)
-		}
-	}
-}
-
-func TestPageLoadsNoInlineScript(t *testing.T) {
-	page := getPage(t, "en")
-	scripts := regexp.MustCompile(`<script[^>]*>`).FindAllString(page, -1)
-	want := []string{`<script type="application/json" id="strings">`, `<script src="/assets/app.js" defer>`}
-	if !reflect.DeepEqual(scripts, want) {
-		t.Errorf("script tags = %q, want %q", scripts, want)
-	}
-	if strings.Contains(page, " style=") || strings.Contains(page, "<style") {
-		t.Error("the page has inline styles, which the CSP blocks")
-	}
-}
-
-func TestRenderPageEscapesStrings(t *testing.T) {
-	hostile := make(map[string]string, len(messages["en"]))
-	for k := range messages["en"] {
-		hostile[k] = `</script><script>alert(1)</script>"><img src=x onerror=alert(1)>&amp;`
-	}
-	page, err := renderPage("en", hostile)
+// client-wss's index.html is the template the server fills: its source is
+// read here, so that a change to it is checked without Node.
+func TestClientIndexIsThePageTemplate(t *testing.T) {
+	src, err := os.ReadFile("../../client-wss/index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range []string{"<script>alert", "<img src=x", "</script><"} {
-		if bytes.Contains(page, []byte(bad)) {
-			t.Errorf("the page contains %q unescaped", bad)
-		}
+	scripts := regexp.MustCompile(`<script[^>]*>`).FindAllString(string(src), -1)
+	want := []string{`<script type="application/json" id="boot">`, `<script type="module" src="/src/main.ts">`}
+	if !reflect.DeepEqual(scripts, want) {
+		t.Errorf("script tags = %q, want %q", scripts, want)
 	}
-	m := stringsBlock.FindSubmatch(page)
-	if m == nil {
-		t.Fatal("no strings block")
+	if bytes.Contains(src, []byte(" style=")) || bytes.Contains(src, []byte("<style")) {
+		t.Error("index.html has inline styles, which the CSP blocks")
 	}
-	var got map[string]string
-	if err := json.Unmarshal(m[1], &got); err != nil || !reflect.DeepEqual(got, hostile) {
-		t.Errorf("hostile strings do not round-trip: %v", err)
+	h := newHandler(newFake(), func() int { return testPort }, time.Now, fstest.MapFS{"index.html": {Data: src}})
+	page, _ := getPage(t, h)
+	readBoot(t, page)
+}
+
+// A binary built without the page still serves its API, and says how to
+// build the page.
+func TestPageNotBuilt(t *testing.T) {
+	h := newHandler(newFake(), func() int { return testPort }, time.Now, fstest.MapFS{})
+	w := serve(h, request(http.MethodGet, "/", ""))
+	wantStatus(t, w, http.StatusServiceUnavailable)
+	if !strings.Contains(w.Body.String(), "pnpm --dir client-wss build") {
+		t.Errorf("the answer does not say how to build the page:\n%s", w.Body.String())
 	}
+	wantStatus(t, serve(h, request(http.MethodGet, "/api/status", "")), http.StatusOK)
+	wantError(t, serve(h, request(http.MethodGet, "/assets/index-abc123.js", "")), http.StatusNotFound, "notFound")
+}
+
+// The embedded page is client-wss's build or nothing: the package compiles
+// either way, and a built index.html parses as a template.
+func TestEmbeddedPage(t *testing.T) {
+	if _, err := fs.Stat(builtPage(), "index.html"); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	newPage(builtPage())
 }
 
 func TestAssets(t *testing.T) {
 	h := newTestHandler(newFake())
 	for path, ctype := range map[string]string{
-		"/assets/app.js":    "text/javascript; charset=utf-8",
-		"/assets/style.css": "text/css; charset=utf-8",
+		"/assets/index-abc123.js":  "text/javascript; charset=utf-8",
+		"/assets/index-abc123.css": "text/css; charset=utf-8",
+		"/assets/flag-xyz.svg":     "image/svg+xml",
 	} {
 		w := serve(h, request(http.MethodGet, path, ""))
 		wantStatus(t, w, http.StatusOK)
@@ -1029,7 +1080,10 @@ func TestAssets(t *testing.T) {
 			t.Errorf("%s is empty", path)
 		}
 	}
-	for _, path := range []string{"/assets/index.html", "/assets/nope.js", "/index.html", "/nope", "/api/nope", "/api/apps/todo/nope"} {
+	for _, path := range []string{
+		"/assets/index.html", "/assets/nope.js", "/assets/notes.txt", "/assets/..%2findex.html",
+		"/index.html", "/nope", "/api/nope", "/api/apps/todo/nope",
+	} {
 		t.Run(path, func(t *testing.T) {
 			wantError(t, serve(h, request(http.MethodGet, path, "")), http.StatusNotFound, "notFound")
 		})
@@ -1047,148 +1101,6 @@ func TestWrongMethodIsJSON(t *testing.T) {
 	}
 	w = serve(h, request(http.MethodDelete, "/api/apps", ""))
 	wantError(t, w, http.StatusMethodNotAllowed, "invalid")
-}
-
-// The message for an expired code names the button that makes a new one.
-func TestExpiredNamesTheButton(t *testing.T) {
-	for lang, s := range messages {
-		if !strings.Contains(s["expired"], s["newCode"]) {
-			t.Errorf("%s: expired %q does not name the button %q", lang, s["expired"], s["newCode"])
-		}
-	}
-}
-
-// --- Strings ---------------------------------------------------------------
-
-func TestPickLanguage(t *testing.T) {
-	for _, tc := range []struct{ header, want string }{
-		{"", "en"},
-		{"ru-RU,ru;q=0.9", "ru"},
-		{"pl", "pl"},
-		{"de", "en"},
-		{"de,ru;q=0.5", "ru"},
-		{"en-US,en;q=0.9,ru;q=0.8", "en"},
-		{"ru;q=0.5,pl;q=0.8", "pl"},
-		{"PL-pl", "pl"},
-		{"ru;q=0", "en"},
-		{"ru;q=0,pl;q=0.1", "pl"},
-		{"*", "en"},
-		{"de,*;q=0.5,ru;q=0.4", "en"},
-		{"ru;q=abc", "en"},
-		{"ru;q=NaN", "en"},
-		{"ru;q=2", "en"},
-		{" ru ; q=0.7 , pl ; q=0.7", "ru"},
-		{"uk-UA, ru;q=0.8, en;q=0.5", "ru"},
-		{",,;;", "en"},
-	} {
-		if got := pickLanguage(tc.header); got != tc.want {
-			t.Errorf("pickLanguage(%q) = %q, want %q", tc.header, got, tc.want)
-		}
-	}
-}
-
-var placeholder = regexp.MustCompile(`\{\w+\}`)
-
-func TestStringsComplete(t *testing.T) {
-	langs := make([]string, 0, len(messages))
-	for lang := range messages {
-		langs = append(langs, lang)
-	}
-	sort.Strings(langs)
-	if !reflect.DeepEqual(langs, []string{"en", "pl", "ru"}) {
-		t.Fatalf("languages = %v, want en, pl, ru", langs)
-	}
-	en := messages["en"]
-	for _, lang := range langs {
-		strs := messages[lang]
-		for k, v := range en {
-			got, ok := strs[k]
-			if !ok || strings.TrimSpace(got) == "" {
-				t.Errorf("%s: %q is missing", lang, k)
-				continue
-			}
-			p, want := placeholder.FindAllString(got, -1), placeholder.FindAllString(v, -1)
-			sort.Strings(p)
-			sort.Strings(want)
-			if !slices.Equal(p, want) {
-				t.Errorf("%s: %q has placeholders %v, English has %v", lang, k, p, want)
-			}
-		}
-		for k := range strs {
-			if _, ok := en[k]; !ok {
-				t.Errorf("%s: %q is not in English", lang, k)
-			}
-		}
-	}
-}
-
-// Every string the script or the page names exists, and every string is used.
-func TestStringsUsed(t *testing.T) {
-	script, err := os.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	page, err := os.ReadFile("assets/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	used := map[string]bool{}
-	for _, m := range regexp.MustCompile(`\bS\.(\w+)`).FindAllSubmatch(script, -1) {
-		used[string(m[1])] = true
-	}
-	for _, m := range regexp.MustCompile(`\.T\.(\w+)`).FindAllSubmatch(page, -1) {
-		used[string(m[1])] = true
-	}
-	for k := range used {
-		if _, ok := messages["en"][k]; !ok {
-			t.Errorf("%q is used but not defined", k)
-		}
-	}
-	for k := range messages["en"] {
-		if !used[k] {
-			t.Errorf("%q is defined but never used", k)
-		}
-	}
-	if bytes.Contains(script, []byte("innerHTML")) || bytes.Contains(script, []byte("outerHTML")) ||
-		bytes.Contains(script, []byte("insertAdjacentHTML")) || bytes.Contains(script, []byte("document.write")) {
-		t.Error("app.js parses HTML; build the DOM with createElement and textContent")
-	}
-}
-
-// The server controls: their strings exist in every language, and every
-// language's page holds their markup.
-func TestPageHasTheServerControls(t *testing.T) {
-	keys := []string{
-		"dataDirLabel", "dataDirHint", "dataDirChange", "moveTitle", "moveText", "moveOk",
-		"adoptTitle", "adoptText", "adoptOk", "errDataExists", "errDataInvalid", "errDataChanged",
-		"restarting", "restartFailed", "restartError", "manageTitle", "manageIntro",
-		"stopButton", "resetButton", "deleteServerButton", "stopTitle", "stopText", "stopOk",
-		"resetTitle", "resetText", "resetOk", "deleteServerTitle", "deleteServerText", "deleteServerOk",
-		"devicesFact", "programFact", "serverDirFact", "dataDirFact",
-		"stoppedTitle", "stoppedText", "stoppedDeletedText",
-	}
-	for lang, strs := range messages {
-		for _, k := range keys {
-			if strings.TrimSpace(strs[k]) == "" {
-				t.Errorf("%s: %q is missing", lang, k)
-			}
-		}
-	}
-	for _, accept := range []string{"en", "ru", "pl"} {
-		page := getPage(t, accept)
-		for _, id := range []string{
-			`id="data-form"`, `id="data-dir"`, `id="data-dir-change"`, `id="manage"`,
-			`id="btn-stop"`, `id="btn-reset"`, `id="btn-delete-server"`,
-			`<dialog id="wipe"`, `id="wipe-ok"`, `id="wipe-cancel"`, `id="stopped"`,
-		} {
-			if !strings.Contains(page, id) {
-				t.Errorf("%s: the page lacks %s", accept, id)
-			}
-		}
-		if !regexp.MustCompile(`<section id="stopped"[^>]*\bhidden\b`).MatchString(page) {
-			t.Errorf("%s: the stopped panel is not hidden at first", accept)
-		}
-	}
 }
 
 func withMarker(r *http.Request) *http.Request {

@@ -1,0 +1,2 @@
+# Prettier checks for LF; keep it on every checkout, whatever core.autocrlf says.
+* text=auto eol=lf

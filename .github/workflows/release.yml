@@ -11,8 +11,33 @@ jobs:
   test:
     uses: ./.github/workflows/ci.yml
 
-  build:
+  # The web page, built once and embedded in every binary.
+  page:
     needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client-wss
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: client-wss/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+          cache-dependency-path: client-wss/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: page
+          path: internal/web/ui/dist
+          if-no-files-found: error
+
+  build:
+    needs: page
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
@@ -38,6 +63,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: page
+          path: internal/web/ui/dist
+      # Without the page the binary still builds, and serves a 503 instead of it.
+      - name: the page is there
+        run: test -f internal/web/ui/dist/index.html
       - name: build
         env:
           CGO_ENABLED: "0"

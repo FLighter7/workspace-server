@@ -1,0 +1,56 @@
+{
+	"name": "workspace-server-page",
+	"version": "0.0.0",
+	"private": true,
+	"description": "The page workspace-server serves on 127.0.0.1 to manage itself. Built into internal/web/ui/dist and embedded in the binary.",
+	"license": "CC-BY-NC-ND-4.0",
+	"type": "module",
+	"packageManager": "pnpm@10.33.0",
+	"scripts": {
+		"dev": "vite",
+		"build": "vue-tsc --noEmit && vite build",
+		"typecheck": "vue-tsc --noEmit",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"test:e2e": "pnpm run build && playwright test",
+		"lint": "eslint .",
+		"format": "prettier --write .",
+		"format:check": "prettier --check .",
+		"check": "pnpm run lint && pnpm run format:check && pnpm run test && pnpm run build"
+	},
+	"dependencies": {
+		"@mdi/js": "^7.4.47",
+		"flag-icons": "^7.5.0",
+		"vue": "^3.5.41",
+		"vue-i18n": "^11.4.8",
+		"vuetify": "^4.1.7"
+	},
+	"devDependencies": {
+		"@eslint/js": "^10.0.1",
+		"@intlify/unplugin-vue-i18n": "^11.2.4",
+		"@playwright/test": "^1.62.1",
+		"@types/node": "^26.1.2",
+		"@vitejs/plugin-vue": "^6.0.8",
+		"@vue/eslint-config-prettier": "^10.2.0",
+		"@vue/eslint-config-typescript": "^14.9.0",
+		"@vue/test-utils": "^2.4.11",
+		"eslint": "^10.8.0",
+		"eslint-plugin-vue": "^10.10.0",
+		"eslint-plugin-vuejs-accessibility": "^2.6.3",
+		"globals": "^16.5.0",
+		"happy-dom": "^20.11.2",
+		"prettier": "^3.9.6",
+		"sass-embedded": "^1.100.0",
+		"typescript": "~6.0.3",
+		"vite": "^8.2.0",
+		"vite-plugin-vuetify": "^2.1.3",
+		"vitest": "^4.1.10",
+		"vue-tsc": "^3.3.9"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": [
+			"@parcel/watcher",
+			"esbuild"
+		]
+	}
+}

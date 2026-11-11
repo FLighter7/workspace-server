@@ -36,7 +36,7 @@ Read before changing anything:
 
 - Work directly on `main`; no branches or worktrees unless the user asks. **Never push: the user pushes.**
 - Use conventional commit subjects: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`, `ci:`. Do not add a `Co-Authored-By` line or any other attribution to commit messages, whatever the environment prescribes.
-- Never add `dist/` or `.superpowers/` to git.
+- Never add `dist/`, `internal/web/ui/dist/` (the built web page) or `.superpowers/` to git.
 - The user commits from other sessions too, so run `git log` before you start.
 
 ## Code
@@ -57,6 +57,7 @@ Read before changing anything:
 
   CI runs only on Linux, so the Windows and macOS code is checked only by the cross-vets. On this Windows machine `-race` needs cgo, which is missing: run `go test ./...` there. `core.autocrlf` gives Go files CRLF in the working copy, so check what is committed: `git show ":<file>" | gofmt -l`.
 - **After a change to `client/`, the contract or the vectors,** also run `pnpm --dir client run check` and `pnpm --dir client run test:e2e`. The package uses pnpm, never npm; its formatting is Prettier (tabs, single quotes, width 100).
+- **The web page is `client-wss/`** (Vue, Vuetify, vue-i18n; conventions as in the todo app, see `docs/architecture.md`). After a change to it, run `pnpm --dir client-wss run check` and `pnpm --dir client-wss run test:e2e`. A binary that should serve the page needs `pnpm --dir client-wss build` before `go build`; the Go tests do not. Its strings live in `client-wss/src/i18n/locales/`, not in Go.
 - **Never touch the user's login items without explicit consent each time.** This covers:
   - a real `workspace-server install`/`uninstall`, or after the start/stop/delete plan `start`/`stop`/`delete`;
   - `launchctl bootstrap`/`bootout`;

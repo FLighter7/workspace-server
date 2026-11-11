@@ -1,4 +1,6 @@
 /workspace-server
 /workspace-server.exe
 /dist/
+# The built page: client-wss builds it, the binary embeds it, git never holds it.
+/internal/web/ui/dist/
 .DS_Store

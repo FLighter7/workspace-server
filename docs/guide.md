@@ -101,7 +101,7 @@ On the first start the server creates its folder and an entry for the `todo` app
 
 ## The web page
 
-`http://127.0.0.1:47801/` opens only on this computer; other devices cannot reach it. It follows the browser's language (English, Russian or Polish) and the system's light or dark theme. It has four sections:
+`http://127.0.0.1:47801/` opens only on this computer; other devices cannot reach it. It starts in the browser's language (English, Russian or Polish) and the system's light or dark theme; the two buttons at the top right change them, and the browser remembers the choice. It has four sections:
 
 - **Server** (Сервер):
   - shows the name devices see, the computer's addresses, the server's `.local` name and whether it is published, and the two ports; a warning under the addresses means devices cannot connect at the moment (the reason is in `server.log`), and the server keeps trying;
@@ -243,11 +243,15 @@ To run a second, separate server, or one on other ports for one run:
 
 ## Building from source
 
-You need Go 1.27.
+You need Go 1.27, and Node.js with pnpm for the web page. Build the page first: the program carries it inside.
 
 ```
+pnpm --dir client-wss install
+pnpm --dir client-wss build
 go build ./cmd/workspace-server
 go test -race ./...
 ```
+
+A program built without the page still works, but its page only says how to build it.
 
 How it works inside, why it was built this way, and how releases are made: [architecture.md](architecture.md).
