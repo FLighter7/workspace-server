@@ -40,8 +40,8 @@
 
 | Система | Файл |
 | --- | --- |
-| macOS, Apple silicon | `wss-darwin-arm64` |
-| macOS, Intel | `wss-darwin-amd64` |
+| macOS, Apple silicon | `wss-mac-arm64` |
+| macOS, Intel | `wss-mac-amd64` |
 | Windows | `wss-windows-amd64.exe` |
 | Linux, x86-64 | `wss-linux-amd64` |
 | Linux, ARM64 | `wss-linux-arm64` |
@@ -53,7 +53,7 @@
 3. **На macOS и Linux сделайте файл исполняемым.** В терминале, в этой папке (подставьте имя скачанного файла):
 
    ```
-   mv wss-darwin-arm64 workspace-server
+   mv wss-mac-arm64 workspace-server
    chmod +x workspace-server
    ```
 

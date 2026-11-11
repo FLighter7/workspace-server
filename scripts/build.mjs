@@ -10,13 +10,13 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-/** Every platform a release carries: GOOS, GOARCH. */
+/** Every platform a release carries: GOOS, GOARCH, and the system's name in the file's. */
 const TARGETS = [
-	['darwin', 'arm64'],
-	['darwin', 'amd64'],
-	['windows', 'amd64'],
-	['linux', 'amd64'],
-	['linux', 'arm64'],
+	['darwin', 'arm64', 'mac'],
+	['darwin', 'amd64', 'mac'],
+	['windows', 'amd64', 'windows'],
+	['linux', 'amd64', 'linux'],
+	['linux', 'arm64', 'linux'],
 ];
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -53,8 +53,8 @@ rmSync(DIST, { recursive: true, force: true });
 mkdirSync(DIST);
 
 const files = [];
-for (const [goos, goarch] of TARGETS) {
-	const name = `wss-${goos}-${goarch}${goos === 'windows' ? '.exe' : ''}`;
+for (const [goos, goarch, system] of TARGETS) {
+	const name = `wss-${system}-${goarch}${goos === 'windows' ? '.exe' : ''}`;
 	run(
 		'go',
 		[

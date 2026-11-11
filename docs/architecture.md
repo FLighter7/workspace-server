@@ -521,7 +521,7 @@ Each step runs even if an earlier one failed; failures go to stderr (the log may
 ## Packaging, CI, release
 
 - **Binaries:** one per platform, everything embedded, with no runtime:
-  - `wss-darwin-arm64`, `-darwin-amd64`;
+  - `wss-mac-arm64`, `-mac-amd64` (Go's `darwin`);
   - `-windows-amd64.exe`;
   - `-linux-amd64`, `-linux-arm64`.
 

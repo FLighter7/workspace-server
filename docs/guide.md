@@ -40,8 +40,8 @@ Download the file for your system from [GitHub Releases](https://github.com/FLig
 
 | System | File |
 | --- | --- |
-| macOS, Apple silicon | `wss-darwin-arm64` |
-| macOS, Intel | `wss-darwin-amd64` |
+| macOS, Apple silicon | `wss-mac-arm64` |
+| macOS, Intel | `wss-mac-amd64` |
 | Windows | `wss-windows-amd64.exe` |
 | Linux, x86-64 | `wss-linux-amd64` |
 | Linux, ARM64 | `wss-linux-arm64` |
@@ -53,7 +53,7 @@ Download the file for your system from [GitHub Releases](https://github.com/FLig
 3. **On macOS and Linux, make it executable.** In a terminal, in that folder (use the name of the file you downloaded):
 
    ```
-   mv wss-darwin-arm64 workspace-server
+   mv wss-mac-arm64 workspace-server
    chmod +x workspace-server
    ```
 

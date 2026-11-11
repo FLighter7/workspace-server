@@ -65,7 +65,7 @@ Read before changing anything:
   - `schtasks /Create`/`/Delete`.
 
   Tests cover only the pure builders.
-- **`dist/` holds the build and nothing else:** `wss-<os>-<arch>[.exe]` for every platform and `SHA256SUMS`, written by `node scripts/build.mjs [version]` (the page first, then the binaries; the release runs the same script). The platform list lives in that script only.
+- **`dist/` holds the build and nothing else:** `wss-<os>-<arch>[.exe]` for every platform (`<os>` is `mac`, `windows` or `linux`; `mac` for Go's `darwin`) and `SHA256SUMS`, written by `node scripts/build.mjs [version]` (the page first, then the binaries; the release runs the same script). The platform list lives in that script only.
 - **`tmp/` holds everything throwaway:** a binary built for a check, throwaway servers' data folders, e2e data (`tmp/client-e2e-*`, `tmp/page-e2e-*`), and check reports in `tmp/reports/`. Build a binary for a check with `go build -o tmp/<name>.exe ./cmd/workspace-server`, never into the repository root or `dist/`.
 - **Throwaway servers** get a data folder under `tmp/`, and ports 47810/47811 when a real server may be running.
 - **Never close Pion objects inside a Pion callback** (it can deadlock), and **never add CORS headers** to the web page. [architecture.md](../docs/architecture.md) explains both.
