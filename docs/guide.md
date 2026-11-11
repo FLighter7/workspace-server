@@ -40,11 +40,11 @@ Download the file for your system from [GitHub Releases](https://github.com/FLig
 
 | System | File |
 | --- | --- |
-| macOS, Apple silicon | `workspace-server-darwin-arm64` |
-| macOS, Intel | `workspace-server-darwin-amd64` |
-| Windows | `workspace-server-windows-amd64.exe` |
-| Linux, x86-64 | `workspace-server-linux-amd64` |
-| Linux, ARM64 | `workspace-server-linux-arm64` |
+| macOS, Apple silicon | `wss-darwin-arm64` |
+| macOS, Intel | `wss-darwin-amd64` |
+| Windows | `wss-windows-amd64.exe` |
+| Linux, x86-64 | `wss-linux-amd64` |
+| Linux, ARM64 | `wss-linux-arm64` |
 
 `SHA256SUMS` in the same release lists the checksums. The program is one file. There is no installer, and nothing else to install.
 
@@ -53,7 +53,7 @@ Download the file for your system from [GitHub Releases](https://github.com/FLig
 3. **On macOS and Linux, make it executable.** In a terminal, in that folder (use the name of the file you downloaded):
 
    ```
-   mv workspace-server-darwin-arm64 workspace-server
+   mv wss-darwin-arm64 workspace-server
    chmod +x workspace-server
    ```
 
@@ -243,15 +243,18 @@ To run a second, separate server, or one on other ports for one run:
 
 ## Building from source
 
-You need Go 1.27, and Node.js with pnpm for the web page. Build the page first: the program carries it inside.
+You need Go 1.27, and Node.js with pnpm for the web page, which the program carries inside.
 
 ```
-pnpm --dir client-wss install
-pnpm --dir client-wss build
-go build ./cmd/workspace-server
+node scripts/build.mjs
+```
+
+This builds the page, then the program for every system, into `dist/`: the same files as a release, with `SHA256SUMS`. The tests:
+
+```
 go test -race ./...
 ```
 
-A program built without the page still works, but its page only says how to build it.
+A program built with a plain `go build` and without the page still works, but its page only says how to build it.
 
 How it works inside, why it was built this way, and how releases are made: [architecture.md](architecture.md).

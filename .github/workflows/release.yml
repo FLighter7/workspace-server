@@ -11,13 +11,11 @@ jobs:
   test:
     uses: ./.github/workflows/ci.yml
 
-  # The web page, built once and embedded in every binary.
-  page:
+  # scripts/build.mjs builds the web page, then every platform's binary
+  # (wss-<os>-<arch>) and SHA256SUMS, into dist/.
+  build:
     needs: test
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: client-wss
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -28,62 +26,15 @@ jobs:
           node-version: lts/*
           cache: pnpm
           cache-dependency-path: client-wss/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: page
-          path: internal/web/ui/dist
-          if-no-files-found: error
-
-  build:
-    needs: page
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - goos: darwin
-            goarch: arm64
-            ext: ""
-          - goos: darwin
-            goarch: amd64
-            ext: ""
-          - goos: windows
-            goarch: amd64
-            ext: ".exe"
-          - goos: linux
-            goarch: amd64
-            ext: ""
-          - goos: linux
-            goarch: arm64
-            ext: ""
-    steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: actions/download-artifact@v4
-        with:
-          name: page
-          path: internal/web/ui/dist
-      # Without the page the binary still builds, and serves a 503 instead of it.
-      - name: the page is there
-        run: test -f internal/web/ui/dist/index.html
       - name: build
-        env:
-          CGO_ENABLED: "0"
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: >
-          go build -trimpath
-          -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}"
-          -o "workspace-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
-          ./cmd/workspace-server
+        run: node scripts/build.mjs "$GITHUB_REF_NAME"
       - uses: actions/upload-artifact@v4
         with:
-          name: workspace-server-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: workspace-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          name: dist
+          path: dist
           if-no-files-found: error
 
   release:
@@ -94,13 +45,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          name: dist
           path: dist
-          merge-multiple: true
       - name: checksums
         working-directory: dist
-        run: |
-          sha256sum workspace-server-* > SHA256SUMS
-          cat SHA256SUMS
+        run: sha256sum -c SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

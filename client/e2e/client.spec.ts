@@ -8,7 +8,7 @@ import { expect, test, type Browser, type Page } from '@playwright/test';
 /**
  * The built package against a real workspace-server, in a real browser. The
  * server is built with Go from this repository (or WORKSPACE_SERVER_BIN runs
- * one already built) and keeps its data under the repository's dist/.
+ * one already built) and keeps its data under the repository's tmp/.
  */
 
 interface Device {
@@ -126,9 +126,9 @@ const notesOf = (page: Page): Promise<string[]> => page.evaluate(() => window.de
 test.beforeAll(async () => {
 	// Building the server with Go takes a while on a cold cache.
 	test.setTimeout(180_000);
-	const dist = join(REPO, 'dist');
-	mkdirSync(dist, { recursive: true });
-	tmp = mkdtempSync(join(dist, 'client-e2e-'));
+	const scratch = join(REPO, 'tmp');
+	mkdirSync(scratch, { recursive: true });
+	tmp = mkdtempSync(join(scratch, 'client-e2e-'));
 	const binary = buildServer();
 	httpPort = await freeTcpPort();
 	const udpPort = await freeUdpPort();

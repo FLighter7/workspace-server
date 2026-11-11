@@ -521,17 +521,18 @@ Each step runs even if an earlier one failed; failures go to stderr (the log may
 ## Packaging, CI, release
 
 - **Binaries:** one per platform, everything embedded, with no runtime:
-  - `workspace-server-darwin-arm64`, `-darwin-amd64`;
+  - `wss-darwin-arm64`, `-darwin-amd64`;
   - `-windows-amd64.exe`;
   - `-linux-amd64`, `-linux-arm64`.
+
+  The guide has the user rename the file to `workspace-server`; the program does not depend on its own name.
+- **`scripts/build.mjs [version]`** builds a release locally and in CI alike: the web page (`pnpm install --frozen-lockfile`, `build`), then the five binaries with `CGO_ENABLED=0 -trimpath -ldflags "-s -w -X main.version=<version>"`, and `SHA256SUMS` in `sha256sum`'s format, into a clean `dist/`. The platform list lives there only. `dist/` holds nothing else; throwaway binaries, servers' data, e2e data and check reports go to `tmp/`.
 - **No code signing:** the first run meets Gatekeeper and SmartScreen, and the firewall asks once (on macOS again after each update).
 - **`.github/workflows/ci.yml`:** runs on `ubuntu-latest`: `gofmt`, `go vet ./...` natively and for Windows, macOS and FreeBSD, `go test -race ./...`. The cross-vets compile the other systems' code but run none of it.
 - **`.github/workflows/release.yml`:** on a `v*` tag:
   - runs `ci.yml` first, and builds nothing if it fails;
-  - builds the web page once (`client-wss`) and hands it to every binary's job, which stops if `internal/web/ui/dist/index.html` is missing;
-  - builds the five binaries with `CGO_ENABLED=0 -trimpath -ldflags "-s -w -X main.version=<tag>"`;
-  - writes `SHA256SUMS`;
-  - publishes a release, a pre-release when the tag has a `-` (`v1.0.0-rc1`).
+  - runs `node scripts/build.mjs <tag>` in one job, which stops if the page did not build;
+  - in a job of its own with write access, checks `SHA256SUMS` and publishes `dist/*` as a release, a pre-release when the tag has a `-` (`v1.0.0-rc1`).
 
   Without the ldflag the version is `dev`.
 - **The client package in CI:** `ci.yml`'s `client` job runs on `ubuntu-latest`:

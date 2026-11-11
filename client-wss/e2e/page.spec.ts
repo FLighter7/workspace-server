@@ -15,7 +15,7 @@ import {
  * The built page in a real workspace-server, in a real browser. The server is
  * built with Go from this repository, embedding internal/web/ui/dist (which
  * `pnpm run test:e2e` builds first), or WORKSPACE_SERVER_BIN runs one already
- * built. Its data stays under the repository's dist/.
+ * built. Its data stays under the repository's tmp/.
  */
 
 declare global {
@@ -94,9 +94,9 @@ async function waitForServer(): Promise<void> {
 test.beforeAll(async () => {
 	// Building the server with Go takes a while on a cold cache.
 	test.setTimeout(180_000);
-	const dist = join(REPO, 'dist');
-	mkdirSync(dist, { recursive: true });
-	tmp = mkdtempSync(join(dist, 'page-e2e-'));
+	const scratch = join(REPO, 'tmp');
+	mkdirSync(scratch, { recursive: true });
+	tmp = mkdtempSync(join(scratch, 'page-e2e-'));
 	const binary = buildServer();
 	const httpPort = await freeTcpPort();
 	const udpPort = await freeUdpPort();

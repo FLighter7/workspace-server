@@ -1,6 +1,9 @@
 /workspace-server
 /workspace-server.exe
+# The build: wss-<os>-<arch> and SHA256SUMS, from scripts/build.mjs.
 /dist/
+# Throwaway servers, e2e data, check reports (tmp/reports/).
+/tmp/
 # The built page: client-wss builds it, the binary embeds it, git never holds it.
 /internal/web/ui/dist/
 .DS_Store

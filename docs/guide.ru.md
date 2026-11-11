@@ -40,11 +40,11 @@
 
 | Система | Файл |
 | --- | --- |
-| macOS, Apple silicon | `workspace-server-darwin-arm64` |
-| macOS, Intel | `workspace-server-darwin-amd64` |
-| Windows | `workspace-server-windows-amd64.exe` |
-| Linux, x86-64 | `workspace-server-linux-amd64` |
-| Linux, ARM64 | `workspace-server-linux-arm64` |
+| macOS, Apple silicon | `wss-darwin-arm64` |
+| macOS, Intel | `wss-darwin-amd64` |
+| Windows | `wss-windows-amd64.exe` |
+| Linux, x86-64 | `wss-linux-amd64` |
+| Linux, ARM64 | `wss-linux-arm64` |
 
 Контрольные суммы — в файле `SHA256SUMS` того же релиза. Программа — один файл. Установщика нет, и больше ничего ставить не нужно.
 
@@ -53,7 +53,7 @@
 3. **На macOS и Linux сделайте файл исполняемым.** В терминале, в этой папке (подставьте имя скачанного файла):
 
    ```
-   mv workspace-server-darwin-arm64 workspace-server
+   mv wss-darwin-arm64 workspace-server
    chmod +x workspace-server
    ```
 
@@ -243,15 +243,18 @@ apps/<id>/history/     предыдущие версии (по умолчани�
 
 ## Сборка из исходников
 
-Нужны Go 1.27, а для веб-страницы — Node.js и pnpm. Сначала соберите страницу: программа носит её в себе.
+Нужны Go 1.27, а для веб-страницы, которую программа носит в себе, — Node.js и pnpm.
 
 ```
-pnpm --dir client-wss install
-pnpm --dir client-wss build
-go build ./cmd/workspace-server
+node scripts/build.mjs
+```
+
+Команда собирает страницу, затем программу для всех систем — в `dist/`: те же файлы, что в релизе, вместе с `SHA256SUMS`. Тесты:
+
+```
 go test -race ./...
 ```
 
-Программа, собранная без страницы, работает, но её страница только подсказывает, как её собрать.
+Программа, собранная простым `go build` без страницы, работает, но её страница только подсказывает, как её собрать.
 
 Как всё устроено внутри, почему сделано именно так и как выпускаются релизы — в [architecture.md](architecture.md) (на английском).

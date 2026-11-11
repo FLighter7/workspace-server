@@ -6,7 +6,7 @@ import vueI18n from '@intlify/unplugin-vue-i18n/vite';
 
 /**
  * The server `pnpm run dev` sends /api to: a throwaway one, with a data folder
- * under the repository's dist/ and port 47811, as .claude/CLAUDE.md asks.
+ * under the repository's tmp/ and port 47811, as .claude/CLAUDE.md asks.
  */
 const target = process.env.WSS_TARGET ?? 'http://127.0.0.1:47811';
 

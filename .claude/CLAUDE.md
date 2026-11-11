@@ -26,7 +26,7 @@ Read before changing anything:
   2. move what is left open into `TODO.md`;
   3. delete the plan file. Git keeps it.
 - **Checks on a real machine** (Windows, macOS):
-  - the full report, with every command and its output, goes to the gitignored `dist/` folder;
+  - the full report, with every command and its output, goes to the gitignored `tmp/reports/` folder;
   - the verdicts go into `architecture.md`, "What has been verified, where";
   - failures and anything unchecked go into `TODO.md`.
 - **Linux is not tested on a real machine:** there is none to check it on. The Linux build, its cross-vet and CI stay; only the run on a real machine is skipped. Do not add Linux checks to `TODO.md`, and do not claim Linux was tested.
@@ -36,7 +36,7 @@ Read before changing anything:
 
 - Work directly on `main`; no branches or worktrees unless the user asks. **Never push: the user pushes.**
 - Use conventional commit subjects: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`, `ci:`. Do not add a `Co-Authored-By` line or any other attribution to commit messages, whatever the environment prescribes.
-- Never add `dist/`, `internal/web/ui/dist/` (the built web page) or `.superpowers/` to git.
+- Never add `dist/`, `tmp/`, `internal/web/ui/dist/` (the built web page) or `.superpowers/` to git.
 - The user commits from other sessions too, so run `git log` before you start.
 
 ## Code
@@ -65,5 +65,7 @@ Read before changing anything:
   - `schtasks /Create`/`/Delete`.
 
   Tests cover only the pure builders.
-- **Throwaway servers** get a data folder under `dist/`, and ports 47810/47811 when a real server may be running.
+- **`dist/` holds the build and nothing else:** `wss-<os>-<arch>[.exe]` for every platform and `SHA256SUMS`, written by `node scripts/build.mjs [version]` (the page first, then the binaries; the release runs the same script). The platform list lives in that script only.
+- **`tmp/` holds everything throwaway:** a binary built for a check, throwaway servers' data folders, e2e data (`tmp/client-e2e-*`, `tmp/page-e2e-*`), and check reports in `tmp/reports/`. Build a binary for a check with `go build -o tmp/<name>.exe ./cmd/workspace-server`, never into the repository root or `dist/`.
+- **Throwaway servers** get a data folder under `tmp/`, and ports 47810/47811 when a real server may be running.
 - **Never close Pion objects inside a Pion callback** (it can deadlock), and **never add CORS headers** to the web page. [architecture.md](../docs/architecture.md) explains both.
