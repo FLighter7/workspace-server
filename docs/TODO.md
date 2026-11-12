@@ -20,6 +20,7 @@ Everything about the local hub (a subordinate, handing it out, switching the mai
 - **Phones through the laptop:** iPhone and Android on the laptop's server through a hotspot; a phone paired with the PC syncing through the laptop while the PC is off, and following the laptop after a switch. These need a todo with fallback servers on the phone: the deployed one after the publish, or a local build behind an HTTPS tunnel.
 - **Clients never tried at all:** Mac Safari and Android (the hub checks above cover both).
 - **todo's screen reader run** (`pnpm run test:sr`, Windows, the machine left alone), not run since the Sync page gained the "Through {name}…" line, the `notMain` reason, and "Server: {name}" after the device follows a new main. No NVDA scenario covers those lines yet: the run catches regressions, and the new lines need a scenario or a listen by hand.
+- **The diagram** (`docs/images/connections*.svg`) was rendered and checked only on Windows (Chromium and WebKit, with glyphs 7% wider standing in for Mac fonts): look at it on GitHub, light and dark theme, and in Safari on the Mac.
 - **Older, unchecked:** the mDNS responder on a Windows machine with several adapters; whether a device connects right after "Allow" in the Windows Firewall dialog of a first start.
 
 ## Known gaps
