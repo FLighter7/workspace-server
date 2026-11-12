@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1646" width="1000" height="1646" role="img" aria-labelledby="title desc" xml:lang="en">
   <title id="title">The local hub: how servers and devices connect</title>
-  <desc id="desc">Three scenes. At home: the phone and the laptop’s browser sync with the main server on the PC; the subordinate server on the laptop links to the main, pulls and pushes the documents, and keeps the same files (apps/&lt;id&gt;/data.json and apps/&lt;id&gt;/history/) on its own disk; the main’s welcome tells each device its role, the term and the list of subordinates. Away: the main is out of reach; the phone and the laptop’s browser sync with the laptop’s server without pairing again; back home the link returns and the laptop pushes, and when both sides changed the main’s copy wins on the laptop, whose own copy stays in history/. Switching the main: a planned switch syncs the documents, raises the term, and the old main steps down and links to the new one; a forced switch leaves two mains until they meet, when the higher term wins and a tie goes to the higher serverId. Legend: device sessions, the server link, and pairing, which happens only with the main.</desc>
+  <desc id="desc">Three scenes. At home: the phone and the laptop’s browser sync with the main server on the PC; the subordinate server on the laptop links to the main, pulls and pushes the documents, and keeps the same files (apps/&lt;id&gt;/data.json and apps/&lt;id&gt;/history/) on its own disk; the main’s welcome tells each device its role and the list of subordinates, and the family’s term once it is above 0. Away: the main is out of reach; the phone and the laptop’s browser sync with the laptop’s server without pairing again; back home the link returns and the laptop pushes, and when both sides changed the main’s copy wins on the laptop, whose own copy stays in history/. Switching the main: a planned switch waits until both servers hold the same documents, raises the term from 0 to 1, and the old main steps down and links to the new one; a forced switch leaves two mains, at terms 0 and 1, until they meet, when the higher term wins and a tie goes to the higher serverId. Legend: device sessions, the server link, and pairing, which happens only with the main.</desc>
   <style>
     text { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; font-size: 13px; fill: #1f2328; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12.5px; }
@@ -119,7 +119,8 @@
     <!-- what the main's welcome carries -->
     <rect x="300" y="526" width="388" height="112" rx="8" class="callout"/>
     <text x="316" y="548" class="t-session strong">welcome: the main’s answer to a device</text>
-    <text x="316" y="568" class="mono">role: "main", term: 1</text>
+    <text x="316" y="568" class="mono">role: "main"</text>
+    <text x="420" y="568" class="muted">term: left out while it is 0</text>
     <text x="316" y="586" class="mono">subordinates: [the laptop’s server]</text>
     <text x="316" y="606" class="muted">each with id, name, ICE password,</text>
     <text x="316" y="624" class="muted">fingerprint, port and hosts; no secret</text>
@@ -201,41 +202,42 @@
     <text x="48" y="1282" class="muted">Before</text>
     <rect x="48" y="1290" width="170" height="54" rx="8" class="main"/>
     <text x="62" y="1312" class="strong">PC</text>
-    <text x="62" y="1332">main · term 1</text>
+    <text x="62" y="1332">main · term 0</text>
     <rect x="310" y="1290" width="170" height="54" rx="8" class="node"/>
     <text x="324" y="1312" class="strong">Laptop</text>
     <text x="324" y="1332" class="muted">subordinate</text>
     <line x1="310" y1="1317" x2="218" y2="1317" class="link" marker-end="url(#head-link)"/>
     <text x="48" y="1374">1. On the laptop’s page: “Make this server the main”</text>
-    <text x="65" y="1393">(on the main’s page: “Hand the role to…”)</text>
-    <text x="48" y="1412">2. The documents sync over the link; term 1 → 2.</text>
-    <text x="48" y="1431">3. The PC steps down, gets a server token from the</text>
-    <text x="65" y="1450">laptop, and links to it.</text>
-    <text x="48" y="1469">4. Other subordinates relink; devices learn the new</text>
-    <text x="65" y="1488">main from their next welcome.</text>
+    <text x="65" y="1393">(on the main’s page: “Make it the main” on its card)</text>
+    <text x="48" y="1412">2. Both servers hold the same documents first (it</text>
+    <text x="65" y="1431">waits 10 s at most); term 0 → 1.</text>
+    <text x="48" y="1450">3. The PC steps down, gets a server token from the</text>
+    <text x="65" y="1469">laptop, and links to it.</text>
+    <text x="48" y="1488">4. Other subordinates relink; devices learn the new</text>
+    <text x="65" y="1507">main from their next welcome.</text>
     <text x="48" y="1556" class="muted">After</text>
     <rect x="48" y="1564" width="170" height="54" rx="8" class="node"/>
     <text x="62" y="1586" class="strong">PC</text>
     <text x="62" y="1606" class="muted">subordinate</text>
     <rect x="310" y="1564" width="170" height="54" rx="8" class="main"/>
     <text x="324" y="1586" class="strong">Laptop</text>
-    <text x="324" y="1606">main · term 2</text>
+    <text x="324" y="1606">main · term 1</text>
     <line x1="218" y1="1591" x2="310" y2="1591" class="link" marker-end="url(#head-link)"/>
     <!-- forced: the main is unreachable -->
     <text x="528" y="1256" class="h3">Forced: the main is unreachable</text>
     <text x="528" y="1282" class="muted">While apart</text>
     <rect x="528" y="1290" width="170" height="54" rx="8" class="main"/>
     <text x="542" y="1312" class="strong">PC</text>
-    <text x="542" y="1332">main · term 1</text>
+    <text x="542" y="1332">main · term 0</text>
     <rect x="790" y="1290" width="170" height="54" rx="8" class="main"/>
     <text x="804" y="1312" class="strong">Laptop</text>
-    <text x="804" y="1332">main · term 2</text>
+    <text x="804" y="1332">main · term 1</text>
     <line x1="698" y1="1317" x2="790" y2="1317" class="gone"/>
     <circle cx="744" cy="1317" r="9" class="cross"/>
     <path d="M740,1313 L748,1321 M748,1313 L740,1321" class="cross-mark"/>
     <text x="528" y="1374">1. The same button, behind a confirmation.</text>
-    <text x="528" y="1393">2. The laptop becomes the main at term 2; the PC, if</text>
-    <text x="545" y="1412">still running, stays the main at term 1.</text>
+    <text x="528" y="1393">2. The laptop becomes the main at term 1; the PC, if</text>
+    <text x="545" y="1412">still running, stays the main at term 0.</text>
     <text x="528" y="1431">3. Devices sync with whichever one they reach;</text>
     <text x="545" y="1450">nothing is lost.</text>
     <text x="528" y="1469">4. When they meet, the higher term wins: the PC</text>
@@ -248,7 +250,7 @@
     <text x="542" y="1606" class="muted">subordinate</text>
     <rect x="790" y="1564" width="170" height="54" rx="8" class="main"/>
     <text x="804" y="1586" class="strong">Laptop</text>
-    <text x="804" y="1606">main · term 2</text>
+    <text x="804" y="1606">main · term 1</text>
     <line x1="698" y1="1591" x2="790" y2="1591" class="link" marker-end="url(#head-link)"/>
   </g>
 </svg>
