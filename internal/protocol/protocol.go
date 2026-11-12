@@ -28,6 +28,21 @@ const (
 	CodeBlocked = "blocked"
 )
 
+// The roles a server names in welcome: a main has no upstream server; a
+// subordinate is linked to a main and mirrors its apps.
+const (
+	RoleMain        = "main"
+	RoleSubordinate = "subordinate"
+)
+
+// The kinds a pair may name. A device pairs for one app; a server (a
+// subordinate linking to this server) is admitted to every app, and its
+// pairing session is a link session, which has no app.
+const (
+	KindDevice = "device"
+	KindServer = "server"
+)
+
 // Error is a refusal sent to the client as an error frame. Message is
 // English, for a developer.
 type Error struct {
@@ -36,12 +51,20 @@ type Error struct {
 }
 
 // Welcome is what a welcome frame tells an authenticated client. Etag is nil
-// when the app has no document.
+// when the app has no document, and always on a link session. Role is
+// RoleMain or RoleSubordinate; an empty Role is left out of the frame.
 type Welcome struct {
 	ServerID string
 	Name     string
 	Etag     *string
 	Hosts    []string
+	Role     string
+}
+
+// AppInfo is one entry of the app list a server-kind session is told.
+type AppInfo struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // Channel is the data channel a Session speaks over. *webrtc.DataChannel
@@ -60,11 +83,19 @@ type Channel interface {
 // session's incoming messages, except Closed and an undoing Forget.
 type Backend interface {
 	// Hello authenticates a known device. s.App() and s.Device() are still
-	// empty during the call; s.Remote() is set. s.PushChanged may be called
-	// during the call: the session holds the push until after its welcome.
+	// empty during the call; s.Remote() is set. s.PushChanged and
+	// s.PushApps may be called during the call: the session holds the push
+	// until after its welcome. An empty app asks for a link session, which
+	// only a server-kind device may open.
 	Hello(s *Session, app, device, token string) (Welcome, *Error)
-	// Pair registers a new device with a one-time secret. As for Hello.
-	Pair(s *Session, app, secret, name string) (device, token string, w Welcome, err *Error)
+	// Pair registers a new device with a one-time secret. As for Hello. kind
+	// is KindDevice or KindServer; a server-kind pair names no app (app is
+	// empty) and opens a link session.
+	Pair(s *Session, kind, app, secret, name string) (device, token string, w Welcome, err *Error)
+	// Apps returns the app list for an authenticated session that asks for
+	// it. Only a server-kind device may ask: any other gets an error with
+	// CodeProtocol, which closes the session.
+	Apps(s *Session) ([]AppInfo, *Error)
 	Head(app string) (*string, *Error)
 	Get(app string) ([]byte, *string, *Error)
 	// MaxBytes is the largest body a put to app may announce.

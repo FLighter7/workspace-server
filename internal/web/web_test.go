@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/FLighter7/workspace-server/internal/apps"
 	"github.com/FLighter7/workspace-server/internal/pairing"
+	"github.com/FLighter7/workspace-server/internal/upstream"
 )
 
 const testPort = 47801
@@ -63,6 +65,10 @@ type fakeBackend struct {
 	verdicts   []string
 	dataDirErr error
 	sameDir    bool
+
+	upstream  upstream.Status
+	linkErr   error
+	linkCodes []string
 }
 
 func (f *fakeBackend) record(call string) {
@@ -78,6 +84,19 @@ func (f *fakeBackend) Stop(removeAutostart bool) {
 	} else {
 		f.record("stop")
 	}
+}
+
+func (f *fakeBackend) Upstream() upstream.Status { return f.upstream }
+
+func (f *fakeBackend) LinkUpstream(ctx context.Context, code string) error {
+	f.linkCodes = append(f.linkCodes, code)
+	if _, ok := ctx.Deadline(); !ok {
+		return errors.New("no deadline")
+	}
+	if f.linkErr == nil {
+		f.upstream = upstream.Status{Linked: true, ServerID: "MainServer01", Name: "Desk", Apps: []string{}}
+	}
+	return f.linkErr
 }
 
 func (f *fakeBackend) Reset()        { f.record("reset") }
@@ -106,7 +125,7 @@ func newFake() *fakeBackend {
 			MDNSName: "0b7c2f1e-8d4a-4c7b-9a51-3f2e6d8c9b10.local", MDNSRunning: true,
 			Addresses: []string{"192.168.1.20"}, UDPPort: 47800, HTTPPort: testPort,
 			Program: "/Applications/ws/workspace-server", ServerDir: "/Users/a/Library/Application Support/workspace-server",
-			DataDir: "/Users/a/Data", MainServer: true,
+			DataDir: "/Users/a/Data", MainServer: true, Role: "main",
 		},
 		apps: []AppInfo{{
 			App:  apps.App{ID: "todo", Name: "Todo", History: 10, MaxBytes: apps.DefaultMaxBytes},
@@ -339,6 +358,7 @@ func TestGuardMutatingNeedsHeader(t *testing.T) {
 		{http.MethodDelete, "/api/data", ""},
 		{http.MethodDelete, "/api/server", ""},
 		{http.MethodPut, "/api/config", `{"dataDir":"/x"}`},
+		{http.MethodPost, "/api/upstream", `{"code":"wsrv1.x"}`},
 	} {
 		r := request(tc.method, tc.path, tc.body)
 		r.Header.Del("X-Workspace-Server")
@@ -347,7 +367,7 @@ func TestGuardMutatingNeedsHeader(t *testing.T) {
 			t.Errorf("%s %s without the header: status %d, want 403", tc.method, tc.path, w.Code)
 		}
 	}
-	if len(f.configCalls)+len(f.added)+len(f.deleted)+len(f.removed)+len(f.calls)+len(f.dataDirs) != 0 || f.issued != 1 {
+	if len(f.configCalls)+len(f.added)+len(f.deleted)+len(f.removed)+len(f.calls)+len(f.dataDirs)+len(f.linkCodes) != 0 || f.issued != 1 {
 		t.Errorf("refused requests reached the backend: %+v", f)
 	}
 }
@@ -395,6 +415,7 @@ func TestGuardOrigin(t *testing.T) {
 		{http.MethodDelete, "/api/data", ""},
 		{http.MethodDelete, "/api/server", ""},
 		{http.MethodPut, "/api/config", `{"dataDir":"/x"}`},
+		{http.MethodPost, "/api/upstream", `{"code":"wsrv1.x"}`},
 	} {
 		r := request(tc.method, tc.path, tc.body)
 		r.Header.Set("Origin", "https://evil.example")
@@ -854,7 +875,8 @@ func TestJSONShape(t *testing.T) {
 	}
 
 	for path, want := range map[string][]string{
-		"/api/status": {"addresses", "dataDir", "httpPort", "lastError", "listening", "mainServer", "mdnsName", "mdnsRunning", "name", "program", "serverDir", "serverId", "udpPort"},
+		"/api/status":   {"addresses", "dataDir", "httpPort", "lastError", "listening", "mainServer", "mdnsName", "mdnsRunning", "name", "program", "role", "serverDir", "serverId", "udpPort"},
+		"/api/upstream": {"apps", "connected", "halted", "linked"},
 	} {
 		if got := keysOf(t, getObject(path)); !reflect.DeepEqual(got, want) {
 			t.Errorf("GET %s keys = %v, want %v", path, got, want)
@@ -1106,4 +1128,53 @@ func TestWrongMethodIsJSON(t *testing.T) {
 func withMarker(r *http.Request) *http.Request {
 	r.Header.Set("X-Workspace-Server", "1")
 	return r
+}
+
+// POST /api/upstream links with the code given and answers with the link's
+// status; its refusals map to codes the page can tell apart, and the main's
+// refusal carries its reason.
+func TestLinkUpstream(t *testing.T) {
+	f := newFake()
+	h := newTestHandler(f)
+
+	w := serve(h, request(http.MethodGet, "/api/upstream", ""))
+	wantStatus(t, w, http.StatusOK)
+	if got := strings.TrimSpace(w.Body.String()); got != `{"linked":false,"connected":false,"halted":false,"apps":[]}` {
+		t.Errorf("GET /api/upstream before a link = %s", got)
+	}
+
+	w = serve(h, request(http.MethodPost, "/api/upstream", `{"code":"wsrv1.abc"}`))
+	wantStatus(t, w, http.StatusOK)
+	var st upstream.Status
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil || !st.Linked || st.ServerID != "MainServer01" {
+		t.Errorf("POST /api/upstream = %s, %v; want the linked status", w.Body.String(), err)
+	}
+	if !slices.Equal(f.linkCodes, []string{"wsrv1.abc"}) {
+		t.Errorf("codes linked with: %v", f.linkCodes)
+	}
+
+	for _, tc := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{upstream.ErrBadCode, http.StatusBadRequest, "invalid"},
+		{upstream.ErrOwnCode, http.StatusBadRequest, "invalid"},
+		{upstream.ErrLinked, http.StatusConflict, "exists"},
+		{upstream.ErrBusy, http.StatusConflict, "busy"},
+		{errors.New("disk"), http.StatusInternalServerError, "internal"},
+	} {
+		f.linkErr = tc.err
+		wantError(t, serve(h, request(http.MethodPost, "/api/upstream", `{"code":"x"}`)), tc.status, tc.code)
+	}
+
+	f.linkErr = &upstream.RefusedError{Reason: upstream.ReasonNotMain, Err: errors.New("not a main")}
+	w = serve(h, request(http.MethodPost, "/api/upstream", `{"code":"x"}`))
+	wantError(t, w, http.StatusBadGateway, "upstream")
+	var body struct{ Reason string }
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body.Reason != "notMain" {
+		t.Errorf("refusal %s, want reason notMain", w.Body.String())
+	}
+
+	wantError(t, serve(h, request(http.MethodPost, "/api/upstream", `{"secret":"x"}`)), http.StatusBadRequest, "invalid")
 }

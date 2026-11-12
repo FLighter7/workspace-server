@@ -33,16 +33,26 @@ const (
 	touchInterval = time.Minute
 )
 
-// Device is one paired device of one app. TokenHash is the lowercase hex
-// SHA-256 of the device's token.
+// KindServer is the kind of a device that is another workspace-server: a
+// subordinate linked to this one. It is admitted to every app this server
+// lists, and its App is empty. A device of any other kind (Kind empty) is
+// admitted to its App only.
+const KindServer = "server"
+
+// Device is one paired device. TokenHash is the lowercase hex SHA-256 of the
+// device's token. A server-kind device (Kind KindServer) has no App.
 type Device struct {
 	ID        string    `json:"id"`
 	App       string    `json:"app"`
+	Kind      string    `json:"kind,omitempty"`
 	Name      string    `json:"name"`
 	TokenHash string    `json:"tokenHash"`
 	PairedAt  time.Time `json:"pairedAt"`
 	LastSeen  time.Time `json:"lastSeen"`
 }
+
+// IsServer reports whether d is a server-kind device.
+func (d Device) IsServer() bool { return d.Kind == KindServer }
 
 var tokenHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -65,7 +75,8 @@ type Registry struct {
 // Open reads the registry at path. A missing file is an empty registry (the
 // file is created on the first change); an unreadable or invalid file is an
 // error and is left untouched: an entry with an empty or repeated id, an
-// invalid app id, or a tokenHash that is not 64 lowercase hex digits. Times
+// unknown kind, an invalid app id (a server-kind entry has none), or a
+// tokenHash that is not 64 lowercase hex digits. Times
 // are read into UTC. now supplies the clock for PairedAt, LastSeen and write
 // throttling.
 func Open(path string, now func() time.Time) (*Registry, error) {
@@ -89,7 +100,11 @@ func Open(path string, now func() time.Time) (*Registry, error) {
 			return nil, fmt.Errorf("%s: devices[%d]: empty id", path, i)
 		case seen[d.ID]:
 			return nil, fmt.Errorf("%s: devices[%d]: id %q is used twice", path, i, d.ID)
-		case !apps.ValidID(d.App):
+		case d.Kind != "" && d.Kind != KindServer:
+			return nil, fmt.Errorf("%s: devices[%d]: unknown kind %q", path, i, d.Kind)
+		case d.IsServer() && d.App != "":
+			return nil, fmt.Errorf("%s: devices[%d]: a server-kind device has no app, not %q", path, i, d.App)
+		case !d.IsServer() && !apps.ValidID(d.App):
 			return nil, fmt.Errorf("%s: devices[%d]: app %q must match ^[a-z0-9-]{1,64}$", path, i, d.App)
 		case !tokenHashPattern.MatchString(d.TokenHash):
 			return nil, fmt.Errorf("%s: devices[%d]: tokenHash must be 64 lowercase hex digits", path, i)
@@ -106,6 +121,16 @@ func Open(path string, now func() time.Time) (*Registry, error) {
 // token is returned only here; it cannot be recovered later. The name is
 // trimmed and cut to 64 runes, and an empty name becomes "Device".
 func (r *Registry) Pair(app, name string) (Device, string, error) {
+	return r.pair("", app, name)
+}
+
+// PairServer registers a new server-kind device, admitted to every app, and
+// returns it with its token, as Pair does.
+func (r *Registry) PairServer(name string) (Device, string, error) {
+	return r.pair(KindServer, "", name)
+}
+
+func (r *Registry) pair(kind, app, name string) (Device, string, error) {
 	token, err := newToken()
 	if err != nil {
 		return Device{}, "", err
@@ -117,6 +142,7 @@ func (r *Registry) Pair(app, name string) (Device, string, error) {
 	d := Device{
 		ID:        r.newID(),
 		App:       app,
+		Kind:      kind,
 		Name:      cleanName(name),
 		TokenHash: hashToken(token),
 		PairedAt:  at,
@@ -132,15 +158,16 @@ func (r *Registry) Pair(app, name string) (Device, string, error) {
 	return d, token, nil
 }
 
-// Authenticate reports whether token belongs to device id of app. It does not
-// update LastSeen; call Touch for that.
+// Authenticate reports whether token belongs to device id of app. A
+// server-kind device matches any app, and app "" too: it is admitted to
+// every app. It does not update LastSeen; call Touch for that.
 func (r *Registry) Authenticate(app, id, token string) (Device, bool) {
 	got := hashToken(token)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, d := range r.devices {
-		if d.ID != id || d.App != app {
+		if d.ID != id || (d.App != app && !d.IsServer()) {
 			continue
 		}
 		if subtle.ConstantTimeCompare([]byte(d.TokenHash), []byte(got)) == 1 {
@@ -220,7 +247,18 @@ func (r *Registry) RemoveApp(app string) []Device {
 	return removed
 }
 
+// Get returns device id.
+func (r *Registry) Get(id string) (Device, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if i := r.indexOf(id); i >= 0 {
+		return r.devices[i], true
+	}
+	return Device{}, false
+}
+
 // List returns a copy of all devices, sorted by app, then name, then id.
+// Server-kind devices, which have no app, come first.
 func (r *Registry) List() []Device {
 	r.mu.Lock()
 	out := append([]Device(nil), r.devices...)

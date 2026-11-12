@@ -83,6 +83,7 @@ type exchange struct {
 	Backend map[string]json.RawMessage `json:"backend"`
 	Call    *struct {
 		Method string  `json:"method"`
+		Kind   string  `json:"kind"`
 		App    string  `json:"app"`
 		Device string  `json:"device"`
 		Token  string  `json:"token"`
@@ -91,17 +92,20 @@ type exchange struct {
 		IfEtag *string `json:"ifEtag"`
 		Body   string  `json:"body"`
 	} `json:"call"`
-	Client     obj     `json:"client"`
-	ClientBody *string `json:"clientBody"`
-	Push       *string `json:"push"`
-	Server     []obj   `json:"server"`
-	ServerBody *string `json:"serverBody"`
-	Closes     bool    `json:"closes"`
+	Client     obj       `json:"client"`
+	ClientBody *string   `json:"clientBody"`
+	Push       *string   `json:"push"`
+	PushApps   []AppInfo `json:"pushApps"`
+	Server     []obj     `json:"server"`
+	ServerBody *string   `json:"serverBody"`
+	Closes     bool      `json:"closes"`
+	Error      string    `json:"error"`
 }
 
 type frameVectors struct {
-	Exchanges []exchange `json:"exchanges"`
-	Tolerated struct {
+	Exchanges  []exchange `json:"exchanges"`
+	ServerKind []exchange `json:"serverKind"`
+	Tolerated  struct {
 		Client []struct {
 			Name   string  `json:"name"`
 			Frame  obj     `json:"frame"`
@@ -134,9 +138,10 @@ func configure(t *testing.T, b *fakeBackend, state map[string]json.RawMessage) {
 				Name     string   `json:"name"`
 				Etag     *string  `json:"etag"`
 				Hosts    []string `json:"hosts"`
+				Role     string   `json:"role"`
 			}
 			decode(raw, &w)
-			b.welcome = Welcome{ServerID: w.ServerID, Name: w.Name, Etag: w.Etag, Hosts: w.Hosts}
+			b.welcome = Welcome{ServerID: w.ServerID, Name: w.Name, Etag: w.Etag, Hosts: w.Hosts, Role: w.Role}
 		case "helloError":
 			b.helloErr = refusal(raw)
 		case "paired":
@@ -168,6 +173,10 @@ func configure(t *testing.T, b *fakeBackend, state map[string]json.RawMessage) {
 			}
 		case "putError":
 			b.putErr = refusal(raw)
+		case "apps":
+			decode(raw, &b.apps)
+		case "appsError":
+			b.appsErr = refusal(raw)
 		default:
 			t.Fatalf("unknown backend state %q", key)
 		}
@@ -234,14 +243,18 @@ func expectServerSent(t *testing.T, got []message, ex exchange) {
 	}
 }
 
+// linkHello authenticates a link session: the hello of a server-kind
+// device, with no app.
+const linkHello = `{"t":"hello","proto":1,"device":"s1","token":"x"}`
+
 func TestConformanceExchanges(t *testing.T) {
 	var v frameVectors
 	conformance.Read(t, "frames.json", &v)
-	if len(v.Exchanges) == 0 {
+	if len(v.Exchanges) == 0 || len(v.ServerKind) == 0 {
 		t.Fatal("no exchanges in the vectors")
 	}
 
-	for _, ex := range v.Exchanges {
+	for _, ex := range append(v.Exchanges, v.ServerKind...) {
 		t.Run(ex.Name, func(t *testing.T) {
 			b := newFakeBackend()
 			configure(t, b, ex.Backend)
@@ -252,14 +265,23 @@ func TestConformanceExchanges(t *testing.T) {
 			case "authenticated":
 				authenticate(t, s, fc)
 				pre = len(barrier(t, s, fc))
+			case "link":
+				s.HandleText(linkHello)
+				if !s.Authenticated() || s.App() != "" {
+					t.Fatal("the link session did not authenticate")
+				}
+				pre = len(barrier(t, s, fc))
 			case "new":
 			default:
 				t.Fatalf("unknown session state %q", ex.Session)
 			}
 
-			if ex.Push != nil {
+			switch {
+			case ex.Push != nil:
 				s.PushChanged(*ex.Push)
-			} else {
+			case ex.PushApps != nil:
+				s.PushApps(ex.PushApps)
+			default:
 				frame, err := json.Marshal(ex.Client)
 				if err != nil {
 					t.Fatal(err)
@@ -299,8 +321,22 @@ func TestConformanceExchanges(t *testing.T) {
 					t.Errorf("backend Hello got %v, want %v", got, want)
 				}
 			case "pair":
-				if got, want := b.pairs[len(b.pairs)-1], [3]string{c.App, c.Secret, c.Name}; got != want {
+				kind := c.Kind
+				if kind == "" {
+					kind = KindDevice
+				}
+				if kind != KindDevice && kind != KindServer {
+					if len(b.pairs) != 0 {
+						t.Errorf("backend Pair got %v for an unknown kind", b.pairs)
+					}
+					return
+				}
+				if got, want := b.pairs[len(b.pairs)-1], [4]string{kind, c.App, c.Secret, c.Name}; got != want {
 					t.Errorf("backend Pair got %v, want %v", got, want)
+				}
+			case "apps":
+				if ex.Error == "" && b.count("apps") != 1 {
+					t.Errorf("backend Apps called %d times, want 1", b.count("apps"))
 				}
 			case "put":
 				puts := b.putCalls()

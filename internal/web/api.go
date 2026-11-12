@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/skip2/go-qrcode"
 
 	"github.com/FLighter7/workspace-server/internal/apps"
+	"github.com/FLighter7/workspace-server/internal/upstream"
 )
 
 // Error codes in {"error": code, "message": ...}. The message is English, for
@@ -29,6 +31,15 @@ const (
 	codeDataExists      = "dataExists"
 	codeChanged         = "changed"
 	codeBusy            = "busy"
+	// codeUpstream: the upstream server refused the link or could not be
+	// reached; the answer's reason says why.
+	codeUpstream = "upstream"
+)
+
+const (
+	// linkTimeout bounds linking to an upstream server: reaching it and
+	// pairing.
+	linkTimeout = 30 * time.Second
 )
 
 const (
@@ -353,4 +364,58 @@ func shorten(s string) string {
 		return s
 	}
 	return string([]rune(s)[:displayRunes]) + "…"
+}
+
+func (a *api) upstreamStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, a.upstream())
+}
+
+// upstream is the link's status, its app list [] rather than null.
+func (a *api) upstream() upstream.Status {
+	st := a.b.Upstream()
+	if st.Apps == nil {
+		st.Apps = []string{}
+	}
+	return st
+}
+
+// linkRequest is the body of POST /api/upstream: the main's pairing code.
+type linkRequest struct {
+	Code string `json:"code"`
+}
+
+// refusedBody is the answer when the upstream server refused the link or
+// could not be reached. Reason is a protocol error code (badSecret,
+// blocked, connectTimeout, closed, ...) or notMain or serverChanged.
+type refusedBody struct {
+	Error   string `json:"error"`
+	Message string `json:"message"`
+	Reason  string `json:"reason"`
+}
+
+// linkUpstream links this server to a main and answers with the link's
+// status. It returns once the pairing is done, which can take a while.
+func (a *api) linkUpstream(w http.ResponseWriter, r *http.Request) {
+	var req linkRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), linkTimeout)
+	defer cancel()
+	err := a.b.LinkUpstream(ctx, req.Code)
+	var refused *upstream.RefusedError
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, a.upstream())
+	case errors.Is(err, upstream.ErrBadCode), errors.Is(err, upstream.ErrOwnCode):
+		writeError(w, http.StatusBadRequest, codeInvalid, err.Error())
+	case errors.Is(err, upstream.ErrLinked):
+		writeError(w, http.StatusConflict, codeExists, err.Error())
+	case errors.Is(err, upstream.ErrBusy):
+		writeError(w, http.StatusConflict, codeBusy, err.Error())
+	case errors.As(err, &refused):
+		writeJSON(w, http.StatusBadGateway, refusedBody{Error: codeUpstream, Message: err.Error(), Reason: refused.Reason})
+	default:
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+	}
 }

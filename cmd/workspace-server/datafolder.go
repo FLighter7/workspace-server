@@ -403,8 +403,8 @@ func copyFile(src, dst string) error {
 }
 
 // resetServerDir deletes what makes the server known to its devices: its
-// identity, the app list, the paired devices, and the server's app folders in
-// dataDir.
+// identity, the app list, the paired devices, its link to an upstream server,
+// and the server's app folders in dataDir.
 // config.json, the log and the lock stay. It attempts every removal and
 // returns the first error.
 func resetServerDir(serverDir, dataDir string) error {
@@ -413,6 +413,7 @@ func resetServerDir(serverDir, dataDir string) error {
 		filepath.Join(serverDir, identityFile),
 		filepath.Join(serverDir, appsFile),
 		filepath.Join(serverDir, devicesFile),
+		filepath.Join(serverDir, upstreamFile),
 	} {
 		if err := os.RemoveAll(path); err != nil && first == nil {
 			first = err

@@ -34,7 +34,9 @@ import (
 	"github.com/FLighter7/workspace-server/internal/program"
 	"github.com/FLighter7/workspace-server/internal/rtc"
 	"github.com/FLighter7/workspace-server/internal/store"
+	"github.com/FLighter7/workspace-server/internal/upstream"
 	"github.com/FLighter7/workspace-server/internal/web"
+	"github.com/FLighter7/workspace-server/internal/wsclient"
 )
 
 // Files in the server folder; storeDir is in the data folder, which is the
@@ -44,6 +46,7 @@ const (
 	configFile   = "config.json"
 	appsFile     = "apps.json"
 	devicesFile  = "devices.json"
+	upstreamFile = "upstream.json"
 	storeDir     = "apps"
 	logName      = "server.log"
 	lockFile     = "server.lock"
@@ -461,6 +464,7 @@ type server struct {
 	secrets     *pairing.Secrets
 	refusals    *pairing.Refusals
 	hub         *hub.Hub
+	link        *upstream.Link // the link to an upstream server; idle on a main
 	handler     http.Handler
 	logger      *log.Logger
 	pageLog     *log.Logger // the web server's own errors
@@ -565,10 +569,34 @@ func newServer(opts serverOptions, logger *log.Logger) (*server, error) {
 		Secrets:  s.secrets,
 		Refusals: s.refusals,
 		Now:      time.Now,
+		Role:     func() string { return s.link.Role() },
 		Logf:     func(format string, args ...any) { s.logf("hub: "+format, args...) },
 	})
+	s.link, err = upstream.Open(upstream.Deps{
+		Path:     filepath.Join(dir, upstreamFile),
+		ServerID: id.ServerID,
+		Name:     s.name,
+		Apps:     s.apps,
+		Store:    s.store,
+		Writer:   s.hub,
+		Dial:     s.dialUpstream,
+		Logf:     func(format string, args ...any) { s.logf("upstream: "+format, args...) },
+	})
+	if err != nil {
+		return nil, err
+	}
 	s.handler = web.NewHandler(s, s.httpPort)
 	return s, nil
+}
+
+// dialUpstream opens a session to the upstream server, resolving its .local
+// name over mDNS on the LAN interfaces.
+func (s *server) dialUpstream(ctx context.Context, t wsclient.Target, app string) (*wsclient.Client, error) {
+	return wsclient.Dial(ctx, t, app, wsclient.DialOptions{
+		Resolve: func(ctx context.Context, name string) ([]net.IP, error) {
+			return mdns.Resolve(ctx, name, s.lanIfaces)
+		},
+	})
 }
 
 func (s *server) logf(format string, args ...any) { s.logger.Printf(format, args...) }
@@ -603,6 +631,7 @@ func (s *server) start() error {
 	s.startResponder()
 	s.page = s.serveHTTP(ln)
 	s.logf("the web page is at http://localhost:%d/", httpPort)
+	s.link.Start()
 	return nil
 }
 
@@ -631,6 +660,8 @@ func every(ctx context.Context, d time.Duration, f func()) {
 // all of them have stopped.
 func (s *server) stop() {
 	s.bg.Wait()
+	// First: the link writes through the hub.
+	s.link.Close()
 	s.ctl.Lock()
 	s.stopping = true // SetConfig opens nothing from now on
 	srv, l, r := s.page, s.listener, s.responder
@@ -684,6 +715,7 @@ func (s *server) reloadApps() {
 		ids = append(ids, a.ID)
 	}
 	s.logf("%s changed; serving %s", appsFile, strings.Join(ids, ", "))
+	s.hub.AppsChanged()
 	// The apps with sessions too: a page edit may have taken in the hand
 	// edit already, so before can lack an app that still has sessions.
 	var gone []string
@@ -691,7 +723,9 @@ func (s *server) reloadApps() {
 		gone = append(gone, a.ID)
 	}
 	for _, si := range s.hub.Sessions() {
-		gone = append(gone, si.App)
+		if si.App != "" { // a link session has no app
+			gone = append(gone, si.App)
+		}
 	}
 	slices.Sort(gone)
 	for _, id := range slices.Compact(gone) {
@@ -744,6 +778,7 @@ func (s *server) checkNetwork() {
 			s.listener = nil
 		}
 		s.stopResponder()
+		s.link.NetworkChanged()
 	}
 	if s.listener == nil {
 		s.reopenListener(now, port)

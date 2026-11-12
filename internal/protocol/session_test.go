@@ -281,7 +281,7 @@ func TestPairSendsPairedThenWelcome(t *testing.T) {
 			"etag": "e1", "hosts": []any{"u.local", "192.168.1.5"},
 		},
 	)
-	if want := [][3]string{{"todo", "sec", "Phone"}}; !reflect.DeepEqual(b.pairs, want) {
+	if want := [][4]string{{"device", "todo", "sec", "Phone"}}; !reflect.DeepEqual(b.pairs, want) {
 		t.Errorf("backend Pair got %v, want %v", b.pairs, want)
 	}
 	if !s.Authenticated() || s.App() != "todo" || s.Device() != "d1" {
@@ -1065,4 +1065,90 @@ func TestBackendErrorsKeepChannelOpen(t *testing.T) {
 	if fc.isClosed() {
 		t.Error("channel closed")
 	}
+}
+
+// A server-kind pair drops the app it names and opens a link session, which
+// gets the welcome's role, answers apps and refuses every document frame.
+func TestServerKindPairOpensALinkSession(t *testing.T) {
+	for _, frame := range []string{`{"t":"head"}`, `{"t":"get"}`, `{"t":"put","ifEtag":null,"bytes":2}`} {
+		t.Run(frame, func(t *testing.T) {
+			b := newFakeBackend()
+			b.welcome.Role = RoleMain
+			b.apps = []AppInfo{{ID: "todo", Name: "Todo"}}
+			s, fc := newSession(t, b, Options{})
+			s.HandleText(`{"t":"pair","proto":1,"kind":"server","app":"todo","secret":"sec","name":"Laptop"}`)
+			if want := [][4]string{{KindServer, "", "sec", "Laptop"}}; !reflect.DeepEqual(b.pairs, want) {
+				t.Fatalf("backend Pair got %v, want %v", b.pairs, want)
+			}
+			if !s.Authenticated() || s.App() != "" || s.Device() != "d1" {
+				t.Fatalf("Authenticated %v, App %q, Device %q; want a link session of d1", s.Authenticated(), s.App(), s.Device())
+			}
+			s.HandleText(`{"t":"apps"}`)
+			expectMessages(t, barrier(t, s, fc),
+				obj{"t": "paired", "device": "d1", "token": "tok"},
+				obj{
+					"t": "welcome", "proto": float64(1), "role": "main", "serverId": "S", "name": "Desk",
+					"etag": nil, "hosts": []any{"u.local", "192.168.1.5"},
+				},
+				obj{"t": "apps", "apps": []any{obj{"id": "todo", "name": "Todo"}}},
+			)
+
+			s.HandleText(frame)
+			waitFor(t, "the channel to close", fc.isClosed)
+			texts := fc.texts()
+			if last := texts[len(texts)-1]; last["t"] != "error" || last["code"] != CodeProtocol ||
+				!strings.Contains(last["message"].(string), "link session") {
+				t.Errorf("last frame %v, want a protocol error about the link session", last)
+			}
+			if b.count("head")+b.count("get")+b.count("put") != 0 {
+				t.Errorf("the backend was asked for a document: %v", b.callLog())
+			}
+		})
+	}
+}
+
+// An app list pushed before the welcome is held, only the latest kept, and
+// sent right after it; one pushed to a closed session goes nowhere.
+func TestAppsPushedDuringHelloFollowWelcome(t *testing.T) {
+	b := newFakeBackend()
+	s, fc := newSession(t, b, Options{})
+	b.onHello = func(s *Session) {
+		s.PushApps([]AppInfo{{ID: "old", Name: "Old"}})
+		s.PushApps(nil)
+	}
+	s.HandleText(linkHello)
+	expectMessages(t, barrier(t, s, fc),
+		obj{
+			"t": "welcome", "proto": float64(1), "serverId": "S", "name": "Desk",
+			"etag": nil, "hosts": []any{"u.local", "192.168.1.5"},
+		},
+		obj{"t": "apps", "apps": []any{}},
+	)
+	s.PushApps([]AppInfo{{ID: "todo", Name: "Todo"}})
+	expectMessages(t, barrier(t, s, fc)[2:], obj{"t": "apps", "apps": []any{obj{"id": "todo", "name": "Todo"}}})
+
+	s.Close()
+	before := len(fc.messages())
+	s.PushApps([]AppInfo{{ID: "todo", Name: "Todo"}})
+	if n := len(fc.messages()) + len(fc.lateSends()); n != before {
+		t.Errorf("a push after Close sent %d messages", n-before)
+	}
+}
+
+// The backend's refusal of apps closes the session when it is a protocol
+// error and only answers otherwise.
+func TestAppsRefusals(t *testing.T) {
+	b := newFakeBackend()
+	b.appsErr = &Error{CodeInternal, "disk"}
+	s, fc := newSession(t, b, Options{})
+	authenticate(t, s, fc)
+	s.HandleText(`{"t":"apps"}`)
+	got := barrier(t, s, fc)
+	if last := got[len(got)-1].text; last["t"] != "error" || last["code"] != CodeInternal || fc.isClosed() {
+		t.Fatalf("sent %s, want an internal error with the channel open", describe(got))
+	}
+
+	b.appsErr = &Error{CodeProtocol, "not a server"}
+	s.HandleText(`{"t":"apps"}`)
+	waitFor(t, "the channel to close", fc.isClosed)
 }

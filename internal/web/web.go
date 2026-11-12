@@ -7,6 +7,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"embed"
 	"encoding/base64"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/FLighter7/workspace-server/internal/apps"
 	"github.com/FLighter7/workspace-server/internal/pairing"
+	"github.com/FLighter7/workspace-server/internal/upstream"
 )
 
 // Status is what the Server section shows.
@@ -38,6 +40,7 @@ type Status struct {
 	DataDir     string   `json:"dataDir"`    // the apps' data; never empty
 	MainServer  bool     `json:"mainServer"` // the default server folder: owns autostart and the program file
 	LastError   string   `json:"lastError"`  // why the last reset or data move failed; "" when none did
+	Role        string   `json:"role"`       // "main", or "subordinate" while linked to an upstream server
 }
 
 // DataDirCheck is what changing the data folder to Path would do. Verdict is
@@ -138,6 +141,14 @@ type Backend interface {
 	SetDataDir(path, verdict string) (restart bool, err error)
 	// Restart restarts the server to apply what SetDataDir recorded.
 	Restart()
+
+	// Upstream reports the link to an upstream server.
+	Upstream() upstream.Status
+	// LinkUpstream links this server, as a subordinate, to the main whose
+	// pairing code is code, and returns once the link is made. Its errors
+	// wrap upstream.ErrBadCode, ErrOwnCode, ErrLinked or ErrBusy, or are an
+	// *upstream.RefusedError, or are internal.
+	LinkUpstream(ctx context.Context, code string) error
 }
 
 //go:embed all:ui
@@ -183,6 +194,8 @@ func newHandler(b Backend, port func() int, now func() time.Time, ui fs.FS) http
 	mux.HandleFunc("DELETE /api/server", a.deleteServer)
 	mux.HandleFunc("DELETE /api/data", a.resetData)
 	mux.HandleFunc("GET /api/data-dir", a.checkDataDir)
+	mux.HandleFunc("GET /api/upstream", a.upstreamStatus)
+	mux.HandleFunc("POST /api/upstream", a.linkUpstream)
 	return guard(port, jsonErrors(mux))
 }
 

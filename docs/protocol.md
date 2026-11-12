@@ -13,6 +13,7 @@ This is the contract between `workspace-server` and an app's client. The referen
   - no message is exchanged before the first STUN packet.
 - **Authentication:** DTLS is authenticated by the server certificate's fingerprint, pinned in the pairing code. After that the device sends `hello` with its token, or `pair` with a one-time secret.
 - **Scope:** IPv4 and the local network only.
+- **Servers as clients:** a workspace-server can link to another as its subordinate. It speaks this same protocol as a device of kind `server`; see "Servers: roles, server-kind devices and link sessions". An app's client never needs that part.
 
 ## The pairing code
 
@@ -124,21 +125,26 @@ a=max-message-size:262144
 
 The first client frame, `hello` or `pair`, carries `proto: 1`. Any other number gets `error {code: 'protocol'}` and the channel closes.
 
-| Client → server                     | Server → client                                                                      |
-| ----------------------------------- | ------------------------------------------------------------------------------------ |
-| `hello {proto, app, device, token}` | `welcome {proto, serverId, name, etag, hosts}`, or `error` and the channel closes    |
-| `pair {proto, app, secret, name}`   | `paired {device, token}` then `welcome {…}`, or `error` (closes unless `unknownApp`) |
-| `head`                              | `head {etag}`                                                                        |
-| `get`                               | `doc {etag, bytes}` + body (`etag: null`, `bytes: 0` when there is none)             |
-| `put {ifEtag, bytes}` + body        | `stored {etag}` or `conflict {etag}`                                                 |
-| `forget`                            | the device entry is deleted; the server closes every session of the device           |
-|                                     | `changed {etag}`: to every other session of the same app after a stored `put`        |
-|                                     | `error {code, message}`                                                              |
+| Client → server                     | Server → client                                                                         |
+| ----------------------------------- | --------------------------------------------------------------------------------------- |
+| `hello {proto, app, device, token}` | `welcome {proto, role, serverId, name, etag, hosts}`, or `error` and the channel closes |
+| `pair {proto, app, secret, name}`   | `paired {device, token}` then `welcome {…}`, or `error` (closes unless `unknownApp`)    |
+| `head`                              | `head {etag}`                                                                           |
+| `get`                               | `doc {etag, bytes}` + body (`etag: null`, `bytes: 0` when there is none)                |
+| `put {ifEtag, bytes}` + body        | `stored {etag}` or `conflict {etag}`                                                    |
+| `forget`                            | the device entry is deleted; the server closes every session of the device              |
+| `apps` (server-kind devices only)   | `apps {apps}`                                                                           |
+|                                     | `changed {etag}`: to every other session of the same app after a stored write           |
+|                                     | `apps {apps}`: to every link session after the server's app list changes                |
+|                                     | `error {code, message}`                                                                 |
+
+`pair` may also carry `kind`, and a server-kind device's `hello` may leave `app` out; both, and `apps`, are for servers only (see "Servers: roles, server-kind devices and link sessions").
 
 ### Values
 
 - **`etag`** is a string, or `null` when there is no document. It is the lowercase hex SHA-256 of the document's bytes, so two identical writes agree.
 - **`hosts`** is `[mdnsName, ...LAN IPv4]`, the server's current list. A client can refresh the hosts it stored at pairing from it, since addresses change.
+- **`role`** is `"main"` or `"subordinate"`: whether the server is linked to an upstream server (see "Servers"). A server from before roles sends none. An app's client may ignore it.
 - **`device`** is the device id, 16 characters.
 - **`token`** is 32 random bytes, base64url.
 - **`name`** in `pair` is the device's display name, shown on the server's page.
@@ -155,7 +161,7 @@ The first client frame, `hello` or `pair`, carries `proto: 1`. Any other number 
   - Every answer to a `put` follows its body.
 - **`notJson`:** a body that is not valid JSON gets `error {code: 'notJson'}`.
 - **Neither error closes the channel.**
-- **`changed`** goes to every other session of the app after a stored `put`. It is never sent before that session's `welcome`.
+- **`changed`** goes to every other session of the app after a stored `put`, and to every session of the app when a subordinate stores what it pulled from its main. It is never sent before that session's `welcome`.
   - A `changed` may carry an etag older than one the session already received; for example, `welcome(e3)` can be followed by `changed(e2)` and then `changed(e3)`.
   - The last frame always carries the newest etag. Act on the latest etag, not on each push in turn.
 
@@ -191,7 +197,7 @@ Codes:
 
 **A code the client does not know** should be treated as a temporary server error: report it and retry later. Do not treat it as a reason to drop the pairing. Codes may be added without a new `proto`.
 
-- **Before authentication,** `head`, `get`, `put` and `forget` get `notAuthenticated`.
+- **Before authentication,** `head`, `get`, `put`, `forget` and `apps` get `notAuthenticated`.
 - **After authentication,** a second `hello`/`pair` is a `protocol` error.
 - **A frame with an unknown `t`** gets `error {code: 'protocol'}` and the channel closes, before authentication or after.
 - **`hello` failures:**
@@ -200,6 +206,28 @@ Codes:
   - a `hello` from a blocked IP gets `blocked`, and the pairing still stands (see Limits).
 - **An in-flight `put` from a device the user removed** gets `badToken` and is not stored.
 - **`internal`** means a server-side failure, such as a disk error. The details are in the server's log.
+
+## Servers: roles, server-kind devices and link sessions
+
+A workspace-server can be a **subordinate** of another, its **main**: it mirrors the main's apps on its own disk. It links to the main as a client of this protocol. Nothing here changes what an app's client does.
+
+- **Only a main can be an upstream.** A server checks `role` in every `welcome` it gets as a server-kind device and refuses any other than `"main"`, a missing one included: when pairing, it closes the session without confirming, which undoes the pairing on the other side. So subordinates form a star of depth one around a main.
+- **Pairing as a server:** `pair {proto: 1, kind: "server", secret, name}`.
+  - `kind` is `"device"` (the default when it is absent: the pairing described above) or `"server"`. Any other value is `protocol`, and the channel closes.
+  - A server-kind pair names no app; an `app` it carries is ignored. The outcomes are those of a device's pair, without `unknownApp`.
+  - The new device is admitted to every app the server lists, now and later, and to link sessions.
+  - The session it pairs on is a link session: `paired` is followed by a `welcome` with `etag: null`. The pairing is confirmed by the next frame, as for a device; the subordinate sends `apps`.
+- **Link sessions:** `hello {proto, device, token}` without `app`, from a server-kind device, opens one.
+  - Its `welcome` has `etag: null`.
+  - It has no document: `head`, `get` and `put` there are `protocol`, and the channel closes.
+  - `forget` deletes the server-kind device and closes every session of it.
+  - A `hello` without `app` from a device of an app gets `unknownApp`, as it always did; from an unknown device or with a wrong token, `badToken`.
+- **App sessions:** a server-kind device says `hello {proto, app, device, token}` for any app the server lists, and the session works as a device's.
+- **The app list:** `apps` asks for the server's apps; the answer is `apps {apps: [{id, name}, …]}`, sorted by id, `[]` when there is none.
+  - Only sessions of a server-kind device may ask. Any other session gets `protocol`, and the channel closes; before authentication the answer is `notAuthenticated`.
+  - Every link session also gets `apps {apps}` unasked whenever the list changes, never before its `welcome`. The answer and the push look alike: each carries the whole current list, so act on the latest.
+- **Removals:** removing a server-kind device closes every session of it. A server that becomes a subordinate itself closes the sessions of its own server-kind devices; they reconnect, read the new `role`, and stop.
+- **`proto` stays 1.** Nothing an old client meets changed: `role` is one more `welcome` field, which clients ignore (see the vectors' tolerated frames); `kind`, a `hello` without `app` and `apps` come only from servers, and `apps` frames go only to server-kind sessions.
 
 ## What the client cannot see
 

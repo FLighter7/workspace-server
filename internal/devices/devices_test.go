@@ -191,6 +191,9 @@ func TestOpenRejectsInvalidEntries(t *testing.T) {
 		{"empty tokenHash", entry("d1", "todo", ""), "tokenHash"},
 		{"short tokenHash", entry("d1", "todo", hash[:63]), "tokenHash"},
 		{"uppercase tokenHash", entry("d1", "todo", strings.ToUpper(hash)), "tokenHash"},
+		{"unknown kind", strings.Replace(entry("d1", "todo", hash), `"name"`, `"kind":"phone","name"`, 1), "unknown kind"},
+		{"a server-kind device with an app", strings.Replace(entry("d1", "todo", hash), `"name"`, `"kind":"server","name"`, 1), "has no app"},
+		{"a device without an app", entry("d1", "", hash), "app"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "devices.json")
@@ -442,5 +445,52 @@ func TestConcurrentUse(t *testing.T) {
 	wg.Wait()
 	if got := len(r.List()); got != 9 {
 		t.Errorf("List() has %d devices, want 9", got)
+	}
+}
+
+// A server-kind device is admitted to every app and to none, survives
+// RemoveApp, and is written with its kind; a device of an app is not.
+func TestPairServer(t *testing.T) {
+	r, path, clk := openFresh(t)
+	srv, token, err := r.PairServer("  Laptop  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !srv.IsServer() || srv.App != "" || srv.Name != "Laptop" {
+		t.Fatalf("PairServer = %+v, want a server-kind device named Laptop with no app", srv)
+	}
+	phone, phoneToken := mustPair(t, r, "todo", "Phone")
+	for _, app := range []string{"todo", "notes", ""} {
+		if _, ok := r.Authenticate(app, srv.ID, token); !ok {
+			t.Errorf("the server-kind device is refused for app %q", app)
+		}
+	}
+	if _, ok := r.Authenticate("todo", srv.ID, phoneToken); ok {
+		t.Error("the server-kind device is admitted with another device's token")
+	}
+	if _, ok := r.Authenticate("", phone.ID, phoneToken); ok {
+		t.Error("a device of an app is admitted with no app")
+	}
+	if _, ok := r.Authenticate("notes", phone.ID, phoneToken); ok {
+		t.Error("a device of an app is admitted to another app")
+	}
+	if got := r.RemoveApp("todo"); len(got) != 1 || got[0].ID != phone.ID {
+		t.Errorf("RemoveApp(todo) = %+v, want only the phone", got)
+	}
+	if !strings.Contains(string(readFile(t, path)), `"kind": "server"`) {
+		t.Errorf("devices.json does not record the kind:\n%s", readFile(t, path))
+	}
+	again, err := Open(path, clk.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, ok := again.Get(srv.ID); !ok || !d.IsServer() {
+		t.Errorf("after reopen Get = %+v, %v; want the server-kind device", d, ok)
+	}
+	if _, ok := again.Authenticate("notes", srv.ID, token); !ok {
+		t.Error("the server-kind device is refused after reopen")
+	}
+	if _, ok := again.Get("nosuchdevice"); ok {
+		t.Error("Get found an unknown device")
 	}
 }

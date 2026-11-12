@@ -221,11 +221,14 @@ type fakeBackend struct {
 	putCurrent  *string
 	putErr      *Error
 
+	apps    []AppInfo
+	appsErr *Error
+
 	// calls logs every call in order: "hello", "hello returned", "pair",
 	// "pair returned", "head", "get", "maxBytes", "put", "forget", "closed".
 	calls   []string
 	hellos  [][3]string // app, device, token
-	pairs   [][3]string // app, secret, name
+	pairs   [][4]string // kind, app, secret, name
 	puts    []putCall
 	forgets [][2]string // app, device
 }
@@ -259,10 +262,10 @@ func (b *fakeBackend) Hello(s *Session, app, device, token string) (Welcome, *Er
 	return w, err
 }
 
-func (b *fakeBackend) Pair(s *Session, app, secret, name string) (string, string, Welcome, *Error) {
+func (b *fakeBackend) Pair(s *Session, kind, app, secret, name string) (string, string, Welcome, *Error) {
 	b.mu.Lock()
 	b.calls = append(b.calls, "pair")
-	b.pairs = append(b.pairs, [3]string{app, secret, name})
+	b.pairs = append(b.pairs, [4]string{kind, app, secret, name})
 	device, token, w, err, hook := b.pairDevice, b.pairToken, b.welcome, b.pairErr, b.onPair
 	b.mu.Unlock()
 	if hook != nil {
@@ -309,6 +312,13 @@ func (b *fakeBackend) Forget(app, device string) {
 	defer b.mu.Unlock()
 	b.calls = append(b.calls, "forget")
 	b.forgets = append(b.forgets, [2]string{app, device})
+}
+
+func (b *fakeBackend) Apps(s *Session) ([]AppInfo, *Error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = append(b.calls, "apps")
+	return b.apps, b.appsErr
 }
 
 func (b *fakeBackend) Closed(s *Session) { b.log("closed") }

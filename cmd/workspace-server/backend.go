@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"github.com/FLighter7/workspace-server/internal/apps"
 	"github.com/FLighter7/workspace-server/internal/pairing"
 	"github.com/FLighter7/workspace-server/internal/rtc"
+	"github.com/FLighter7/workspace-server/internal/upstream"
 	"github.com/FLighter7/workspace-server/internal/web"
 )
 
@@ -33,6 +35,7 @@ func (s *server) Status() web.Status {
 		DataDir:     s.dataDir,
 		MainServer:  isMainServer(s.serverDir),
 		LastError:   s.lastErr,
+		Role:        s.link.Role(),
 	}
 }
 
@@ -160,14 +163,32 @@ func (s *server) AddApp(a apps.App) error {
 	}
 	s.refusals.Clear(a.ID) // the page's "Add it?" offer is answered
 	s.logf("app %q added", a.ID)
+	s.hub.AppsChanged()
 	return nil
 }
 
 func (s *server) DeleteApp(id string) error {
-	if err := s.hub.RemoveApp(id); err != nil {
+	err := s.hub.RemoveApp(id)
+	if !errors.Is(err, apps.ErrNotFound) {
+		s.hub.AppsChanged() // the list may have changed even if a later step failed
+	}
+	if err != nil {
 		return err
 	}
 	s.logf("app %q deleted with its documents and devices", id)
+	return nil
+}
+
+func (s *server) Upstream() upstream.Status { return s.link.Status() }
+
+// LinkUpstream links this server to a main as its subordinate. The
+// subordinates this server had as a main are disconnected: they read its
+// new role when they reconnect, and stop.
+func (s *server) LinkUpstream(ctx context.Context, code string) error {
+	if err := s.link.Pair(ctx, code); err != nil {
+		return err
+	}
+	s.hub.CloseServers()
 	return nil
 }
 

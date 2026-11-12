@@ -42,8 +42,9 @@ type Session struct {
 	queued        int64 // bytes in queue
 	queueLimit    int64 // the most queued may reach; see queueLocked
 	authenticated bool
-	app, device   string
-	held          *string // the latest push that arrived before the welcome
+	app, device   string     // app is empty on a link session
+	held          *string    // the latest push that arrived before the welcome
+	heldApps      *[]AppInfo // the latest app list pushed before the welcome
 	// unconfirmed is set by a successful pair until the client sends its next
 	// frame, which shows that it got its token. A session that ends before
 	// that undoes the pairing: the client may never have stored the token.
@@ -120,6 +121,7 @@ func (s *Session) HandleText(msg string) {
 		Token  string  `json:"token"`
 		Secret string  `json:"secret"`
 		Name   string  `json:"name"`
+		Kind   *string `json:"kind"`
 		IfEtag *string `json:"ifEtag"`
 		Bytes  *int64  `json:"bytes"`
 	}
@@ -128,7 +130,7 @@ func (s *Session) HandleText(msg string) {
 		return
 	}
 	switch f.T {
-	case "hello", "pair", "head", "get", "put", "forget":
+	case "hello", "pair", "head", "get", "put", "forget", "apps":
 	default:
 		s.fail(CodeProtocol, fmt.Sprintf("unknown frame type %q", f.T))
 		return
@@ -144,12 +146,16 @@ func (s *Session) HandleText(msg string) {
 		case f.T == "hello":
 			s.hello(f.App, f.Device, f.Token)
 		default:
-			s.pair(f.App, f.Secret, f.Name)
+			s.pair(f.Kind, f.App, f.Secret, f.Name)
 		}
 		return
 	}
 	if !authenticated {
 		s.reply(&Error{CodeNotAuthenticated, "send hello or pair first"})
+		return
+	}
+	if app == "" && (f.T == "head" || f.T == "get" || f.T == "put") {
+		s.fail(CodeProtocol, "a link session has no document; say hello for an app")
 		return
 	}
 
@@ -187,6 +193,16 @@ func (s *Session) HandleText(msg string) {
 	case "forget":
 		s.b.Forget(app, device)
 		s.closeAfter()
+	case "apps":
+		list, e := s.b.Apps(s)
+		switch {
+		case e == nil:
+			s.queueFrame(appsFrame{"apps", appList(list)}, nil)
+		case e.Code == CodeProtocol:
+			s.fail(e.Code, e.Message)
+		default:
+			s.reply(e)
+		}
 	}
 }
 
@@ -246,8 +262,22 @@ func (s *Session) hello(app, device, token string) {
 	s.authenticate(app, device, w, nil, s.b.MaxBytes(app))
 }
 
-func (s *Session) pair(app, secret, name string) {
-	device, token, w, e := s.b.Pair(s, app, secret, name)
+// pair pairs a device of the kind given, a device when kind is absent. A
+// server-kind pair names no app: whatever app it carries is dropped.
+func (s *Session) pair(kind *string, app, secret, name string) {
+	k := KindDevice
+	if kind != nil {
+		k = *kind
+	}
+	switch k {
+	case KindDevice:
+	case KindServer:
+		app = ""
+	default:
+		s.fail(CodeProtocol, fmt.Sprintf("unknown pairing kind %q", k))
+		return
+	}
+	device, token, w, e := s.b.Pair(s, k, app, secret, name)
 	if e != nil {
 		if e.Code == CodeUnknownApp {
 			s.reply(e)
@@ -270,7 +300,7 @@ func (s *Session) authenticate(app, device string, w Welcome, paired *pairedFram
 	if hosts == nil {
 		hosts = []string{}
 	}
-	welcome := welcomeFrame{"welcome", Version, w.ServerID, w.Name, w.Etag, hosts}
+	welcome := welcomeFrame{"welcome", Version, w.Role, w.ServerID, w.Name, w.Etag, hosts}
 
 	s.mu.Lock()
 	if s.closed || s.closing {
@@ -294,7 +324,10 @@ func (s *Session) authenticate(app, device string, w Welcome, paired *pairedFram
 	if held := s.held; held != nil && (w.Etag == nil || *w.Etag != *held) {
 		s.queueLocked(outgoing{text: encode(etagFrame{"changed", held})})
 	}
-	s.held = nil
+	if list := s.heldApps; list != nil {
+		s.queueLocked(outgoing{text: encode(appsFrame{"apps", appList(*list)})})
+	}
+	s.held, s.heldApps = nil, nil
 	s.mu.Unlock()
 }
 
@@ -315,8 +348,24 @@ func (s *Session) PushChanged(etag string) {
 	}
 }
 
+// PushApps tells the client the server's app list. It never blocks. Before
+// the welcome has been queued the list is held, only the latest kept, and
+// sent right after the welcome. On a closed session it does nothing.
+func (s *Session) PushApps(list []AppInfo) {
+	list = appList(list)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.closed || s.closing:
+	case !s.authenticated:
+		s.heldApps = &list
+	default:
+		s.queueLocked(outgoing{text: encode(appsFrame{"apps", list})})
+	}
+}
+
 // App returns the app the session authenticated for; empty until then,
-// including during the backend's Hello or Pair.
+// including during the backend's Hello or Pair, and on a link session.
 func (s *Session) App() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -373,7 +422,7 @@ func (s *Session) markClosedLocked() bool {
 	s.closed = true
 	s.queue = nil
 	s.queued = 0
-	s.held = nil
+	s.held, s.heldApps = nil, nil
 	close(s.done)
 	if s.timer != nil {
 		s.timer.Stop()
@@ -585,6 +634,7 @@ type (
 	welcomeFrame struct {
 		T        string   `json:"t"`
 		Proto    int      `json:"proto"`
+		Role     string   `json:"role,omitempty"`
 		ServerID string   `json:"serverId"`
 		Name     string   `json:"name"`
 		Etag     *string  `json:"etag"`
@@ -595,4 +645,16 @@ type (
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	}
+	appsFrame struct {
+		T    string    `json:"t"`
+		Apps []AppInfo `json:"apps"`
+	}
 )
+
+// appList is list, never nil, so that an empty list is [] on the wire.
+func appList(list []AppInfo) []AppInfo {
+	if list == nil {
+		return []AppInfo{}
+	}
+	return list
+}

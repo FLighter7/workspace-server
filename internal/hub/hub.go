@@ -3,6 +3,10 @@
 // reads and writes from the document store, tells an app's other sessions
 // about every stored write, and closes the sessions of a device or app that is
 // removed. It also limits failed attempts per IP.
+//
+// A server-kind device (a subordinate server linked to this one) is admitted
+// to every listed app, and also to a link session, which has no app: it is
+// told the app list on request and again whenever the list changes.
 package hub
 
 import (
@@ -28,8 +32,8 @@ const (
 	blockFor      = 10 * time.Minute
 )
 
-// Deps are what the hub works with. Name and Hosts are read at every welcome,
-// so changes show at once.
+// Deps are what the hub works with. Name, Hosts and Role are read at every
+// welcome, so changes show at once.
 type Deps struct {
 	ServerID string
 	Name     func() string   // live, from config
@@ -40,32 +44,47 @@ type Deps struct {
 	Secrets  *pairing.Secrets
 	Refusals *pairing.Refusals
 	Now      func() time.Time
+	// Role, if set, is the server's role: protocol.RoleMain, or
+	// protocol.RoleSubordinate while it is linked to an upstream server.
+	// Unset means RoleMain.
+	Role func() string
 	// Logf, if set, receives the text of every internal error; devices get
 	// the error without it.
 	Logf func(format string, args ...any)
 }
 
-// SessionInfo describes one authenticated session.
+// SessionInfo describes one authenticated session. App is empty for a link
+// session.
 type SessionInfo struct{ App, Device, Remote string }
 
 // member is what the hub knows of a registered session. The hub records it at
-// registration and never reads it back from the session.
-type member struct{ app, device string }
+// registration and never reads it back from the session. app is empty on a
+// link session; server marks a session of a server-kind device.
+type member struct {
+	app, device string
+	server      bool
+}
 
 // Hub routes the sessions of all apps. It is safe for concurrent use.
 //
 // Locking: an app's lock (appLock) orders everything that admits a session
 // to the app or changes its document, devices or listing, so a session is
 // never admitted with a device or app that is being removed, and pushes leave
-// in the order the writes were stored. mu guards only the session set and is
-// never held while calling into a session: Session.Close calls Closed, which
-// takes mu. Lock order: an app's lock, then mu.
+// in the order the writes were stored. A server-kind device has sessions of
+// every app and a link session, so its removal cannot take one app's lock:
+// admissions and writes read-lock servers, and that removal write-locks it.
+// mu guards only the session set and is never held while calling into a
+// session: Session.Close calls Closed, which takes mu. Lock order: an app's
+// lock, then servers, then mu.
 type Hub struct {
 	d     Deps
 	limit limiter
 
 	locksMu sync.Mutex
 	locks   map[string]*sync.Mutex // per app id; only ids that were listed
+
+	servers sync.RWMutex
+	appsMu  sync.Mutex // orders the app lists pushed to link sessions
 
 	mu       sync.Mutex
 	sessions map[*protocol.Session]member
@@ -86,13 +105,18 @@ func New(d Deps) *Hub {
 	}
 }
 
-// Hello authenticates a known device of a listed app and registers s.
+// Hello authenticates a known device of a listed app and registers s. With
+// no app it opens a link session, which only a server-kind device may.
 func (h *Hub) Hello(s *protocol.Session, app, device, token string) (protocol.Welcome, *protocol.Error) {
 	ip := hostOf(s.Remote())
 	if h.limit.blocked(ip, h.d.Now()) {
 		return protocol.Welcome{}, errBlocked()
 	}
-	if e := h.admitDevice(s, app, device, token); e != nil {
+	admit := h.admitDevice
+	if app == "" {
+		admit = h.admitLink
+	}
+	if e := admit(s, app, device, token); e != nil {
 		h.limit.fail(ip, h.d.Now())
 		return protocol.Welcome{}, e
 	}
@@ -101,24 +125,47 @@ func (h *Hub) Hello(s *protocol.Session, app, device, token string) (protocol.We
 }
 
 // admitDevice checks the app and the device's token and registers s, all
-// under the app's lock.
+// under the app's lock. A server-kind device is admitted to every listed
+// app.
 func (h *Hub) admitDevice(s *protocol.Session, app, device, token string) *protocol.Error {
 	_, unlock, ok := h.lockListed(app)
 	if !ok {
 		return errUnknownApp(app)
 	}
 	defer unlock()
-	if _, ok := h.d.Devices.Authenticate(app, device, token); !ok {
-		return &protocol.Error{Code: protocol.CodeBadToken, Message: "unknown device or wrong token; pair the device again"}
+	h.servers.RLock()
+	defer h.servers.RUnlock()
+	d, ok := h.d.Devices.Authenticate(app, device, token)
+	if !ok {
+		return errBadToken()
 	}
-	h.register(s, app, device)
+	h.register(s, member{app: app, device: device, server: d.IsServer()})
+	return nil
+}
+
+// admitLink admits a server-kind device to a link session: a hello with no
+// app. A device of an app gets unknownApp, since no app "" is listed; an
+// unknown device or a wrong token gets badToken, so that a server removed
+// here learns that its pairing is gone.
+func (h *Hub) admitLink(s *protocol.Session, app, device, token string) *protocol.Error {
+	if d, ok := h.d.Devices.Get(device); ok && !d.IsServer() {
+		return errUnknownApp(app)
+	}
+	h.servers.RLock()
+	defer h.servers.RUnlock()
+	if _, ok := h.d.Devices.Authenticate("", device, token); !ok {
+		return errBadToken()
+	}
+	h.register(s, member{device: device, server: true})
 	return nil
 }
 
 // Pair registers a new device of a listed app with the one-time secret and
 // registers s. A valid secret for an unlisted app is refused without using
-// the secret, and the attempt is remembered for the web page.
-func (h *Hub) Pair(s *protocol.Session, app, secret, name string) (string, string, protocol.Welcome, *protocol.Error) {
+// the secret, and the attempt is remembered for the web page. A server-kind
+// pair names no app: the new device is admitted to every app, and s is its
+// link session.
+func (h *Hub) Pair(s *protocol.Session, kind, app, secret, name string) (string, string, protocol.Welcome, *protocol.Error) {
 	ip := hostOf(s.Remote())
 	if h.limit.blocked(ip, h.d.Now()) {
 		return "", "", protocol.Welcome{}, errBlocked()
@@ -126,6 +173,9 @@ func (h *Hub) Pair(s *protocol.Session, app, secret, name string) (string, strin
 	if !h.d.Secrets.Check(secret) {
 		h.limit.fail(ip, h.d.Now())
 		return "", "", protocol.Welcome{}, errBadSecret()
+	}
+	if kind == protocol.KindServer {
+		return h.pairServer(s, ip, secret, name)
 	}
 	_, unlock, ok := h.lockListed(app)
 	if !ok {
@@ -143,7 +193,7 @@ func (h *Hub) Pair(s *protocol.Session, app, secret, name string) (string, strin
 		unlock()
 		return "", "", protocol.Welcome{}, h.errInternal(err)
 	}
-	h.register(s, app, d.ID)
+	h.register(s, member{app: app, device: d.ID})
 	unlock()
 	h.d.Refusals.Clear(app)
 
@@ -156,17 +206,49 @@ func (h *Hub) Pair(s *protocol.Session, app, secret, name string) (string, strin
 	return d.ID, token, w, nil
 }
 
+// pairServer registers a new server-kind device with the one-time secret,
+// which the caller has checked, and registers s as its link session.
+func (h *Hub) pairServer(s *protocol.Session, ip, secret, name string) (string, string, protocol.Welcome, *protocol.Error) {
+	h.servers.RLock()
+	if !h.d.Secrets.Consume(secret) { // another pairing used it meanwhile
+		h.servers.RUnlock()
+		h.limit.fail(ip, h.d.Now())
+		return "", "", protocol.Welcome{}, errBadSecret()
+	}
+	d, token, err := h.d.Devices.PairServer(name)
+	if err != nil {
+		h.servers.RUnlock()
+		return "", "", protocol.Welcome{}, h.errInternal(err)
+	}
+	h.register(s, member{device: d.ID, server: true})
+	h.servers.RUnlock()
+
+	w, e := h.welcome(s, "")
+	if e != nil {
+		h.d.Devices.Remove(d.ID)
+		return "", "", protocol.Welcome{}, e
+	}
+	return d.ID, token, w, nil
+}
+
 // welcome reads the document's etag for s, which the caller has registered:
 // a write stored after the registration is pushed to s (the session holds the
-// push until its welcome is out) and one stored before is in the etag. On
-// failure it unregisters s.
+// push until its welcome is out) and one stored before is in the etag. A link
+// session (app "") has no document. On failure it unregisters s.
 func (h *Hub) welcome(s *protocol.Session, app string) (protocol.Welcome, *protocol.Error) {
-	etag, e := h.Head(app)
-	if e != nil {
-		h.Closed(s)
-		return protocol.Welcome{}, e
+	var etag *string
+	if app != "" {
+		var e *protocol.Error
+		if etag, e = h.Head(app); e != nil {
+			h.Closed(s)
+			return protocol.Welcome{}, e
+		}
 	}
-	return protocol.Welcome{ServerID: h.d.ServerID, Name: h.d.Name(), Etag: etag, Hosts: h.d.Hosts()}, nil
+	role := protocol.RoleMain
+	if h.d.Role != nil {
+		role = h.d.Role()
+	}
+	return protocol.Welcome{ServerID: h.d.ServerID, Name: h.d.Name(), Etag: etag, Hosts: h.d.Hosts(), Role: role}, nil
 }
 
 // Head returns the etag of app's document, nil when there is none.
@@ -196,6 +278,39 @@ func (h *Hub) MaxBytes(app string) int64 {
 	return a.MaxBytes
 }
 
+// Apps returns the app list to a session of a server-kind device. Any other
+// session gets a protocol error, which closes it.
+func (h *Hub) Apps(s *protocol.Session) ([]protocol.AppInfo, *protocol.Error) {
+	h.mu.Lock()
+	m, ok := h.sessions[s]
+	h.mu.Unlock()
+	if !ok || !m.server {
+		return nil, &protocol.Error{Code: protocol.CodeProtocol, Message: "only a server may ask for the app list"}
+	}
+	return h.appList(), nil
+}
+
+// AppsChanged tells every link session the app list as it is now. The
+// server calls it after every change to the list.
+func (h *Hub) AppsChanged() {
+	h.appsMu.Lock()
+	defer h.appsMu.Unlock()
+	list := h.appList()
+	for _, s := range h.registered(func(m member) bool { return m.server && m.app == "" }) {
+		s.PushApps(list)
+	}
+}
+
+// appList is the listed apps, sorted by id.
+func (h *Hub) appList() []protocol.AppInfo {
+	list := h.d.Apps.List()
+	out := make([]protocol.AppInfo, 0, len(list))
+	for _, a := range list {
+		out = append(out, protocol.AppInfo{ID: a.ID, Name: a.Name})
+	}
+	return out
+}
+
 // Put stores body as app's document if the stored one has ifEtag, and then
 // tells every other session of the app the new etag. A put from a device
 // removed meanwhile stores nothing.
@@ -205,11 +320,14 @@ func (h *Hub) Put(from *protocol.Session, app, device string, ifEtag *string, bo
 		return "", false, nil, &protocol.Error{Code: protocol.CodeUnknownApp, Message: fmt.Sprintf("this server no longer serves the app %q", app)}
 	}
 	defer unlock()
-	// Under the app's lock, which RemoveDevice takes too.
-	if owner, ok := h.deviceApp(device); !ok || owner != app {
+	// Under the app's lock, which RemoveDevice takes too, and the servers
+	// lock, which the removal of a server-kind device takes.
+	h.servers.RLock()
+	defer h.servers.RUnlock()
+	if !h.admitted(device, app) {
 		return "", false, nil, &protocol.Error{Code: protocol.CodeBadToken, Message: "this device has been removed; pair it again"}
 	}
-	etag, err := h.d.Store.Write(app, body, ifEtag, a.History)
+	etag, err := h.writeLocked(a, body, ifEtag, from)
 	var conflict *store.ConflictError
 	switch {
 	case errors.As(err, &conflict):
@@ -219,25 +337,50 @@ func (h *Hub) Put(from *protocol.Session, app, device string, ifEtag *string, bo
 	case err != nil:
 		return "", false, nil, h.errInternal(err)
 	}
+	return etag, false, nil, nil
+}
+
+// Replace stores body as app's document if the stored one has ifEtag, as a
+// put does, and tells every session of the app the new etag, since none of
+// them wrote it. The link to the upstream server stores what it pulls with
+// it. A mismatch is a *store.ConflictError naming the current etag; an app
+// that is not listed is an error wrapping apps.ErrNotFound.
+func (h *Hub) Replace(app string, body []byte, ifEtag *string) (string, error) {
+	a, unlock, ok := h.lockListed(app)
+	if !ok {
+		return "", fmt.Errorf("%w: %q", apps.ErrNotFound, app)
+	}
+	defer unlock()
+	return h.writeLocked(a, body, ifEtag, nil)
+}
+
+// writeLocked writes body as a's document if the stored one has ifEtag, and
+// pushes the new etag to every session of the app but from. The caller holds
+// the app's lock.
+func (h *Hub) writeLocked(a apps.App, body []byte, ifEtag *string, from *protocol.Session) (string, error) {
+	etag, err := h.d.Store.Write(a.ID, body, ifEtag, a.History)
+	if err != nil {
+		return "", err
+	}
 	// Still under the app's lock, so each session's changed frames follow the
 	// order the writes were stored, and its last frame carries the newest
 	// etag. A welcome reads its etag outside this lock, so it can be newer
 	// than a push still to come: welcome(e3), changed(e2), changed(e3). That
 	// is all protocol.md promises. PushChanged never blocks and never calls
 	// back into the hub.
-	for _, s := range h.registered(func(m member) bool { return m.app == app }) {
+	for _, s := range h.registered(func(m member) bool { return m.app == a.ID }) {
 		if s != from {
 			s.PushChanged(etag)
 		}
 	}
-	return etag, false, nil, nil
+	return etag, nil
 }
 
-// Forget deletes the device, if it belongs to app, and closes its sessions,
-// the asking one included: the backend is not told which session asks, and
-// that session closes after Forget anyway.
+// Forget deletes the device, if it belongs to app or is a server-kind device,
+// and closes its sessions, the asking one included: the backend is not told
+// which session asks, and that session closes after Forget anyway.
 func (h *Hub) Forget(app, device string) {
-	if owner, ok := h.deviceApp(device); ok && owner == app {
+	if h.admitted(device, app) {
 		h.RemoveDevice(device)
 	}
 }
@@ -274,11 +417,21 @@ func (h *Hub) Sessions() []SessionInfo {
 // RemoveDevice deletes device id, closes its sessions, and reports whether it
 // existed.
 func (h *Hub) RemoveDevice(id string) bool {
-	app, ok := h.deviceApp(id)
+	d, ok := h.d.Devices.Get(id)
 	if !ok {
 		return false
 	}
-	l := h.appLock(app)
+	if d.IsServer() {
+		// Its sessions span every app; holding servers keeps any of them
+		// from being admitted, or writing, meanwhile.
+		h.servers.Lock()
+		removed := h.d.Devices.Remove(id)
+		targets := h.registered(func(m member) bool { return m.device == id })
+		h.servers.Unlock()
+		closeAll(targets)
+		return removed
+	}
+	l := h.appLock(d.App)
 	l.Lock()
 	removed := h.d.Devices.Remove(id)
 	targets := h.registered(func(m member) bool { return m.device == id })
@@ -291,6 +444,7 @@ func (h *Hub) RemoveDevice(id string) bool {
 // apps.json, and closes its sessions. It stops at the first step that fails,
 // leaving the app listed so that it can be removed again. An app that is not
 // listed is an error wrapping apps.ErrNotFound, and nothing is touched.
+// Server-kind devices stay: they are admitted to every app.
 func (h *Hub) RemoveApp(id string) error {
 	_, unlock, ok := h.lockListed(id)
 	if !ok {
@@ -317,10 +471,10 @@ func (h *Hub) CloseApp(id string) {
 	closeAll(targets)
 }
 
-func (h *Hub) register(s *protocol.Session, app, device string) {
+func (h *Hub) register(s *protocol.Session, m member) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.sessions[s] = member{app: app, device: device}
+	h.sessions[s] = m
 }
 
 // registered returns the registered sessions that match.
@@ -374,14 +528,11 @@ func (h *Hub) lockListed(app string) (apps.App, func(), bool) {
 	return a, l.Unlock, true
 }
 
-// deviceApp returns the app of device id.
-func (h *Hub) deviceApp(id string) (string, bool) {
-	for _, d := range h.d.Devices.List() {
-		if d.ID == id {
-			return d.App, true
-		}
-	}
-	return "", false
+// admitted reports whether device id exists and may use app: it is a device
+// of app, or a server-kind device.
+func (h *Hub) admitted(id, app string) bool {
+	d, ok := h.d.Devices.Get(id)
+	return ok && (d.IsServer() || d.App == app)
 }
 
 // hostOf returns the host part of a host:port address, or the address as is
@@ -395,6 +546,10 @@ func hostOf(remote string) string {
 
 func errUnknownApp(app string) *protocol.Error {
 	return &protocol.Error{Code: protocol.CodeUnknownApp, Message: fmt.Sprintf("this server does not serve the app %q", app)}
+}
+
+func errBadToken() *protocol.Error {
+	return &protocol.Error{Code: protocol.CodeBadToken, Message: "unknown device or wrong token; pair the device again"}
 }
 
 func errBadSecret() *protocol.Error {
@@ -474,4 +629,12 @@ func (l *limiter) pruneLocked(now time.Time) {
 			l.failures[ip] = append([]time.Time(nil), times[i:]...)
 		}
 	}
+}
+
+// CloseServers closes every session of a server-kind device. The server
+// calls it when it becomes a subordinate itself: its subordinates reconnect,
+// read the new role in the welcome, and stop, since only a main may be an
+// upstream.
+func (h *Hub) CloseServers() {
+	closeAll(h.registered(func(m member) bool { return m.server }))
 }

@@ -402,7 +402,7 @@ func TestHelloOutcomes(t *testing.T) {
 		s.HandleText(helloFrame("todo", id, token))
 		w := waitFrames(t, fc, "welcome", 1)[0]
 		want := obj{
-			"t": "welcome", "proto": float64(1), "serverId": "srv-1", "name": "Desk",
+			"t": "welcome", "proto": float64(1), "role": "main", "serverId": "srv-1", "name": "Desk",
 			"etag": store.Etag(doc), "hosts": []any{"u.local", "192.168.1.5"},
 		}
 		if !reflect.DeepEqual(w, want) {

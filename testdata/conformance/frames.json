@@ -1,8 +1,9 @@
 {
 	"about": [
-		"Exchanges. A session is new, or authenticated as device \"d1\" of app \"todo\". With the backend in the state given, a client call sends the client frame (and clientBody, if any); the server answers with the server frames (and serverBody); the call resolves with result or fails with the error code. push is a changed frame the server sends unasked.",
+		"Exchanges. A session is new, authenticated as device \"d1\" of app \"todo\", or a link session (authenticated as the server-kind device \"s1\", with no app). With the backend in the state given, a client call sends the client frame (and clientBody, if any); the server answers with the server frames (and serverBody); the call resolves with result or fails with the error code. push is a changed frame the server sends unasked; pushApps is an apps frame the server sends unasked.",
 		"closes: the server closes the channel after its frames. An error frame also carries a message, English text for a developer whose wording is the server's; it is not compared.",
-		"Bodies are UTF-8 text. backend keys: welcome, helloError, paired, pairError, head, doc, put ({stored} or {conflict}), putError.",
+		"Bodies are UTF-8 text. backend keys: welcome, helloError, paired, pairError, head, doc, put ({stored} or {conflict}), putError, apps, appsError.",
+		"exchanges are spoken by every client. serverKind holds the exchanges of a server-kind device: a subordinate server linking to its main. The client package does not speak them; the server's Session and its Go client play them. A welcome result there includes role.",
 		"tolerated: frames one side accepts although the other side never sends them."
 	],
 	"exchanges": [
@@ -17,7 +18,8 @@
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
-					]
+					],
+					"role": "main"
 				}
 			},
 			"call": {
@@ -37,6 +39,7 @@
 				{
 					"t": "welcome",
 					"proto": 1,
+					"role": "main",
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
 					"etag": "e1",
@@ -67,7 +70,8 @@
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
-					]
+					],
+					"role": "main"
 				}
 			},
 			"call": {
@@ -87,6 +91,7 @@
 				{
 					"t": "welcome",
 					"proto": 1,
+					"role": "main",
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
 					"etag": null,
@@ -149,7 +154,8 @@
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
-					]
+					],
+					"role": "main"
 				}
 			},
 			"call": {
@@ -174,6 +180,7 @@
 				{
 					"t": "welcome",
 					"proto": 1,
+					"role": "main",
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
 					"etag": "e1",
@@ -542,6 +549,369 @@
 			"result": "e2"
 		}
 	],
+	"serverKind": [
+		{
+			"name": "pair as a server, which opens a link session",
+			"session": "new",
+			"backend": {
+				"paired": {
+					"device": "Srv0123456789ab",
+					"token": "tok-server"
+				},
+				"welcome": {
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": null,
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					],
+					"role": "main"
+				}
+			},
+			"call": {
+				"method": "pair",
+				"kind": "server",
+				"secret": "q83vEjRWeJCrze8SNFZ4kA",
+				"name": "Laptop"
+			},
+			"client": {
+				"t": "pair",
+				"proto": 1,
+				"kind": "server",
+				"secret": "q83vEjRWeJCrze8SNFZ4kA",
+				"name": "Laptop"
+			},
+			"server": [
+				{
+					"t": "paired",
+					"device": "Srv0123456789ab",
+					"token": "tok-server"
+				},
+				{
+					"t": "welcome",
+					"proto": 1,
+					"role": "main",
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": null,
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					]
+				}
+			],
+			"result": {
+				"device": "Srv0123456789ab",
+				"token": "tok-server",
+				"welcome": {
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": null,
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					],
+					"role": "main"
+				}
+			}
+		},
+		{
+			"name": "pair of a kind the server does not know",
+			"session": "new",
+			"backend": {},
+			"call": {
+				"method": "pair",
+				"kind": "printer",
+				"secret": "q83vEjRWeJCrze8SNFZ4kA",
+				"name": "Laptop"
+			},
+			"client": {
+				"t": "pair",
+				"proto": 1,
+				"kind": "printer",
+				"secret": "q83vEjRWeJCrze8SNFZ4kA",
+				"name": "Laptop"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "protocol"
+				}
+			],
+			"closes": true,
+			"error": "protocol"
+		},
+		{
+			"name": "hello without an app, which opens a link session",
+			"session": "new",
+			"backend": {
+				"welcome": {
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": null,
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					],
+					"role": "main"
+				}
+			},
+			"call": {
+				"method": "hello",
+				"device": "Srv0123456789ab",
+				"token": "tok-server"
+			},
+			"client": {
+				"t": "hello",
+				"proto": 1,
+				"device": "Srv0123456789ab",
+				"token": "tok-server"
+			},
+			"server": [
+				{
+					"t": "welcome",
+					"proto": 1,
+					"role": "main",
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": null,
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					]
+				}
+			],
+			"result": {
+				"serverId": "Ab3dEf6hIj9k",
+				"name": "Desk",
+				"etag": null,
+				"hosts": [
+					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+					"192.168.1.20"
+				],
+				"role": "main"
+			}
+		},
+		{
+			"name": "hello as a server for an app",
+			"session": "new",
+			"backend": {
+				"welcome": {
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": "e1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					],
+					"role": "main"
+				}
+			},
+			"call": {
+				"method": "hello",
+				"app": "todo",
+				"device": "Srv0123456789ab",
+				"token": "tok-server"
+			},
+			"client": {
+				"t": "hello",
+				"proto": 1,
+				"app": "todo",
+				"device": "Srv0123456789ab",
+				"token": "tok-server"
+			},
+			"server": [
+				{
+					"t": "welcome",
+					"proto": 1,
+					"role": "main",
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": "e1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					]
+				}
+			],
+			"result": {
+				"serverId": "Ab3dEf6hIj9k",
+				"name": "Desk",
+				"etag": "e1",
+				"hosts": [
+					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+					"192.168.1.20"
+				],
+				"role": "main"
+			}
+		},
+		{
+			"name": "apps",
+			"session": "link",
+			"backend": {
+				"apps": [
+					{
+						"id": "notes",
+						"name": "Notes"
+					},
+					{
+						"id": "todo",
+						"name": "Todo"
+					}
+				]
+			},
+			"call": {
+				"method": "apps"
+			},
+			"client": {
+				"t": "apps"
+			},
+			"server": [
+				{
+					"t": "apps",
+					"apps": [
+						{
+							"id": "notes",
+							"name": "Notes"
+						},
+						{
+							"id": "todo",
+							"name": "Todo"
+						}
+					]
+				}
+			],
+			"result": [
+				{
+					"id": "notes",
+					"name": "Notes"
+				},
+				{
+					"id": "todo",
+					"name": "Todo"
+				}
+			]
+		},
+		{
+			"name": "apps when the server serves none",
+			"session": "link",
+			"backend": {
+				"apps": []
+			},
+			"call": {
+				"method": "apps"
+			},
+			"client": {
+				"t": "apps"
+			},
+			"server": [
+				{
+					"t": "apps",
+					"apps": []
+				}
+			],
+			"result": []
+		},
+		{
+			"name": "apps pushed when the list changes",
+			"session": "link",
+			"backend": {},
+			"pushApps": [
+				{
+					"id": "notes",
+					"name": "Notes"
+				},
+				{
+					"id": "todo",
+					"name": "Todo"
+				}
+			],
+			"server": [
+				{
+					"t": "apps",
+					"apps": [
+						{
+							"id": "notes",
+							"name": "Notes"
+						},
+						{
+							"id": "todo",
+							"name": "Todo"
+						}
+					]
+				}
+			],
+			"result": [
+				{
+					"id": "notes",
+					"name": "Notes"
+				},
+				{
+					"id": "todo",
+					"name": "Todo"
+				}
+			]
+		},
+		{
+			"name": "apps asked by a device that is not a server",
+			"session": "authenticated",
+			"backend": {
+				"appsError": "protocol"
+			},
+			"call": {
+				"method": "apps"
+			},
+			"client": {
+				"t": "apps"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "protocol"
+				}
+			],
+			"closes": true,
+			"error": "protocol"
+		},
+		{
+			"name": "head on a link session, which has no document",
+			"session": "link",
+			"backend": {},
+			"call": {
+				"method": "head"
+			},
+			"client": {
+				"t": "head"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "protocol"
+				}
+			],
+			"closes": true,
+			"error": "protocol"
+		},
+		{
+			"name": "apps before hello",
+			"session": "new",
+			"backend": {},
+			"call": {
+				"method": "apps"
+			},
+			"client": {
+				"t": "apps"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "notAuthenticated"
+				}
+			],
+			"error": "notAuthenticated"
+		}
+	],
 	"tolerated": {
 		"client": [
 			{
@@ -552,6 +922,17 @@
 				},
 				"body": "{}",
 				"ifEtag": null
+			},
+			{
+				"name": "a pair of kind device is a pair as before",
+				"frame": {
+					"t": "pair",
+					"proto": 1,
+					"kind": "device",
+					"app": "todo",
+					"secret": "q83vEjRWeJCrze8SNFZ4kA",
+					"name": "Windows Edge"
+				}
 			},
 			{
 				"name": "a hello with a field the server does not know",
