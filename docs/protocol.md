@@ -1,6 +1,6 @@
 # Protocol
 
-This is the contract between `workspace-server` and an app's client. The reference client is the npm package in [client/](../client/README.md), `@flighter7/workspace-client`; the todo app (`FLighter7/todo`) syncs through it.
+This is the contract between `workspace-server` and an app's client. The reference client is the npm package in [client/](../client/README.md), `@flighter7/wss-client`; the todo app (`FLighter7/todo`) syncs through it.
 
 - **Changing the contract:** change it only together with the client package and the vectors in [testdata/conformance/](../testdata/conformance), in the same commit. The vectors hold this contract as data, and both the Go tests and the package's tests play them. Bump `proto` for any change an old client cannot handle.
 - **Reading order:** [architecture.md](architecture.md) explains how the server implements this contract and why. This file says only what a client must know.

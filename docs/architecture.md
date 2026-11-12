@@ -7,7 +7,7 @@ How `workspace-server` works, why it was built this way, what limits it has, and
   - the user guide: [guide.md](guide.md);
   - the wire contract with clients: [protocol.md](protocol.md);
   - open work: [TODO.md](TODO.md).
-- **History:** this file condenses the original design (2026-11-07), the Go rewrite plan, its reviews, the Windows checks, the start/stop/delete plan (2026-11-09) and the local hub plan (2026-11-11/12: a subordinate server on the laptop, handing it out to devices, switching the main). The full texts are in git: the spec and plan up to `ad18bef`; the Windows reports in `c925c5e` (mDNS) and `a99ba9e` (server, lock, autostart); the start/stop/delete plan and its check lists in `af855e0`. The local hub plan was a working file outside git: its decisions are L1–L34 below, its limits under "Limits", and what it left open in [TODO.md](TODO.md); its commits run from `9a8cb7e` to `24e3149`.
+- **History:** this file condenses the original design (2026-11-07), the Go rewrite plan, its reviews, the Windows checks, the start/stop/delete plan (2026-11-09) and the local hub plan (2026-11-11/12: a subordinate server on the laptop, handing it out to devices, switching the main). The full texts are in git: the spec and plan up to `ad18bef`; the Windows reports in `c925c5e` (mDNS) and `a99ba9e` (server, lock, autostart); the start/stop/delete plan and its check lists in `af855e0`. The local hub plan was a working file outside git: its decisions are L1–L34 below, its limits under "Limits", and what it left open in [TODO.md](TODO.md); its commits run from `9a8cb7e` to `24e3149`. The client package was renamed from `@flighter7/workspace-client` to `@flighter7/wss-client` and set to 1.0.0 on 2026-11-12, before its first publish; nothing a device stores carries the package's name, so no device pairs again.
 
 ## What it is and what it is not
 
@@ -124,7 +124,7 @@ The page `internal/web` serves: Vue 3, Vuetify 4 and vue-i18n, built with Vite. 
 
 ### The client package (`client/`)
 
-`@flighter7/workspace-client` is the client a TypeScript web app syncs through. It is a pnpm package of its own, not a workspace: the root stays a Go module, and Go ignores the folder. Its README is the documentation for app developers.
+`@flighter7/wss-client` is the client a TypeScript web app syncs through. It is a pnpm package of its own, not a workspace: the root stays a Go module, and Go ignores the folder. Its README is the documentation for app developers.
 
 | Module | Job |
 | --- | --- |
@@ -137,7 +137,7 @@ The page `internal/web` serves: Vue 3, Vuetify 4 and vue-i18n, built with Vite. 
 | `SyncEngine.ts` | When to connect, sync and write; retries, halts, the write guard, the conflict loop; the main and its subordinates at once, preferring the main. The app's `SyncAdapter` merges its document; its `DocumentError` halts sync. |
 | `startInPage.ts` | Starts the engine and follows the page's visibility, the back-forward cache and the network. |
 | `WorkspaceError.ts` | The error codes, by kind: server, pairing code, transport, engine. |
-| `testing/` | `FakeServer` and `FakeChannel`, exported as `@flighter7/workspace-client/testing` for apps' tests. |
+| `testing/` | `FakeServer` and `FakeChannel`, exported as `@flighter7/wss-client/testing` for apps' tests. |
 
 **The contract as data:** `testdata/conformance/` holds the contract as vectors. The client package's `conformance.test.ts` plays them against `ServerClient`, `parsePairingCode` and `buildServerAnswer`. The Go tests play the same files against the `Session` (`internal/protocol`), `EncodeCode` (`internal/pairing`), the reference answer builder (`internal/rtc`) and the Go client (`internal/wsclient`). `frames.json` keeps the exchanges only servers speak (server-kind pairing, link sessions, `apps`, `announce` and `devices`) in a section of their own, `serverKind`, which the client package does not read. A change on one side that the other does not follow fails a test. A change to the contract changes `docs/protocol.md`, the vectors and both sides in one commit.
 
@@ -720,7 +720,7 @@ Each step runs even if an earlier one failed; failures go to stderr (the log may
   `release.yml` runs it with the rest of `ci.yml`, so binaries are built only after the package passes.
 - **The web page in CI:** `ci.yml`'s `page` job does the same for `client-wss/`: `pnpm run check` (lint, Prettier, unit tests, typecheck, build), then the e2e against a server built with the page embedded. The Go job never builds the page: `internal/web`'s tests serve a stand-in from `fstest.MapFS`, and read `client-wss/index.html` itself to check it is the template the server fills.
 - **Publishing the package: by the user, by hand.** No workflow and no agent publishes it.
-  1. Set `client/package.json`'s `version` to the server's tag, `0.1.0` for `v0.1.0`.
+  1. Set `client/package.json`'s `version` to the server's tag, `1.0.0` for `v1.0.0`.
   2. Run `pnpm --dir client publish --access public`; add `--tag next` for a pre-release. `prepublishOnly` runs `check` first.
   3. npm asks for 2FA.
 
@@ -810,7 +810,7 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 
 ### The client package (agreed with the user, 2026-11-10)
 
-- **C1, one client for every app:** the transport and the sync engine moved out of the todo app into `client/`, published as `@flighter7/workspace-client`. An app passes its app id and a `SyncAdapter`, which merges its document. The engine decides when to sync and runs the protocol. The server merges nothing.
+- **C1, one client for every app:** the transport and the sync engine moved out of the todo app into `client/`, published as `@flighter7/wss-client`. An app passes its app id and a `SyncAdapter`, which merges its document. The engine decides when to sync and runs the protocol. The server merges nothing.
   - Why: every next app would otherwise copy the most fragile code: the signaling-free answer, flow control, pairing confirmation, retries, the write guard.
   - Cost: a change to the engine reaches an app only through a new package version.
 - **C2, no Protobuf:** considered as a single source for the contract and turned down. The contract stays prose in `protocol.md`, pinned by the vectors in `testdata/conformance/`.
@@ -820,7 +820,7 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 - **C4, a contract change is one commit:** `protocol.md`, the vectors, the server and `client/` change together, and `proto` goes up for any change an old client cannot handle.
 - **C5, publishing is by hand:** the user publishes to npm; no workflow and no agent does. An app tries a change against `link:../workspace-server/client` before it is published.
   - Cost: no provenance attestation on the published package.
-- **C6, the package version is the server's tag** (`0.1.0` for `v0.1.0`), so a package and the server it was tested against are easy to pair up.
+- **C6, the package version is the server's tag** (`1.0.0` for `v1.0.0`), so a package and the server it was tested against are easy to pair up.
 - **C7, a pnpm package of its own, not a workspace:** the root stays a Go module, and Go ignores the folder. `client/.gitattributes` keeps LF, which Prettier needs, whatever `core.autocrlf` says.
 - **C8, licence:** CC BY-NC-ND 4.0 for the whole repository, `LICENSE` at the root. `prepack` copies it into the package.
   - Cost: Creative Commons does not recommend its licences for software, and ND forbids others to distribute changed copies. The author's own apps are not affected.

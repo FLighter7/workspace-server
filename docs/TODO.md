@@ -4,8 +4,8 @@ Open work, and what is left to check. Remove an item when it is done; add what y
 
 ## Waiting for the user
 
-- **Publish `@flighter7/workspace-client` `0.1.0`,** by hand ([architecture.md](architecture.md#packaging-ci-release), "Publishing the package"). No version is on npm yet; this one carries fallback servers and following the main. Then, in this order:
-  - todo moves from `link:../workspace-server/client` to `^0.1.0` and runs its checks (`pnpm test`, `pnpm run lint`, `pnpm run build`, `pnpm run test:e2e`). Until then todo's CI cannot install the link, so its GitHub Pages deploy fails, and the deployed todo is a build from 2026-10-28, from before server sync;
+- **Publish `@flighter7/wss-client` `1.0.0`,** by hand ([architecture.md](architecture.md#packaging-ci-release), "Publishing the package"). No version is on npm yet; this one carries fallback servers and following the main. Then, in this order:
+  - todo moves from `link:../workspace-server/client` to `^1.0.0` and runs its checks (`pnpm test`, `pnpm run lint`, `pnpm run build`, `pnpm run test:e2e`). Until then todo's CI cannot install the link, so its GitHub Pages deploy fails, and the deployed todo is a build from 2026-10-28, from before server sync;
   - both guides drop the "Not available yet" note under "A laptop as a second server".
 - **A "Resume" control for an app the write guard stopped?** An open question for the user, not decided. Today only a restart of the subordinate resumes such an app, and the page says so (L13 and "The write guard" in [architecture.md](architecture.md#the-write-guard)).
 

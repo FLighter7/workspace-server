@@ -1,6 +1,6 @@
 {
-	"name": "@flighter7/workspace-client",
-	"version": "0.1.0",
+	"name": "@flighter7/wss-client",
+	"version": "1.0.0",
 	"description": "The client for workspace-server: pair a device, reach the server over WebRTC on the local network, and keep an app's document in sync.",
 	"license": "CC-BY-NC-ND-4.0",
 	"author": "Alexander Gerasimov (FLighter)",
