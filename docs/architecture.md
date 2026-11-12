@@ -373,6 +373,8 @@ The code format and the outcomes are in [protocol.md](protocol.md).
 
 A server is a **main** or a **subordinate**. A main has no upstream server. A subordinate is linked to one main and mirrors its apps on its own disk: a laptop that keeps a PC's documents when it travels. This section describes what is built; "Not built yet" at its end lists the rest.
 
+**The design of the whole hub** (at home, away, switching the main) is drawn in [images/connections.svg](images/connections.svg). It shows the planned design: of it, stage 1 has built only the link and pull.
+
 - **The role** is a subordinate's while `upstream.json` exists in the server folder. Every `welcome` names it (`role`), and `/api/status` shows it.
 - **Only a main can be an upstream.** The link checks the role in every `welcome` it gets and refuses any but `main`, a missing one included (a server from before roles): subordinates form a star of depth one around a main, which cannot hold a cycle. A main that links to another becomes a subordinate and closes the sessions of its own server-kind devices; its subordinates reconnect, read `subordinate`, and stop.
 

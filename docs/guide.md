@@ -133,6 +133,14 @@ On the first start the server creates its folder and an entry for the `todo` app
 
 If a device asks for an app the server does not serve yet, the page offers to add that app with one click. Then pair again.
 
+## A laptop as a second server
+
+**Not available yet:** this is being built. The diagram shows how it is planned to work.
+
+![How the PC's main server, the laptop's server and the devices connect: at home, away, and when the laptop becomes the main](images/connections.svg)
+
+The PC runs the main server, and a laptop can run a second one that keeps a copy of every app's data on its own disk. At home your devices sync with the PC; away from home they sync with the laptop's server without pairing again, and the two servers exchange the changes when the laptop is back.
+
 ## Updating
 
 1. Put the new file in place of the old one, with the same name in the same folder. On Windows, run `stop` first: a running program file cannot be replaced there.
