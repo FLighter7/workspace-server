@@ -2,13 +2,13 @@
 // server whose apps it mirrors. The link pairs with the main once, as a
 // server-kind device, and keeps the pairing in upstream.json. It then holds a
 // link session, which tells it the main's app list, and one session per app,
-// over which it pulls the main's document whenever the main's copy moved and
-// this server's did not.
+// over which it keeps the app's document in line with the main's.
 //
 // What the link does for each app follows the sync rule in
-// docs/architecture.md. This version pulls only: when this server's copy
-// moved since the two last agreed, the app waits (pushing and settling a
-// divergence come later; see sync).
+// docs/architecture.md (see sync): it pulls when only the main's copy moved,
+// pushes when only this server's did, and when both did, the main's copy
+// wins here and this server's goes to history. Neither side ever merges:
+// the devices do, as they always have, and write the result back.
 package upstream
 
 import (
@@ -38,6 +38,19 @@ const (
 	ReasonNotMain = "notMain"
 	// ReasonServerChanged: another server answers at the main's addresses.
 	ReasonServerChanged = "serverChanged"
+	// ReasonTooManyWrites: the write guard stopped an app (see
+	// MaxPushesPerMinute).
+	ReasonTooManyWrites = "tooManyWrites"
+)
+
+// The write guard, a last line of defence against a write loop, as in the
+// client package's engine: one app's pushes to the main are counted over a
+// sliding minute, and a push past MaxPushesPerMinute stops that app's sync
+// until the link starts again (the server starts, or restarts after a reset
+// or a data-folder move).
+const (
+	MaxPushesPerMinute = 10
+	pushWindow         = time.Minute
 )
 
 // Defaults for Deps left zero.
@@ -49,10 +62,15 @@ const (
 	blockedWait = time.Minute
 	// stableAfter: a session that lasted this long resets the backoff.
 	stableAfter = 30 * time.Second
-	// pullAttempts bounds how often one sync retries a pull that lost the
-	// race with a local write.
-	pullAttempts = 3
+	// syncAttempts bounds how often one sync decides again after the main or
+	// a device here wrote first. Whoever wrote also left the worker a reason
+	// to sync again (a changed push, or a local write), so a sync that runs
+	// out of attempts is followed by another.
+	syncAttempts = 4
 )
+
+// errTooManyWrites: the write guard refused a push.
+var errTooManyWrites = fmt.Errorf("more than %d pushes to the main within a minute (%s)", MaxPushesPerMinute, ReasonTooManyWrites)
 
 // Errors of Pair that are not the main's.
 var (
@@ -108,11 +126,16 @@ type Status struct {
 	Connected bool       `json:"connected"`
 	// Halted: the link stopped and does not retry until the server starts
 	// again; Reason says why.
-	Halted    bool       `json:"halted"`
-	Reason    string     `json:"reason,omitempty"`
-	LastError string     `json:"lastError,omitempty"`
-	LastSync  *time.Time `json:"lastSync,omitempty"` // the last pull
-	Apps      []string   `json:"apps"`               // the apps synced now
+	Halted    bool   `json:"halted"`
+	Reason    string `json:"reason,omitempty"`
+	LastError string `json:"lastError,omitempty"`
+	// LastSync: the last time a document moved between the two servers: a
+	// pull, a push, or the main's copy replacing this server's.
+	LastSync *time.Time `json:"lastSync,omitempty"`
+	Apps     []string   `json:"apps"` // the apps synced now
+	// Stopped lists the apps the write guard stopped, sorted; they do not
+	// sync until the link starts again.
+	Stopped []string `json:"stopped,omitempty"`
 }
 
 // Link is a server's link to its upstream server. It is safe for concurrent
@@ -130,12 +153,18 @@ type Link struct {
 	lastSync  *time.Time
 	connects  int // link sessions opened, for tests
 	syncing   []string
-	waiting   map[string]string // per app, the wait last logged
+	pushes    map[string][]time.Time // per app, its pushes within the guard's window
+	stopped   map[string]bool        // the apps the write guard stopped
 	cancel    context.CancelFunc
 	closed    bool
 
 	kick chan struct{} // reconnect now
 	wg   sync.WaitGroup
+
+	// localMu guards local alone, so a device's write never waits for the
+	// link's own work under mu (saving upstream.json, say).
+	localMu sync.Mutex
+	local   map[string]chan struct{} // per app, a write by a device here
 }
 
 // Open loads the link from deps.Path; a missing file is a main's state. It
@@ -157,7 +186,10 @@ func Open(d Deps) (*Link, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Link{d: d, st: st, waiting: map[string]string{}, kick: make(chan struct{}, 1)}, nil
+	return &Link{
+		d: d, st: st, kick: make(chan struct{}, 1),
+		pushes: map[string][]time.Time{}, stopped: map[string]bool{}, local: map[string]chan struct{}{},
+	}, nil
 }
 
 // Role is this server's role: a subordinate while it is linked.
@@ -186,6 +218,8 @@ func (l *Link) startLocked() {
 	ctx, cancel := context.WithCancel(context.Background())
 	l.cancel = cancel
 	l.halted, l.reason = false, ""
+	clear(l.stopped)
+	clear(l.pushes)
 	select { // a change before the link ran asks for nothing
 	case <-l.kick:
 	default:
@@ -215,17 +249,61 @@ func (l *Link) NetworkChanged() {
 	}
 }
 
+// LocalWrite tells the link that a device stored a document of app on this
+// server, so that the app's worker syncs it with the main at once (a push,
+// usually). The hub calls it after every device's write and never after the
+// link's own, which would go back where they came from. It never blocks.
+// Before the app's first session to the main, and on a main, it does
+// nothing: every session syncs once it opens anyway.
+func (l *Link) LocalWrite(app string) {
+	l.localMu.Lock()
+	ch := l.local[app]
+	l.localMu.Unlock()
+	if ch != nil {
+		poke(ch)
+	}
+}
+
+// localWrites returns the channel LocalWrite pokes for app, creating it.
+func (l *Link) localWrites(app string) chan struct{} {
+	l.localMu.Lock()
+	defer l.localMu.Unlock()
+	ch := l.local[app]
+	if ch == nil {
+		ch = make(chan struct{}, 1)
+		l.local[app] = ch
+	}
+	return ch
+}
+
+// poke puts a token into a channel of one, unless one waits there already.
+func poke(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
 // Status reports the link.
 func (l *Link) Status() Status {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	st := Status{Linked: l.st != nil, Apps: append([]string{}, l.syncing...)}
+	st := Status{Linked: l.st != nil, Apps: []string{}}
+	for _, id := range l.syncing {
+		if !l.stopped[id] {
+			st.Apps = append(st.Apps, id)
+		}
+	}
 	if l.st == nil {
 		return st
 	}
 	at := l.st.LinkedAt
 	st.ServerID, st.Name, st.Hosts, st.LinkedAt = l.st.ServerID, l.st.Name, append([]string(nil), l.st.Hosts...), &at
 	st.Connected, st.Halted, st.Reason, st.LastError, st.LastSync = l.connected, l.halted, l.reason, l.lastErr, l.lastSync
+	for id := range l.stopped {
+		st.Stopped = append(st.Stopped, id)
+	}
+	slices.Sort(st.Stopped)
 	return st
 }
 
@@ -550,14 +628,22 @@ func (l *Link) adopt(list []wsclient.App) []string {
 }
 
 // worker keeps app's session to the main up and syncs over it until ctx
-// ends. A failure that stops the whole link goes to fatal.
+// ends. A failure that stops the whole link goes to fatal. An app the write
+// guard stopped does not run until the link starts again.
 func (l *Link) worker(ctx context.Context, app string, fatal chan<- error) {
+	if l.isStopped(app) {
+		return
+	}
 	delay := l.d.MinBackoff
 	last := ""
 	for {
 		started := time.Now()
 		err := l.appSession(ctx, app)
 		if ctx.Err() != nil {
+			return
+		}
+		if errors.Is(err, errTooManyWrites) {
+			l.stop(app)
 			return
 		}
 		if halts(err) && !wsclient.HasCode(err, "unknownApp") {
@@ -585,8 +671,10 @@ func (l *Link) worker(ctx context.Context, app string, fatal chan<- error) {
 	}
 }
 
-// appSession syncs app once at the welcome and again at every changed push,
-// until the session ends.
+// appSession syncs app once at the welcome, and again at every changed push
+// from the main and every write by a device here, until the session ends.
+// The sync at the welcome is what sends the main the writes made here while
+// the two could not reach each other.
 func (l *Link) appSession(ctx context.Context, app string) error {
 	st := l.snapshot()
 	cl, err := l.d.Dial(ctx, st.target(), app)
@@ -603,76 +691,129 @@ func (l *Link) appSession(ctx context.Context, app string) error {
 	if err := checkWelcome(w, st.ServerID); err != nil {
 		return err
 	}
-	if err := l.sync(ctx, cl, app, w.Etag); err != nil {
-		return err
+	local := l.localWrites(app)
+	select { // the sync below reads what was written before
+	case <-local:
+	default:
 	}
-	for {
+	up, err := l.sync(ctx, cl, app, w.Etag)
+	for err == nil {
 		select {
 		case etag := <-changed:
-			if err := l.sync(ctx, cl, app, &etag); err != nil {
-				return err
+			up = &etag
+		case <-local:
+			select { // the main's newest etag, if one came meanwhile
+			case etag := <-changed:
+				up = &etag
+			default:
 			}
 		case <-cl.Done():
 			return refused(cl.Err())
 		case <-ctx.Done():
 			return nil
 		}
+		up, err = l.sync(ctx, cl, app, up)
 	}
+	return err
 }
 
-// sync brings app in line with the main, whose document has etag upEtag:
+// mainDoc is the main's document as one sync read it.
+type mainDoc struct {
+	etag *string
+	body []byte
+}
+
+// sync brings app in line with the main, whose document the link last knew
+// to have etag up (nil: none), and returns the etag it knows the main's
+// document to have now. With this server's etag local and base the etag the
+// two last agreed on (if they ever did):
 //
-//   - the same etag on both sides: that is the agreed base;
-//   - only the main moved (this server's copy is the base, or it has none):
-//     pull: get the main's document and write it here if this server's copy
-//     is still the one read, telling this server's sessions;
-//   - otherwise this server's copy moved since the two last agreed. Pushing
-//     it, and settling a divergence (the main's copy wins here, this one
-//     kept in history), come with the next version: the app waits, logged
-//     once.
+//   - up = local: that is the agreed base;
+//   - the main has no document, or only this server's copy moved (up is the
+//     base): push: put this server's document to the main if the main's is
+//     still up; on a conflict, decide again with the main's etag;
+//   - only the main moved (local is the base, or this server has none):
+//     pull: write the main's document here if this server's copy is still
+//     local, telling this server's sessions;
+//   - both moved, or they never agreed and differ: the main's copy wins:
+//     written here the same way, and this server's goes to history. The
+//     devices here merge it with what they hold, as they always do, and
+//     write the result back, which the next sync pushes.
 //
-// A pull that loses the race with a local write decides again.
-func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app string, upEtag *string) error {
-	for range pullAttempts {
-		_, local, err := l.d.Store.Read(app)
+// Every write is conditional, so a stale up costs a decision, never a
+// document: a write here that loses the race with a device decides again,
+// and so does a main's document that is not the one up said.
+func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app string, up *string) (*string, error) {
+	var got *mainDoc
+	for range syncAttempts {
+		body, local, err := l.d.Store.Read(app)
 		if err != nil {
-			return err
+			return up, err
 		}
 		base, agreed := l.base(app)
 		switch {
-		case same(upEtag, local):
+		case same(up, local):
 			l.agree(app, local)
-			return nil
-		case upEtag != nil && (local == nil || (agreed && same(local, base))):
-			etag, body, err := cl.Get(ctx)
-			if err != nil {
-				return refused(err)
+			return up, nil
+		case up == nil || (local != nil && agreed && same(up, base)):
+			if !l.allowPush(app) {
+				return up, errTooManyWrites
 			}
-			if etag == nil || same(etag, local) {
-				// The main's copy changed again meanwhile; its push follows.
-				upEtag = etag
+			stored, etag, err := cl.Put(ctx, up, body)
+			if err != nil {
+				return up, refused(err)
+			}
+			if !stored {
+				l.d.Logf("app %q: the main's document changed before this server's reached it (it has %s now); deciding again", app, short(etag))
+				up = etag
 				continue
 			}
-			stored, err := l.d.Writer.Replace(app, body, local)
+			l.moved(app, *etag, "pushed this server's document %s to the main", short(etag))
+			return etag, nil
+		default:
+			if got == nil || !same(got.etag, up) {
+				etag, doc, err := cl.Get(ctx)
+				if err != nil {
+					return up, refused(err)
+				}
+				got = &mainDoc{etag, doc}
+				if !same(etag, up) { // the main's copy moved again meanwhile
+					up = etag
+					continue
+				}
+			}
+			stored, err := l.d.Writer.Replace(app, got.body, local)
 			var conflict *store.ConflictError
 			if errors.As(err, &conflict) {
-				upEtag = etag
-				continue
+				continue // a device here wrote first
 			}
 			if err != nil {
-				return err
+				return up, err
 			}
-			l.pulled(app, stored)
-			return nil
-		default:
-			l.wait(app, local, base, agreed, upEtag)
-			return nil
+			if local == nil || (agreed && same(local, base)) {
+				l.moved(app, stored, "pulled the main's document %s", short(&stored))
+			} else {
+				was := "they were never agreed on"
+				if agreed {
+					was = "both changed since they agreed on " + short(base)
+				}
+				l.moved(app, stored, "the main's document %s replaced this server's %s (%s); this server's is kept in history, and the devices here merge it back", short(&stored), short(local), was)
+			}
+			return up, nil
 		}
 	}
-	return nil
+	return up, nil
 }
 
 func same(a, b *string) bool { return (a == nil && b == nil) || (a != nil && b != nil && *a == *b) }
+
+// short is an etag's first 8 digits, for the log.
+func short(e *string) string {
+	if e == nil {
+		return "none"
+	}
+	return (*e)[:min(8, len(*e))]
+}
 
 // base returns the etag app last agreed on, and whether it ever agreed.
 func (l *Link) base(app string) (*string, bool) {
@@ -690,40 +831,47 @@ func (l *Link) agree(app string, etag *string) {
 		return
 	}
 	l.st.Apps[app] = appState{Base: etag}
-	delete(l.waiting, app)
 	l.saveLocked()
 }
 
-// pulled records a pull of the document with etag.
-func (l *Link) pulled(app, etag string) {
+// moved records that a document moved between the two servers, after which
+// both have etag, and logs what happened.
+func (l *Link) moved(app, etag string, format string, args ...any) {
 	now := l.d.Now().UTC()
 	l.agree(app, &etag)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lastSync = &now
-	l.d.Logf("app %q: pulled the main's document %s", app, etag[:8])
+	l.d.Logf("app %q: "+format, append([]any{app}, args...)...)
 }
 
-// wait logs, once per situation, that app's local copy moved and waits.
-func (l *Link) wait(app string, local, base *string, agreed bool, up *string) {
-	short := func(e *string) string {
-		if e == nil {
-			return "none"
-		}
-		return (*e)[:min(8, len(*e))]
-	}
-	b := "never agreed"
-	if agreed {
-		b = short(base)
-	}
-	key := short(local) + "/" + b + "/" + short(up)
+// allowPush counts a push of app, and refuses it when MaxPushesPerMinute
+// pushes of app happened within the last minute.
+func (l *Link) allowPush(app string) bool {
+	now := l.d.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.waiting[app] == key {
-		return
+	recent := slices.DeleteFunc(l.pushes[app], func(at time.Time) bool { return now.Sub(at) >= pushWindow })
+	if len(recent) >= MaxPushesPerMinute {
+		l.pushes[app] = recent
+		return false
 	}
-	l.waiting[app] = key
-	l.d.Logf("app %q: this server's document (%s) moved since the main and this server last agreed (%s); the main has %s. Sending it to the main is not built yet, so it waits", app, short(local), b, short(up))
+	l.pushes[app] = append(recent, now)
+	return true
+}
+
+// stop records that the write guard stopped app.
+func (l *Link) stop(app string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.stopped[app] = true
+	l.d.Logf("app %q: stopped syncing with the main until this server starts again: %v. The documents on both sides stay as they are", app, errTooManyWrites)
+}
+
+func (l *Link) isStopped(app string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.stopped[app]
 }
 
 // keepHosts stores the main's hosts from a welcome, when they changed.

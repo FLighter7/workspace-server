@@ -51,6 +51,12 @@ type Deps struct {
 	// Logf, if set, receives the text of every internal error; devices get
 	// the error without it.
 	Logf func(format string, args ...any)
+	// Stored, if set, is called after a device's write is stored (Put), once
+	// the hub's locks are released, and must not block. A subordinate passes
+	// it to its link, which then pushes the document to its main. Replace
+	// does not call it: the link writes with Replace, and a hook on its own
+	// writes would send them back where they came from.
+	Stored func(app string)
 }
 
 // SessionInfo describes one authenticated session. App is empty for a link
@@ -312,13 +318,19 @@ func (h *Hub) appList() []protocol.AppInfo {
 }
 
 // Put stores body as app's document if the stored one has ifEtag, and then
-// tells every other session of the app the new etag. A put from a device
-// removed meanwhile stores nothing.
+// tells every other session of the app the new etag, and Deps.Stored. A put
+// from a device removed meanwhile stores nothing.
 func (h *Hub) Put(from *protocol.Session, app, device string, ifEtag *string, body []byte) (string, bool, *string, *protocol.Error) {
 	a, unlock, ok := h.lockListed(app)
 	if !ok {
 		return "", false, nil, &protocol.Error{Code: protocol.CodeUnknownApp, Message: fmt.Sprintf("this server no longer serves the app %q", app)}
 	}
+	stored := false
+	defer func() { // deferred first, so it runs after the locks are released
+		if stored && h.d.Stored != nil {
+			h.d.Stored(app)
+		}
+	}()
 	defer unlock()
 	// Under the app's lock, which RemoveDevice takes too, and the servers
 	// lock, which the removal of a server-kind device takes.
@@ -337,14 +349,16 @@ func (h *Hub) Put(from *protocol.Session, app, device string, ifEtag *string, bo
 	case err != nil:
 		return "", false, nil, h.errInternal(err)
 	}
+	stored = true
 	return etag, false, nil, nil
 }
 
 // Replace stores body as app's document if the stored one has ifEtag, as a
 // put does, and tells every session of the app the new etag, since none of
-// them wrote it. The link to the upstream server stores what it pulls with
-// it. A mismatch is a *store.ConflictError naming the current etag; an app
-// that is not listed is an error wrapping apps.ErrNotFound.
+// them wrote it. The link to the upstream server stores the main's document
+// with it. It does not call Deps.Stored. A mismatch is a
+// *store.ConflictError naming the current etag; an app that is not listed is
+// an error wrapping apps.ErrNotFound.
 func (h *Hub) Replace(app string, body []byte, ifEtag *string) (string, error) {
 	a, unlock, ok := h.lockListed(app)
 	if !ok {

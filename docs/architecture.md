@@ -98,7 +98,7 @@ Module `github.com/FLighter7/workspace-server`, Go 1.27. Dependencies:
 | `internal/rtc` | The UDP listener and the signaling-free accept path. It creates a peer connection per unknown ufrag. |
 | `internal/mdns` | The minimal mDNS responder for the `<uuid>.local` name, and a one-shot resolver for a main's name. |
 | `internal/wsclient` | A Go client of the protocol: the answer, the pairing code, framing and the messages, as in `client/`, and `Dial` with Pion as the offerer. |
-| `internal/upstream` | A subordinate's link to its main: `upstream.json`, the link and app sessions, the pull. |
+| `internal/upstream` | A subordinate's link to its main: `upstream.json`, the link and app sessions, the sync rule (pull, push, the main's copy winning a divergence), the write guard. |
 | `internal/netaddr` | LAN IPv4 addresses and interfaces. |
 | `internal/web` | The localhost page: serves the page built from `client-wss/` (embedded from `ui/dist`), the API, the guard. |
 | `internal/autostart` | LaunchAgent, `systemd --user` unit, Windows logon task; opening the page. |
@@ -310,7 +310,8 @@ a=max-message-size:262144
   - a `put` from a device removed meanwhile gets `badToken` and is not stored.
 - **Internal errors** reach devices as a generic message; the detail goes to the log.
 - **Server-kind devices** (subordinates) are admitted to every listed app and to link sessions, which have no app and carry the app list. Their sessions span every app, so their removal cannot take one app's lock: admissions and writes read-lock a `servers` lock, and removing a server-kind device write-locks it. Lock order: an app's lock, then `servers`, then the session set's lock.
-- **`Replace`** writes a document without a session, the way the link stores what it pulled, and pushes `changed` to every session of the app. **`CloseServers`** ends every session of a server-kind device; the server calls it when it becomes a subordinate itself.
+- **`Replace`** writes a document without a session, the way the link stores the main's document, and pushes `changed` to every session of the app. **`CloseServers`** ends every session of a server-kind device; the server calls it when it becomes a subordinate itself.
+- **After a device's write** (`Put`, once stored), the hub calls the hook `Deps.Stored` with the app, after its locks are released; it must not block. The server passes it to the link (`LocalWrite`), which on a subordinate pushes the document to the main, and on a main does nothing. `Replace` never calls it: the link's own writes would otherwise go back where they came from.
 
 ## The `.local` responder (`internal/mdns`)
 
@@ -373,7 +374,7 @@ The code format and the outcomes are in [protocol.md](protocol.md).
 
 A server is a **main** or a **subordinate**. A main has no upstream server. A subordinate is linked to one main and mirrors its apps on its own disk: a laptop that keeps a PC's documents when it travels. This section describes what is built; "Not built yet" at its end lists the rest.
 
-**The design of the whole hub** (at home, away, switching the main) is drawn in [images/connections.svg](images/connections.svg). It shows the planned design: of it, stage 1 has built only the link and pull.
+**The design of the whole hub** (at home, away, switching the main) is drawn in [images/connections.svg](images/connections.svg). It shows the planned design: of it, the link and the sync rule (pull, push, divergence) are built so far.
 
 - **The role** is a subordinate's while `upstream.json` exists in the server folder. Every `welcome` names it (`role`), and `/api/status` shows it.
 - **Only a main can be an upstream.** The link checks the role in every `welcome` it gets and refuses any but `main`, a missing one included (a server from before roles): subordinates form a star of depth one around a main, which cannot hold a cycle. A main that links to another becomes a subordinate and closes the sessions of its own server-kind devices; its subordinates reconnect, read `subordinate`, and stop.
@@ -414,21 +415,38 @@ A server is a **main** or a **subordinate**. A main has no upstream server. A su
 - An address change (the 30 s check) reconnects at once.
 - **The link stops** (until the server starts again; the status says why) on `badToken` (the main removed this server), `unknownApp` on the link session (a main too old), `protocol`, a `welcome` that is not a main's (`notMain`), and another server at the main's addresses (`serverChanged`).
 
-### The sync rule, so far: pull only
+### The sync rule
 
-The link keeps, per app, `base` in `upstream.json`: the etag on which this server (L) and the main (U) last agreed; `null` when they agreed that there is no document, and no entry when they never agreed. An etag is the SHA-256 of the bytes, so a pulled document keeps the main's etag, and nothing is rewritten in circles. At every `welcome` of an app session, and at every `changed` on it, with U's etag `u` and L's etag `l`:
+No server merges, a subordinate included: the devices do, as they always have. The link keeps, per app, `base` in `upstream.json`: the etag on which this server (L) and the main (U) last agreed; `null` when they agreed that there is no document, and no entry when they never agreed (a first link, or an app the main dropped and listed again). An etag is the SHA-256 of the bytes on both sides, so a document copied either way keeps its etag, and nothing is rewritten in circles. With U's etag `u` and L's etag `l`:
 
 | Situation | Action |
 | --- | --- |
 | `u` = `l` | `base` = `u` |
-| `u` is a document, and `l` is `base` or L has none | pull: `get` from U, write it into L if L's document is still `l` (through `Hub.Replace`, which keeps L's old one in history and sends `changed` to every session of L), `base` = the new etag. A local write that came first makes the pull decide again. |
-| anything else: L's copy moved since they agreed | waits, logged once per situation; U's later writes are not pulled over it |
+| only L moved (`u` = `base`), or U has no document | **push:** `put` L's document to U with `ifEtag` = `u`; `base` = the new etag. On `conflict`, decide again with the etag the conflict names. |
+| only U moved (`l` = `base`, or L has none) | **pull:** `get` from U, write it into L if L's document is still `l` (through `Hub.Replace`, which keeps L's old one in history and sends `changed` to every session of L); `base` = the new etag |
+| both moved, or they never agreed and differ | **U wins on L:** U's document is written into L the same way, so L's goes to `history/` and L's devices get `changed`; `base` = `u`. The devices merge it with what they hold, as they do against any server, and write the result back to L, which pushes it. |
 
-L never pulls "no document": U with none and L with one is L's document to push.
+- **When the link decides:** at every `welcome` of an app session, at every `changed` on it, and after every write a device makes on L (the hub's `Stored` hook wakes that app's worker). The `welcome` is what pushes the writes made on L while U was out of reach, or while the link was down: nothing is queued, since L's current document is all there is to push. A worker runs one sync at a time; writes that arrive meanwhile make one more sync, so a burst of writes is pushed as its last document.
+- **A stale view never costs a document:** every write on either side is conditional. A push against a `u` that U no longer has gets `conflict`, and the link decides again with U's current etag: U changed during the push, so both moved, and U wins on L. A `get` that returns another document than `u` named makes it decide again with that one. A write into L that loses the race with a device (a device writing during "U wins on L", say) decides again with L's new etag, so that write goes to history too and its device merges again at the `changed`. One sync decides at most 4 times; whoever wrote first also left a `changed` or a local write behind, which starts the next sync.
+- **No loops:**
+  - the link writes into L only with `Hub.Replace`, which does not call the hook, so a document copied from U is never pushed back;
+  - U sends `changed` to every session but the one that wrote, so a push brings nothing back, and were it to, the two etags would be equal: agreed, not pulled;
+  - a device that merges and finds nothing new writes nothing (todo writes only what the server lacks), which is what ends the round after "U wins on L". Ties end settled by U's copy for every device, as with a single server.
+- **L never pulls "no document":** U with none and L with one is L's document to push, on a first link too.
+- **The loss window:** "U wins on L" moves L's document to `history/`. A change in it that U lacked comes back as soon as the device that wrote it merges and writes again, which it does at the `changed` that follows, or when it next connects. If that device has vanished first (wiped, or never opened again), the change survives only in L's `history/`: the log line names L's etag, whose first 8 digits end the history file's name. L keeps the app's `history` versions (10 by default), so later writes push it out.
+- **Logged:** every push, pull and replacement, with the etags; a push that met `conflict`.
+
+### The write guard
+
+A last line of defence against a write loop, as in the client package's engine: the link counts **one app's pushes to U** over a sliding minute, and a push past 10 stops that app's sync, both ways, **until the server starts again** (a restart, a reset or a data-folder move opens a new link). Its session to U closes; the documents on both sides stay as they are; its devices go on syncing with each other through L. The log says so, and `GET /api/upstream` lists the app under `stopped` (and leaves it out of `apps`). Other apps go on, and the link is not halted. The next start settles what moved meanwhile by the table above.
+
+- **Pushes only:** every other write the link makes is into L, and needs a new etag on U; every new etag on U comes from U's devices, each under its own guard, or from L's pushes, under this one. So counting pushes bounds the link.
+- **Why it stops rather than slows:** a loop is a bug, and one throttled to 10 writes a minute still pushes 10 versions a minute out of U's history, and out of L's: the history that holds the loss window. Stopping keeps both.
+- **Why both ways:** with pushes stopped and pulls going on, every change on U would replace L's unpushed document again, each time into history. Stopped, L's copy stays current on L, where its devices still sync.
+- **Per app:** each app is its own document and its own loop, as each app has its own engine on a device.
 
 ### Not built yet
 
-- Push (only L moved: `put` to U with `ifEtag` = `base`), and a divergence (both moved, or a first link with different documents on both sides: U's copy wins on L, and L's goes to `history/`); the write guard (10 writes a minute); a hook after each local write, so that a device's write on L reaches U.
 - Handing subordinates out to devices: subordinates announce themselves to the main, `welcome` lists them, the main's device registry is replicated to them, and `pair` is refused on a subordinate.
 - The page: the "Upstream server" section, unlinking, `invite`, and server-kind devices marked on the main's page (until then a server-kind device shows on the Devices page in a group with no app name).
 - Switching the main (`term`).
@@ -733,11 +751,17 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 - **L3, the app list is objects, `{id, name}`:** a later field needs no new frame, and the name labels the app on the subordinate. `history` and `maxBytes` stay each server's own.
 - **L4, `proto` stays 1:** an old client meets nothing new it cannot handle. `role` is one more `welcome` field, which clients ignore; `kind`, a `hello` without app and `apps` come only from servers, and `apps` frames go only to server-kind sessions.
 - **L5, `upstream.json` lives in the server folder,** beside `identity.json` and `devices.json`, not in the data folder: it holds a token, and a data folder can be moved, adopted or shared. A reset deletes it.
-  - Cost: the agreed etags do not travel with the documents. A data folder switched under them degrades into "L's copy moved" (it waits now, and is pushed later) or "L has none" (pulled), never into a wrong pull.
+  - Cost: the agreed etags do not travel with the documents. A data folder switched under them degrades into "L's copy moved" (pushed, or, if the main moved too, the main's copy wins and L's goes to history) or "L has none" (pulled), never into a wrong pull.
 - **L6, linking is a page API route** (`POST /api/upstream`), with no command: the page's "Upstream server" section will use exactly this route, and a command would have to reach the running server through the same API anyway.
 - **L7, the pairing is confirmed only after `upstream.json` is saved,** by asking for the app list: a token the main keeps is never one this server lost.
 - **L8, a refused upstream stops the link** instead of retrying: `notMain`, `serverChanged`, `badToken`, `protocol`, and `unknownApp` on the link session. Each means a wrong or changed configuration, not a passing failure.
 - **L9, a `hello` without app** from an unknown device, or with a wrong token, gets `badToken`, so that a subordinate removed on the main learns that its pairing is gone. From a device of an app it gets `unknownApp`, as it always did.
+- **L10, no merging on a server; the main's copy wins a divergence** (see "The sync rule"). The devices already hold their own data and merge on every `changed`, so a server that only moves whole documents is enough, and every device sees ties settled the same way, by the main's copy.
+  - Cost: the loss window, a change that only lived on the subordinate and whose device vanished before it merged again, which then survives only in the subordinate's `history/`.
+- **L11, the hook is in `Hub.Put` and not in `Hub.Replace`:** a device's write is the only thing that makes the subordinate's copy move. The hook runs after the hub's locks are released and only wakes a worker, so a device's write never waits for the main.
+- **L12, nothing is queued for the main:** a write made while the main is out of reach is pushed by the next `welcome`, as whatever the subordinate's document is then. Content hashes make every step idempotent: a crash between a write and saving `base` is settled by the next decision, which finds the two etags equal.
+- **L13, the write guard counts one app's pushes and stops that app, both ways, until the server starts again** (see "The write guard"), like the client package's engine, which stops writing until the app opens again.
+  - Cost: a subordinate whose devices write one app more than 10 times a minute between them (several busy devices on the laptop, which their own guards make unlikely) stops syncing that app with the main until the server restarts. Until the page's "Upstream server" section shows it, only the log and `GET /api/upstream` do.
 
 ### Process
 
@@ -759,6 +783,8 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 - A subordinate holds N + 1 of the main's 64 sessions for N apps.
 - When the main removes a subordinate, each of the subordinate's sessions fails once on reconnecting. With 10 apps or more that is the 10th failure within a minute, and the main blocks the subordinate's address for 10 minutes, the browser on that machine included.
 - A subordinate cannot be unlinked yet, except by a reset.
+- A divergence between a subordinate and its main is settled by the main's copy; a change that only lived on the subordinate, whose writing device vanished before it merged again, survives only in the subordinate's `history/` (see "The sync rule").
+- The write guard stops an app on a subordinate after more than 10 pushes to the main within a minute, until the server starts again.
 - Small known gaps and their fixes are listed in [TODO.md](TODO.md).
 
 ## What has been verified, where
@@ -776,7 +802,7 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 | Anything on a real machine | Linux | not tested, and not planned: there is no Linux machine to check it on. The code is built, vetted and unit-tested in CI only. |
 | The client package's e2e (two Chromium devices pair, merge and get a `changed` push; `badSecret`; `unknownApp`) and its unit and conformance tests; the Go conformance tests | Windows 10 22H2 (19045), 2026-11-10 | pass |
 | Mac Safari, Android | | never tried |
-| Two servers linked in one process over real WebRTC on `127.0.0.1` (Go tests: pairing as a server, the app list, the pull, reconnects); the mDNS resolver against the server's own responder on this machine's LAN | Windows 10 22H2 (19045), 2026-11-12 | pass. A subordinate and a main on two machines: not tried. |
+| Two servers linked in one process over real WebRTC on `127.0.0.1` (Go tests: pairing as a server, the app list, the pull, reconnects; then push, divergence, a conflict during a push, the write guard, no ping-pong); the mDNS resolver against the server's own responder on this machine's LAN | Windows 10 22H2 (19045), 2026-11-12 | pass. A subordinate and a main on two machines: not tried. |
 
 ## Testing
 
@@ -823,9 +849,9 @@ pnpm --dir client run test:e2e   # builds the server with Go, two Chromium devic
 - An integration test: the real UDP listener on loopback with a Pion client using the client-built answer. It pairs, puts and gets, and receives `changed` on a second client. It also checks that a wrong password is ignored.
 - The listener's admission (password, session cap, recently ended ufrags) by feeding binding requests straight to its packet handler, and the teardown's drain with a stand-in peer connection.
 - The contract vectors (`testdata/conformance/`), played against the `Session`, `EncodeCode`, the reference answer builder and the Go client, and by the client package against its client.
-- Server-kind devices in the hub: pairing, admission to every app and to link sessions, the app list and its pushes, `Replace`, removal across apps.
+- Server-kind devices in the hub: pairing, admission to every app and to link sessions, the app list and its pushes, `Replace`, removal across apps; the `Stored` hook (after a stored put only, outside the hub's locks, never after `Replace`).
 - The mDNS resolver: query and answer as pure functions, and a lookup of the server's own responder on the real port 5353 (skipped where it cannot run).
-- The link, on real servers in one process linked over real WebRTC on `127.0.0.1`: "only U moved" (the pull, `changed` to a local device, the agreed etag), the app list (added and removed on the main), a subordinate refused as an upstream with its pairing undone there, a local change that waits, a subordinate removed on the main, reconnects after the main's listener restarts, after a restart from `upstream.json` and after a network change; and in `cmd/workspace-server`, two whole servers linked through `POST /api/upstream`, then reset.
+- The link, on real servers in one process linked over real WebRTC on `127.0.0.1`: every row of the sync table (the same document on both sides before a first link; only U moved; only L moved, pushed at once after each device's write; a first link where only L has a document; both moved while the link was down; a first link with different documents on both sides, U winning and L's version found in its history; the devices' merge written back and pushed), a conflict during a push (U's document changed behind its hub, so L pushes against a stale etag and U wins), writes made on L while U was down pushed once it is back (the last only), the write guard stopping one app while another goes on, the guard's sliding minute with a fake clock, and no write ping-pong (devices on both sides, the histories and the link's log stay still for 1.5 s after convergence); the app list (added and removed on the main), a subordinate refused as an upstream with its pairing undone there, a subordinate removed on the main, reconnects after the main's listener restarts, after a restart from `upstream.json` and after a network change; and in `cmd/workspace-server`, two whole servers linked through `POST /api/upstream`, a device's write on the subordinate pushed to the main, then reset.
 - The client package:
   - its unit tests: framing, the pairing code, the protocol client, the pairing store, the answer;
   - the engine against a small union-merge adapter and a `FakeServer`;

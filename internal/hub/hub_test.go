@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -146,8 +147,9 @@ type env struct {
 	secrets  *pairing.Secrets
 	refusals *pairing.Refusals
 
-	hookMu sync.Mutex
-	onName func() // runs inside every welcome, after the session is registered
+	hookMu  sync.Mutex
+	onName  func()           // runs inside every welcome, after the session is registered
+	onStore func(app string) // Deps.Stored
 }
 
 // setOnName sets the function that runs inside every welcome: the hub reads
@@ -207,8 +209,18 @@ func newEnv(t *testing.T, tweaks ...func(*env)) *env {
 		Refusals: e.refusals,
 		Now:      clk.Now,
 		Logf:     e.logs.printf,
+		Stored:   e.stored,
 	})
 	return e
+}
+
+func (e *env) stored(app string) {
+	e.hookMu.Lock()
+	f := e.onStore
+	e.hookMu.Unlock()
+	if f != nil {
+		f(app)
+	}
 }
 
 func (e *env) addApp(t *testing.T, a apps.App) {
@@ -718,6 +730,68 @@ func TestPutConflictAndNotJSON(t *testing.T) {
 	}
 	if n := countType(settle(t, b, fb), "changed"); n != 1 {
 		t.Errorf("B got %d changed frames, want 1 (refused puts are not pushed)", n)
+	}
+}
+
+// Deps.Stored hears every stored put, once the hub's locks are released,
+// and nothing else: not a refused put, and not Replace, which is how the link
+// writes (a hook on its own writes would send them back).
+func TestStoredHook(t *testing.T) {
+	e := newEnv(t)
+	var mu sync.Mutex
+	var calls []string
+	locked := false
+	e.hookMu.Lock()
+	e.onStore = func(app string) {
+		free := make(chan struct{})
+		go func() {
+			l := e.hub.appLock(app)
+			l.Lock()
+			l.Unlock()
+			e.hub.servers.Lock()
+			e.hub.servers.Unlock()
+			close(free)
+		}()
+		mu.Lock()
+		defer mu.Unlock()
+		select {
+		case <-free:
+		case <-time.After(time.Second):
+			locked = true
+		}
+		calls = append(calls, app)
+	}
+	e.hookMu.Unlock()
+	heard := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), calls...)
+	}
+
+	id, tok := e.device(t, "todo")
+	a, fa := e.login(t, "192.168.1.9:5000", "todo", id, tok)
+	first := []byte(`{"v":1}`)
+	put(a, nil, first)
+	waitFrames(t, fa, "stored", 1)
+	if got := heard(); !slices.Equal(got, []string{"todo"}) {
+		t.Fatalf("Stored heard %v after a stored put, want [todo]", got)
+	}
+	mu.Lock()
+	if locked {
+		t.Error("Stored ran under the app's lock or the servers lock")
+	}
+	mu.Unlock()
+
+	etag := store.Etag(first)
+	put(a, nil, []byte(`{"v":2}`)) // a conflict
+	waitFrames(t, fa, "conflict", 1)
+	put(a, &etag, []byte("not json"))
+	waitFrames(t, fa, "error", 1)
+	if _, err := e.hub.Replace("todo", []byte(`{"v":3}`), &etag); err != nil {
+		t.Fatal(err)
+	}
+	if got := heard(); !slices.Equal(got, []string{"todo"}) {
+		t.Errorf("Stored heard %v, want only the one stored put", got)
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,15 +13,17 @@ import (
 
 	"github.com/FLighter7/workspace-server/internal/pairing"
 	"github.com/FLighter7/workspace-server/internal/protocol"
+	"github.com/FLighter7/workspace-server/internal/wsclient"
 )
 
 // linkWait bounds every wait for the link between two servers.
 const linkWait = 20 * time.Second
 
 // Two whole servers in this process: the subordinate links to the main
-// through its page's API and pulls the main's document; the roles show in
-// the status; a second link is refused; a reset forgets the link.
-func TestTwoServersLinkAndPull(t *testing.T) {
+// through its page's API and pulls the main's document; a device's write on
+// the subordinate is pushed to the main; the roles show in the status; a
+// second link is refused; a reset forgets the link.
+func TestTwoServersLinkPullAndPush(t *testing.T) {
 	mainDir, subDir := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(mainDir, "apps.json"), `{"apps":[{"id":"todo","name":"Todo"},{"id":"notes","name":"Notes"}]}`)
 	if err := os.MkdirAll(filepath.Join(mainDir, "apps", "todo"), 0o700); err != nil {
@@ -75,6 +78,36 @@ func TestTwoServersLinkAndPull(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(subDir, "upstream.json")); err != nil {
 		t.Errorf("upstream.json: %v", err)
 	}
+
+	// A device paired with the subordinate writes there, and the write goes
+	// on to the main: the hub's hook reaches the link.
+	sc := sub.pairingCode(t)
+	sc.H = []string{"127.0.0.1"}
+	pc, err := wsclient.ParseCode(pairing.EncodeCode(sc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), linkWait)
+	defer cancel()
+	phone, err := wsclient.Dial(ctx, pc.Target, "todo", wsclient.DialOptions{})
+	if err != nil {
+		t.Fatalf("dial the subordinate: %v", err)
+	}
+	defer phone.Close()
+	if _, _, err := phone.Pair(ctx, "", pc.Secret, "Phone"); err != nil {
+		t.Fatalf("pair with the subordinate: %v", err)
+	}
+	etag, err := phone.Head(ctx) // confirms the pairing
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored, _, err := phone.Put(ctx, etag, []byte(`{"v":2}`)); err != nil || !stored {
+		t.Fatalf("put on the subordinate: stored %v, %v", stored, err)
+	}
+	waitUntil(t, "the push to the main", func() bool {
+		code, doc := main.send(t, http.MethodGet, "/api/apps/todo/document", "")
+		return code == http.StatusOK && doc == `{"v":2}`
+	})
 
 	again, _ := json.Marshal(map[string]string{"code": pairing.EncodeCode(c)})
 	if code, resp := sub.send(t, http.MethodPost, "/api/upstream", string(again)); code != http.StatusConflict {

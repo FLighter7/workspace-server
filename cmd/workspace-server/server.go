@@ -571,6 +571,9 @@ func newServer(opts serverOptions, logger *log.Logger) (*server, error) {
 		Now:      time.Now,
 		Role:     func() string { return s.link.Role() },
 		Logf:     func(format string, args ...any) { s.logf("hub: "+format, args...) },
+		// A device's write here goes on to the main when this server is a
+		// subordinate.
+		Stored: func(app string) { s.link.LocalWrite(app) },
 	})
 	s.link, err = upstream.Open(upstream.Deps{
 		Path:     filepath.Join(dir, upstreamFile),
