@@ -70,6 +70,12 @@ var (
 	ErrDataInvalid = errors.New("the folder cannot be used")
 	// ErrBusy: the server is already changing its data folder or stopping.
 	ErrBusy = errors.New("the server is already being changed or stopped")
+	// ErrNotMain: a subordinate issues no pairing codes; devices pair with
+	// its main.
+	ErrNotMain = errors.New("this server is linked to a main server, and devices pair with the main")
+	// ErrHasSubordinates: other servers are linked to this one, so it does
+	// not link to another main.
+	ErrHasSubordinates = errors.New("other servers are linked to this one; remove them before linking it to another main")
 )
 
 // AppInfo is a served app and the state of its data.
@@ -81,14 +87,36 @@ type AppInfo struct {
 	Devices  int        `json:"devices"`  // devices paired with the app
 }
 
-// DeviceInfo is one paired device.
+// DeviceInfo is one paired device. A server-kind device (a subordinate
+// linked to this server) has Kind "server" and no App; Server is what it
+// announced, nil until it has.
 type DeviceInfo struct {
-	ID        string    `json:"id"`
-	App       string    `json:"app"`
-	Name      string    `json:"name"`
-	PairedAt  time.Time `json:"pairedAt"`
-	LastSeen  time.Time `json:"lastSeen"`
-	Connected bool      `json:"connected"` // a session is open now
+	ID        string        `json:"id"`
+	App       string        `json:"app"`
+	Kind      string        `json:"kind,omitempty"`
+	Name      string        `json:"name"`
+	PairedAt  time.Time     `json:"pairedAt"`
+	LastSeen  time.Time     `json:"lastSeen"`
+	Connected bool          `json:"connected"` // a session is open now
+	Server    *LinkedServer `json:"server,omitempty"`
+}
+
+// LinkedServer is what a subordinate announced about itself: how devices
+// reach it, without its password and fingerprint, which the page has no use
+// for.
+type LinkedServer struct {
+	ServerID string   `json:"serverId"`
+	Name     string   `json:"name"`
+	Port     int      `json:"port"`
+	Hosts    []string `json:"hosts"`
+}
+
+// UpstreamStatus is the link to an upstream server, and how many servers are
+// linked to this one: a main with subordinates of its own does not link to
+// another main.
+type UpstreamStatus struct {
+	upstream.Status
+	Subordinates int `json:"subordinates"`
 }
 
 // Backend is the server as the page manages it.
@@ -112,7 +140,7 @@ type Backend interface {
 	// false when there is no such device.
 	RemoveDevice(id string) bool
 	// IssuePairing creates a pairing code with a new secret, revoking the
-	// previous one.
+	// previous one. A subordinate refuses with ErrNotMain.
 	IssuePairing() (code string, expires time.Time, err error)
 	// Refusals returns the recent pairings refused for an unknown app,
 	// newest first.
@@ -143,12 +171,21 @@ type Backend interface {
 	Restart()
 
 	// Upstream reports the link to an upstream server.
-	Upstream() upstream.Status
+	Upstream() UpstreamStatus
 	// LinkUpstream links this server, as a subordinate, to the main whose
 	// pairing code is code, and returns once the link is made. Its errors
-	// wrap upstream.ErrBadCode, ErrOwnCode, ErrLinked or ErrBusy, or are an
-	// *upstream.RefusedError, or are internal.
+	// wrap upstream.ErrBadCode, ErrOwnCode, ErrLinked or ErrBusy, or
+	// ErrHasSubordinates, or are an *upstream.RefusedError, or are internal.
 	LinkUpstream(ctx context.Context, code string) error
+	// UnlinkUpstream ends the link; this server's data stays. forgotten
+	// reports whether the main no longer knows this server. Its errors wrap
+	// upstream.ErrNotLinked or ErrBusy, or are internal.
+	UnlinkUpstream(ctx context.Context) (forgotten bool, err error)
+	// InviteUpstream asks the main, over the link, for a pairing code of its
+	// own, for a browser on this computer. Its errors wrap
+	// upstream.ErrNotLinked, or are an *upstream.RefusedError, or are
+	// internal.
+	InviteUpstream(ctx context.Context) (code string, expires time.Time, err error)
 }
 
 //go:embed all:ui
@@ -196,6 +233,8 @@ func newHandler(b Backend, port func() int, now func() time.Time, ui fs.FS) http
 	mux.HandleFunc("GET /api/data-dir", a.checkDataDir)
 	mux.HandleFunc("GET /api/upstream", a.upstreamStatus)
 	mux.HandleFunc("POST /api/upstream", a.linkUpstream)
+	mux.HandleFunc("DELETE /api/upstream", a.unlinkUpstream)
+	mux.HandleFunc("POST /api/upstream/invite", a.inviteUpstream)
 	return guard(port, jsonErrors(mux))
 }
 

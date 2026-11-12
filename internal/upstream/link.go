@@ -47,6 +47,9 @@ const (
 	// ReasonTooManyWrites: the write guard stopped an app (see
 	// MaxPushesPerMinute).
 	ReasonTooManyWrites = "tooManyWrites"
+	// ReasonUnreachable: the main is out of reach now, and what was asked
+	// needs it (Invite).
+	ReasonUnreachable = "unreachable"
 )
 
 // The write guard, a last line of defence against a write loop, as in the
@@ -73,17 +76,23 @@ const (
 	// to sync again (a changed push, or a local write), so a sync that runs
 	// out of attempts is followed by another.
 	syncAttempts = 4
+	// inviteWait bounds asking the main for a pairing code.
+	inviteWait = 10 * time.Second
+	// forgetBudget bounds asking the main, when unlinking, to forget this
+	// server: reaching it, hello and forget.
+	forgetBudget = 5 * time.Second
 )
 
 // errTooManyWrites: the write guard refused a push.
 var errTooManyWrites = fmt.Errorf("more than %d pushes to the main within a minute (%s)", MaxPushesPerMinute, ReasonTooManyWrites)
 
-// Errors of Pair that are not the main's.
+// Errors of Pair, Unlink and Invite that are not the main's.
 var (
-	ErrLinked  = errors.New("this server is already linked to an upstream server")
-	ErrBusy    = errors.New("a link to an upstream server is being made")
-	ErrBadCode = errors.New("this is not a pairing code of a workspace-server")
-	ErrOwnCode = errors.New("the pairing code is this server's own")
+	ErrLinked    = errors.New("this server is already linked to an upstream server")
+	ErrNotLinked = errors.New("this server is not linked to an upstream server")
+	ErrBusy      = errors.New("a link to an upstream server is being made or undone")
+	ErrBadCode   = errors.New("this is not a pairing code of a workspace-server")
+	ErrOwnCode   = errors.New("the pairing code is this server's own")
 )
 
 // RefusedError is a pairing the upstream server refused or that could not
@@ -162,6 +171,7 @@ type Link struct {
 	mu        sync.Mutex
 	st        *state // nil: not linked
 	pairing   bool
+	unlinking bool
 	connected bool
 	halted    bool
 	reason    string
@@ -176,6 +186,7 @@ type Link struct {
 
 	kick     chan struct{} // reconnect now
 	announce chan struct{} // announce again: how devices reach this server changed
+	invites  chan inviteReq
 	wg       sync.WaitGroup
 
 	// localMu guards local alone, so a device's write never waits for the
@@ -209,7 +220,7 @@ func Open(d Deps) (*Link, error) {
 		d.Admit(slices.Clone(st.Devices))
 	}
 	return &Link{
-		d: d, st: st, kick: make(chan struct{}, 1), announce: make(chan struct{}, 1),
+		d: d, st: st, kick: make(chan struct{}, 1), announce: make(chan struct{}, 1), invites: make(chan inviteReq),
 		pushes: map[string][]time.Time{}, stopped: map[string]bool{}, local: map[string]chan struct{}{},
 	}, nil
 }
@@ -354,7 +365,7 @@ func (l *Link) Pair(ctx context.Context, code string) error {
 	case l.st != nil:
 		l.mu.Unlock()
 		return ErrLinked
-	case l.pairing:
+	case l.pairing || l.unlinking:
 		l.mu.Unlock()
 		return ErrBusy
 	}
@@ -415,6 +426,159 @@ func (l *Link) pair(ctx context.Context, c wsclient.PairingCode) (*state, error)
 		return nil, refused(err)
 	}
 	return st, nil
+}
+
+// Unlink ends the link: this server becomes a main again. Its data stays:
+// the apps it took from the main stay listed here, with their documents and
+// history, and the main keeps its own. The main's devices are no longer
+// admitted here (Deps.Admit gets nil), and upstream.json is deleted. When
+// the link is connected, the main is then asked to forget this server, so
+// that it stops handing it out to its devices; forgotten reports whether the
+// main no longer knows this server, because it forgot it now or had removed
+// it already. A main that could not be told keeps the server-kind device
+// until it is removed on its page. A server that is not linked is
+// ErrNotLinked; one that is linking or unlinking meanwhile, ErrBusy.
+func (l *Link) Unlink(ctx context.Context) (forgotten bool, err error) {
+	l.mu.Lock()
+	switch {
+	case l.st == nil:
+		l.mu.Unlock()
+		return false, ErrNotLinked
+	case l.pairing || l.unlinking || l.closed:
+		l.mu.Unlock()
+		return false, ErrBusy
+	}
+	l.unlinking = true
+	st, connected, cancel := l.st.clone(), l.connected, l.cancel
+	forgotten = l.halted && l.reason == "badToken" // the main removed this server
+	l.mu.Unlock()
+	defer func() {
+		l.mu.Lock()
+		l.unlinking = false
+		l.mu.Unlock()
+	}()
+
+	// First the link stops, so nothing syncs, reconnects or saves
+	// upstream.json any more.
+	if cancel != nil {
+		cancel()
+	}
+	l.wg.Wait()
+	if err := removeFile(l.d.Path); err != nil {
+		// Still linked, as the file says: the link starts again.
+		l.mu.Lock()
+		l.cancel = nil
+		l.startLocked()
+		l.mu.Unlock()
+		return false, fmt.Errorf("delete %s: %w", l.d.Path, err)
+	}
+	l.mu.Lock()
+	l.st, l.cancel = nil, nil
+	l.connected, l.halted, l.reason, l.lastErr, l.lastSync = false, false, "", "", nil
+	l.syncing = nil
+	clear(l.stopped)
+	clear(l.pushes)
+	l.mu.Unlock()
+	if l.d.Admit != nil {
+		l.d.Admit(nil)
+	}
+
+	if connected && !forgotten {
+		forgotten = l.forget(ctx, st)
+	}
+	if forgotten {
+		l.d.Logf("unlinked from the main %q (%s), which no longer knows this server; this server is a main again, and its data stays", st.Name, st.ServerID)
+	} else {
+		l.d.Logf("unlinked from the main %q (%s), which could not be told: it lists this server until it is removed on its page; this server is a main again, and its data stays", st.Name, st.ServerID)
+	}
+	return forgotten, nil
+}
+
+// forget asks the main, over a link session of its own, to forget this
+// server, within forgetBudget. It reports whether the main no longer knows
+// it: the main closed the session after forget, which it does once the
+// device is gone, or refused the hello with badToken.
+func (l *Link) forget(ctx context.Context, st *state) bool {
+	ctx, cancel := context.WithTimeout(ctx, forgetBudget)
+	defer cancel()
+	cl, err := l.d.Dial(ctx, st.target(), "")
+	if err != nil {
+		return false
+	}
+	defer cl.Close()
+	w, err := cl.Hello(ctx, st.Device, st.Token)
+	if err != nil {
+		return wsclient.HasCode(err, "badToken")
+	}
+	if checkWelcome(w, st.ServerID) != nil {
+		return false
+	}
+	_ = cl.Forget(ctx)
+	select {
+	case <-cl.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+type inviteReq struct{ reply chan inviteResult }
+
+type inviteResult struct {
+	inv wsclient.Invitation
+	err error
+}
+
+// Invite asks the main, over the link session, for a pairing code of its
+// own, the one its page's "Pair a device" would show, for a browser on this
+// computer: the browser pairs with the main, and learns this server from the
+// main's welcome. It needs the main: a link that is not connected now is a
+// *RefusedError with ReasonUnreachable, and a halted one names why it
+// halted. A server that is not linked is ErrNotLinked.
+func (l *Link) Invite(ctx context.Context) (wsclient.Invitation, error) {
+	l.mu.Lock()
+	linked, connected, halted, reason, lastErr := l.st != nil, l.connected, l.halted, l.reason, l.lastErr
+	l.mu.Unlock()
+	switch {
+	case !linked:
+		return wsclient.Invitation{}, ErrNotLinked
+	case halted:
+		return wsclient.Invitation{}, &RefusedError{Reason: reason, Err: errors.New(lastErr)}
+	case !connected:
+		return wsclient.Invitation{}, errUnreachable()
+	}
+	req := inviteReq{reply: make(chan inviteResult, 1)}
+	select {
+	case l.invites <- req:
+	case <-ctx.Done():
+		return wsclient.Invitation{}, errUnreachable()
+	}
+	select {
+	case r := <-req.reply:
+		return r.inv, r.err
+	case <-ctx.Done():
+		return wsclient.Invitation{}, errUnreachable()
+	}
+}
+
+func errUnreachable() error {
+	return &RefusedError{Reason: ReasonUnreachable, Err: errors.New("the main is out of reach now, and only it issues pairing codes")}
+}
+
+// invite asks the main for a pairing code over its link session cl, and
+// checks that the code is the main's own.
+func (l *Link) invite(ctx context.Context, cl *wsclient.Client, mainID string) inviteResult {
+	ctx, cancel := context.WithTimeout(ctx, inviteWait)
+	defer cancel()
+	inv, err := cl.Invite(ctx)
+	if err != nil {
+		return inviteResult{err: refused(err)}
+	}
+	if c, err := wsclient.ParseCode(inv.Code); err != nil || c.ServerID != mainID {
+		return inviteResult{err: &RefusedError{Reason: wsclient.CodeProtocol, Err: errors.New("the main sent a pairing code that is not its own")}}
+	}
+	l.d.Logf("the main issued a pairing code for a browser on this computer, valid until %s", inv.ExpiresAt.Format(time.RFC3339))
+	return inviteResult{inv: inv}
 }
 
 // checkWelcome refuses a welcome from a server other than id, or one that is
@@ -620,6 +784,10 @@ func (l *Link) session(ctx context.Context) error {
 			if _, err := cl.Announce(ctx, l.d.Self()); err != nil {
 				return refused(err)
 			}
+		case req := <-l.invites:
+			// Beside the loop: the main's answer is awaited without holding
+			// up the app list, the registry or a failure.
+			wg.Go(func() { req.reply <- l.invite(sctx, cl, st.ServerID) })
 		case err := <-fatal:
 			return err
 		case <-cl.Done():

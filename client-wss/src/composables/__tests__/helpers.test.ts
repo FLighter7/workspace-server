@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '@/api/client';
 import { errorKey, errorMessage } from '../messages';
+import { haltedKey, upstreamError } from '../upstream';
 import { formatLeft } from '../usePairingCode';
 import { formatBytes } from '../useFormat';
 import { startPolling } from '../usePolling';
@@ -83,5 +84,33 @@ describe('startPolling', () => {
 		await vi.advanceTimersByTimeAsync(1000);
 		expect(fn).toHaveBeenCalledTimes(1);
 		stop();
+	});
+});
+
+describe('upstreamError', () => {
+	it("maps the main's reasons and the API's codes, keeping the detail", () => {
+		expect(upstreamError(new ApiError('upstream', 'gone', 'connectTimeout'))).toEqual({
+			key: 'linkUnreachable',
+			detail: 'gone',
+			error: true,
+		});
+		expect(upstreamError(new ApiError('upstream', '', 'notMain')).key).toBe('linkNotMain');
+		expect(upstreamError(new ApiError('hasSubordinates', '')).key).toBe('linkHasSubordinates');
+		expect(upstreamError(new ApiError('invalid', '')).key).toBe('linkInvalidCode');
+	});
+
+	it("takes an action's own words for a reason, and falls back to the generic texts", () => {
+		const unreachable = new ApiError('upstream', '', 'unreachable');
+		expect(upstreamError(unreachable, { unreachable: 'inviteUnreachable' }).key).toBe(
+			'inviteUnreachable',
+		);
+		expect(upstreamError(new ApiError('upstream', '', 'teapot')).key).toBe('errInternal');
+		expect(upstreamError(new ApiError('network', '')).key).toBe('errNetwork');
+	});
+
+	it('says what a halted link means', () => {
+		expect(haltedKey('badToken')).toBe('haltedRemoved');
+		expect(haltedKey('protocol')).toBe('haltedTooOld');
+		expect(haltedKey(undefined)).toBe('haltedOther');
 	});
 });

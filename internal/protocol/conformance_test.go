@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/FLighter7/workspace-server/internal/conformance"
 )
@@ -184,6 +185,15 @@ func configure(t *testing.T, b *fakeBackend, state map[string]json.RawMessage) {
 			decode(raw, &b.devices)
 		case "announceError":
 			b.announceErr = refusal(raw)
+		case "invite":
+			var i struct {
+				Code      string    `json:"code"`
+				ExpiresAt time.Time `json:"expiresAt"`
+			}
+			decode(raw, &i)
+			b.inviteCode, b.inviteExpires = i.Code, i.ExpiresAt
+		case "inviteError":
+			b.inviteErr = refusal(raw)
 		default:
 			t.Fatalf("unknown backend state %q", key)
 		}
@@ -356,6 +366,10 @@ func TestConformanceExchanges(t *testing.T) {
 				b.mu.Unlock()
 				if len(announces) != 1 || !reflect.DeepEqual(announces[0], *c.Server) {
 					t.Errorf("backend Announce got %+v, want %+v", announces, *c.Server)
+				}
+			case "invite":
+				if want := 1; ex.Error == "" && b.count("invite") != want {
+					t.Errorf("backend Invite called %d times, want %d", b.count("invite"), want)
 				}
 			case "put":
 				puts := b.putCalls()

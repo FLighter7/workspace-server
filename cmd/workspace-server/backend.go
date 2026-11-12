@@ -184,17 +184,49 @@ func (s *server) DeleteApp(id string) error {
 	return nil
 }
 
-func (s *server) Upstream() upstream.Status { return s.link.Status() }
+func (s *server) Upstream() web.UpstreamStatus {
+	return web.UpstreamStatus{Status: s.link.Status(), Subordinates: s.subordinateCount()}
+}
 
-// LinkUpstream links this server to a main as its subordinate. The
-// subordinates this server had as a main are disconnected: they read its
-// new role when they reconnect, and stop.
+// subordinateCount is how many servers are linked to this one: its
+// server-kind devices.
+func (s *server) subordinateCount() int {
+	n := 0
+	for _, d := range s.devices.List() {
+		if d.IsServer() {
+			n++
+		}
+	}
+	return n
+}
+
+// LinkUpstream links this server to a main as its subordinate. A main with
+// subordinates of its own does not link: they would stop for good, since
+// only a main may be an upstream, and so would every device's way to them.
+// Should one pair in the meantime, its sessions are closed: it reads the new
+// role when it reconnects, and stops.
 func (s *server) LinkUpstream(ctx context.Context, code string) error {
+	if s.subordinateCount() > 0 {
+		return web.ErrHasSubordinates
+	}
 	if err := s.link.Pair(ctx, code); err != nil {
 		return err
 	}
 	s.hub.CloseServers()
 	return nil
+}
+
+// UnlinkUpstream ends the link: this server is a main again, and its data
+// stays.
+func (s *server) UnlinkUpstream(ctx context.Context) (bool, error) {
+	return s.link.Unlink(ctx)
+}
+
+// InviteUpstream asks the main, over the link, for a pairing code of its own
+// for a browser on this computer.
+func (s *server) InviteUpstream(ctx context.Context) (string, time.Time, error) {
+	inv, err := s.link.Invite(ctx)
+	return inv.Code, inv.ExpiresAt, err
 }
 
 func (s *server) Document(id string) ([]byte, bool) {
@@ -210,14 +242,19 @@ func (s *server) Devices() []web.DeviceInfo {
 	list := s.devices.List()
 	out := make([]web.DeviceInfo, 0, len(list))
 	for _, d := range list {
-		out = append(out, web.DeviceInfo{
+		info := web.DeviceInfo{
 			ID:        d.ID,
 			App:       d.App,
+			Kind:      d.Kind,
 			Name:      d.Name,
 			PairedAt:  d.PairedAt,
 			LastSeen:  d.LastSeen,
 			Connected: connected[d.ID],
-		})
+		}
+		if si := d.Server; si != nil {
+			info.Server = &web.LinkedServer{ServerID: si.ServerID, Name: si.Name, Port: si.Port, Hosts: append([]string{}, si.Hosts...)}
+		}
+		out = append(out, info)
 	}
 	return out
 }
@@ -226,7 +263,13 @@ func (s *server) RemoveDevice(id string) bool {
 	return s.hub.RemoveDevice(id)
 }
 
+// IssuePairing issues a pairing code with a new secret. A subordinate issues
+// none: it answers pair with notMain, so its code would only fail. Its page
+// asks the main for one instead (InviteUpstream).
 func (s *server) IssuePairing() (string, time.Time, error) {
+	if s.link.Role() == upstream.RoleSubordinate {
+		return "", time.Time{}, web.ErrNotMain
+	}
 	secret, expires := s.secrets.Issue()
 	s.mu.Lock()
 	code := pairing.Code{

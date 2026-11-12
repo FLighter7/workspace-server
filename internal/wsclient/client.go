@@ -609,6 +609,31 @@ func (c *Client) Announce(ctx context.Context, self Server) ([]Device, error) {
 	return list, err
 }
 
+// Invitation is a pairing code of the main, which it issued for a browser on
+// the subordinate's computer, and when it expires.
+type Invitation struct {
+	Code      string
+	ExpiresAt time.Time
+}
+
+// Invite asks the main, over a link session, for a pairing code of its own:
+// the code its page's "Pair a device" shows, for a browser on this server's
+// computer to pair with the main.
+func (c *Client) Invite(ctx context.Context) (Invitation, error) {
+	var inv Invitation
+	err := c.request(ctx, map[string]any{"t": "invite"}, nil, func(in incoming) (bool, error) {
+		code, ok1 := readString(in.frame["code"])
+		at, ok2 := readString(in.frame["expiresAt"])
+		expires, err := time.Parse(time.RFC3339, at)
+		if in.t != "invited" || !ok1 || code == "" || !ok2 || err != nil {
+			return false, protocolError("a malformed invited")
+		}
+		inv = Invitation{Code: code, ExpiresAt: expires}
+		return true, nil
+	})
+	return inv, err
+}
+
 // Forget asks the server to delete this device. It returns once the server
 // has closed the channel, or after a short wait.
 func (c *Client) Forget(ctx context.Context) error {

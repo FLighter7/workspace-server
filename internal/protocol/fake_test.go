@@ -227,6 +227,10 @@ type fakeBackend struct {
 	devices     []DeviceEntry
 	announceErr *Error
 
+	inviteCode    string
+	inviteExpires time.Time
+	inviteErr     *Error
+
 	// calls logs every call in order: "hello", "hello returned", "pair",
 	// "pair returned", "head", "get", "maxBytes", "put", "forget", "closed".
 	calls     []string
@@ -338,6 +342,13 @@ func (b *fakeBackend) Announce(s *Session, server ServerInfo) *Error {
 	}
 	s.PushDevices(list)
 	return nil
+}
+
+func (b *fakeBackend) Invite(s *Session) (string, time.Time, *Error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = append(b.calls, "invite")
+	return b.inviteCode, b.inviteExpires, b.inviteErr
 }
 
 func (b *fakeBackend) Closed(s *Session) { b.log("closed") }

@@ -136,12 +136,13 @@ The first client frame, `hello` or `pair`, carries `proto: 1`. Any other number 
 | `forget`                            | the device entry is deleted; the server closes every session of the device                            |
 | `apps` (server-kind devices only)   | `apps {apps}`                                                                                         |
 | `announce {server}` (link sessions) | `devices {devices}`                                                                                   |
+| `invite` (link sessions)            | `invited {code, expiresAt}`                                                                           |
 |                                     | `changed {etag}`: to every other session of the same app after a stored write                         |
 |                                     | `apps {apps}`: to every link session after the server's app list changes                              |
 |                                     | `devices {devices}`: to every link session that announced, after the device registry changes          |
 |                                     | `error {code, message}`                                                                               |
 
-`pair` may also carry `kind`, and a server-kind device's `hello` may leave `app` out; both, `apps` and `announce`, are for servers only (see "Servers: roles, server-kind devices and link sessions").
+`pair` may also carry `kind`, and a server-kind device's `hello` may leave `app` out; both, `apps`, `announce` and `invite`, are for servers only (see "Servers: roles, server-kind devices and link sessions").
 
 ### Values
 
@@ -203,7 +204,7 @@ Codes:
 
 **A code the client does not know** should be treated as a temporary server error: report it and retry later. Do not treat it as a reason to drop the pairing. Codes may be added without a new `proto`.
 
-- **Before authentication,** `head`, `get`, `put`, `forget`, `apps` and `announce` get `notAuthenticated`.
+- **Before authentication,** `head`, `get`, `put`, `forget`, `apps`, `announce` and `invite` get `notAuthenticated`.
 - **After authentication,** a second `hello`/`pair` is a `protocol` error.
 - **A frame with an unknown `t`** gets `error {code: 'protocol'}` and the channel closes, before authentication or after.
 - **`hello` failures:**
@@ -245,7 +246,12 @@ A workspace-server can be a **subordinate** of another, its **main**: it mirrors
   - A subordinate's own devices (paired before it was linked) stay admitted, and win an id the registry shares.
   - `forget` from a device of the registry on a subordinate closes its sessions there, and does not reach the main: the main keeps the device until it is removed there.
   - A subordinate the main removed (its link gets `badToken`) forgets the registry: the main's devices are no longer admitted there.
-- **`proto` stays 1.** Nothing an old client meets changed: `role` and `subordinates` are more `welcome` fields, which clients ignore (see the vectors' tolerated frames); `notMain` is a new code, which an old client reads as `internal` (a temporary error); `kind`, a `hello` without `app`, `apps` and `announce` come only from servers, `apps` frames go only to server-kind sessions, and `devices` frames only to link sessions that announced.
+- **A pairing code for a browser on the subordinate's computer:** `invite` on a link session asks the main for a pairing code of its own, the one its page's **Pair a device** issues, so that a browser on the subordinate's computer can pair with the main without a phone. The answer is `invited {code, expiresAt}`: `code` is an ordinary `wsrv1.` pairing code of the main, `expiresAt` the time its secret expires, RFC 3339 in UTC.
+  - The code names no app, as no pairing code does: the device's `pair` names its own. It is a new secret, so it revokes the code the main's page showed, as any new code does, and is good for one pairing within 10 minutes.
+  - The device pairs with the main, not with the subordinate, and learns the subordinate from the main's `welcome` (`subordinates`); the subordinate admits it once the main's device registry reaches it.
+  - Only a link session may ask. On a device's session or an app session, the answer is `protocol`, and the channel closes. A subordinate, whose codes would be refused, answers `notMain`, and the session stays open. A server-side failure is `internal`; the session stays open.
+  - A main from before `invite` answers `protocol` and closes the link session, which the subordinate opens again.
+- **`proto` stays 1.** Nothing an old client meets changed: `role` and `subordinates` are more `welcome` fields, which clients ignore (see the vectors' tolerated frames); `notMain` is a new code, which an old client reads as `internal` (a temporary error); `kind`, a `hello` without `app`, `apps`, `announce` and `invite` come only from servers, `apps` frames go only to server-kind sessions, `devices` frames only to link sessions that announced, and `invited` frames only answer `invite`.
 
 ## Subordinates: fallback servers for a device
 
@@ -255,7 +261,7 @@ A device pairs only with a main. The main's `welcome` lists its subordinates (`s
 - **Which server:** the reference client connects to the main and its subordinates at once, takes the main if it answers within a short grace period, and otherwise a subordinate that did. It takes a `welcome` only from a `serverId` it knows; a `welcome` from another one is `serverChanged`, which stops sync when it comes from the main's own address. Only the main's refusals stop sync.
 - **The etag** is the SHA-256 of the bytes on every server, so the etag a device last synced is valid on all of them: a subordinate that holds the same document is not read again.
 - **Keep the list current:** each `welcome` from the main replaces the list; one without `subordinates` (from a subordinate, or an older server) leaves it as it was.
-- **Pairing and forgetting** go to the main: a subordinate answers `pair` with `notMain`, and a `forget` sent to a subordinate does not reach the main.
+- **Pairing and forgetting** go to the main: a subordinate answers `pair` with `notMain`, and a `forget` sent to a subordinate does not reach the main. A subordinate's page shows no code of its own; for a browser on its computer it shows a code of the main, which it gets with `invite`.
 
 ## What the client cannot see
 

@@ -66,9 +66,16 @@ type fakeBackend struct {
 	dataDirErr error
 	sameDir    bool
 
-	upstream  upstream.Status
+	upstream  UpstreamStatus
 	linkErr   error
 	linkCodes []string
+	pairErr   error // IssuePairing fails with it
+
+	unlinks   int
+	unlinkErr error
+	forgotten bool
+	invites   int
+	inviteErr error
 }
 
 func (f *fakeBackend) record(call string) {
@@ -86,7 +93,31 @@ func (f *fakeBackend) Stop(removeAutostart bool) {
 	}
 }
 
-func (f *fakeBackend) Upstream() upstream.Status { return f.upstream }
+func (f *fakeBackend) Upstream() UpstreamStatus { return f.upstream }
+
+func (f *fakeBackend) UnlinkUpstream(ctx context.Context) (bool, error) {
+	f.unlinks++
+	if _, ok := ctx.Deadline(); !ok {
+		return false, errors.New("no deadline")
+	}
+	return f.forgotten, f.unlinkErr
+}
+
+func (f *fakeBackend) InviteUpstream(ctx context.Context) (string, time.Time, error) {
+	f.invites++
+	if _, ok := ctx.Deadline(); !ok {
+		return "", time.Time{}, errors.New("no deadline")
+	}
+	if f.inviteErr != nil {
+		return "", time.Time{}, f.inviteErr
+	}
+	code := pairing.EncodeCode(pairing.Code{
+		V: 1, ID: "MainServer01", N: "Desk", P: "abcdefghijklmnopqrstuvwx",
+		F: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8", O: 47801,
+		H: []string{"192.168.1.10"}, S: "c2VjcmV0c2VjcmV0c2VjcmV0",
+	})
+	return code, testNow.Add(10 * time.Minute), nil
+}
 
 func (f *fakeBackend) LinkUpstream(ctx context.Context, code string) error {
 	f.linkCodes = append(f.linkCodes, code)
@@ -94,7 +125,7 @@ func (f *fakeBackend) LinkUpstream(ctx context.Context, code string) error {
 		return errors.New("no deadline")
 	}
 	if f.linkErr == nil {
-		f.upstream = upstream.Status{Linked: true, ServerID: "MainServer01", Name: "Desk", Apps: []string{}}
+		f.upstream = UpstreamStatus{Status: upstream.Status{Linked: true, ServerID: "MainServer01", Name: "Desk", Apps: []string{}}}
 	}
 	return f.linkErr
 }
@@ -201,6 +232,9 @@ func (f *fakeBackend) RemoveDevice(id string) bool {
 }
 
 func (f *fakeBackend) IssuePairing() (string, time.Time, error) {
+	if f.pairErr != nil {
+		return "", time.Time{}, f.pairErr
+	}
 	f.issued++
 	code := pairing.EncodeCode(pairing.Code{
 		V: 1, ID: f.status.ServerID, N: f.status.Name, P: "abcdefghijklmnopqrstuvwx",
@@ -359,6 +393,8 @@ func TestGuardMutatingNeedsHeader(t *testing.T) {
 		{http.MethodDelete, "/api/server", ""},
 		{http.MethodPut, "/api/config", `{"dataDir":"/x"}`},
 		{http.MethodPost, "/api/upstream", `{"code":"wsrv1.x"}`},
+		{http.MethodDelete, "/api/upstream", ""},
+		{http.MethodPost, "/api/upstream/invite", ""},
 	} {
 		r := request(tc.method, tc.path, tc.body)
 		r.Header.Del("X-Workspace-Server")
@@ -367,7 +403,7 @@ func TestGuardMutatingNeedsHeader(t *testing.T) {
 			t.Errorf("%s %s without the header: status %d, want 403", tc.method, tc.path, w.Code)
 		}
 	}
-	if len(f.configCalls)+len(f.added)+len(f.deleted)+len(f.removed)+len(f.calls)+len(f.dataDirs)+len(f.linkCodes) != 0 || f.issued != 1 {
+	if len(f.configCalls)+len(f.added)+len(f.deleted)+len(f.removed)+len(f.calls)+len(f.dataDirs)+len(f.linkCodes)+f.unlinks+f.invites != 0 || f.issued != 1 {
 		t.Errorf("refused requests reached the backend: %+v", f)
 	}
 }
@@ -876,7 +912,7 @@ func TestJSONShape(t *testing.T) {
 
 	for path, want := range map[string][]string{
 		"/api/status":   {"addresses", "dataDir", "httpPort", "lastError", "listening", "mainServer", "mdnsName", "mdnsRunning", "name", "program", "role", "serverDir", "serverId", "udpPort"},
-		"/api/upstream": {"apps", "connected", "halted", "linked"},
+		"/api/upstream": {"apps", "connected", "halted", "linked", "subordinates"},
 	} {
 		if got := keysOf(t, getObject(path)); !reflect.DeepEqual(got, want) {
 			t.Errorf("GET %s keys = %v, want %v", path, got, want)
@@ -890,6 +926,19 @@ func TestJSONShape(t *testing.T) {
 		if got := keysOf(t, getList(path)[0]); !reflect.DeepEqual(got, want) {
 			t.Errorf("GET %s keys = %v, want %v", path, got, want)
 		}
+	}
+	// A server-kind device: its kind, and what it announced, without its
+	// password and fingerprint.
+	f.devices = []DeviceInfo{{
+		ID: "SrvDevice0000001", Kind: "server", Name: "Laptop", PairedAt: testNow, LastSeen: testNow,
+		Server: &LinkedServer{ServerID: "Lp7tOp0123ab", Name: "Laptop", Port: 47801, Hosts: []string{"x.local", "192.168.1.30"}},
+	}}
+	server := getList("/api/devices")[0]
+	if got, want := keysOf(t, server), []string{"app", "connected", "id", "kind", "lastSeen", "name", "pairedAt", "server"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("a server-kind device's keys = %v, want %v", got, want)
+	}
+	if got, want := keysOf(t, server["server"].(map[string]any)), []string{"hosts", "name", "port", "serverId"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("what it announced has keys %v, want %v", got, want)
 	}
 	if got := getList("/api/apps")[0]["modified"]; got != "2026-11-08T10:00:00Z" {
 		t.Errorf("modified = %v, want RFC 3339", got)
@@ -1139,7 +1188,7 @@ func TestLinkUpstream(t *testing.T) {
 
 	w := serve(h, request(http.MethodGet, "/api/upstream", ""))
 	wantStatus(t, w, http.StatusOK)
-	if got := strings.TrimSpace(w.Body.String()); got != `{"linked":false,"connected":false,"halted":false,"apps":[]}` {
+	if got := strings.TrimSpace(w.Body.String()); got != `{"linked":false,"connected":false,"halted":false,"apps":[],"subordinates":0}` {
 		t.Errorf("GET /api/upstream before a link = %s", got)
 	}
 
@@ -1162,6 +1211,7 @@ func TestLinkUpstream(t *testing.T) {
 		{upstream.ErrOwnCode, http.StatusBadRequest, "invalid"},
 		{upstream.ErrLinked, http.StatusConflict, "exists"},
 		{upstream.ErrBusy, http.StatusConflict, "busy"},
+		{ErrHasSubordinates, http.StatusConflict, "hasSubordinates"},
 		{errors.New("disk"), http.StatusInternalServerError, "internal"},
 	} {
 		f.linkErr = tc.err
@@ -1177,4 +1227,66 @@ func TestLinkUpstream(t *testing.T) {
 	}
 
 	wantError(t, serve(h, request(http.MethodPost, "/api/upstream", `{"secret":"x"}`)), http.StatusBadRequest, "invalid")
+}
+
+// DELETE /api/upstream unlinks and says whether the main forgot this server;
+// POST /api/upstream/invite answers with the main's code as /api/pairing
+// answers with this server's own. Both have a deadline.
+func TestUnlinkAndInvite(t *testing.T) {
+	f := newFake()
+	h := newTestHandler(f)
+
+	f.forgotten = true
+	w := serve(h, request(http.MethodDelete, "/api/upstream", ""))
+	wantStatus(t, w, http.StatusOK)
+	if got := strings.TrimSpace(w.Body.String()); got != `{"forgotten":true}` {
+		t.Errorf("DELETE /api/upstream = %s", got)
+	}
+	for _, tc := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{upstream.ErrNotLinked, http.StatusConflict, "notLinked"},
+		{upstream.ErrBusy, http.StatusConflict, "busy"},
+		{errors.New("disk"), http.StatusInternalServerError, "internal"},
+	} {
+		f.unlinkErr = tc.err
+		wantError(t, serve(h, request(http.MethodDelete, "/api/upstream", "")), tc.status, tc.code)
+	}
+
+	w = serve(h, request(http.MethodPost, "/api/upstream/invite", ""))
+	wantStatus(t, w, http.StatusOK)
+	var inv struct {
+		Code      string    `json:"code"`
+		ExpiresAt time.Time `json:"expiresAt"`
+		QR        string    `json:"qr"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &inv); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := pairing.DecodeCode(inv.Code); err != nil || c.ID != "MainServer01" {
+		t.Errorf("the invited code %q (%v), want the main's", inv.Code, err)
+	}
+	if !inv.ExpiresAt.Equal(testNow.Add(10*time.Minute)) || !strings.HasPrefix(inv.QR, "data:image/png;base64,") {
+		t.Errorf("the invitation %+v, want its expiry and a QR code", inv)
+	}
+
+	f.inviteErr = upstream.ErrNotLinked
+	wantError(t, serve(h, request(http.MethodPost, "/api/upstream/invite", "")), http.StatusConflict, "notLinked")
+	f.inviteErr = &upstream.RefusedError{Reason: upstream.ReasonUnreachable, Err: errors.New("away")}
+	w = serve(h, request(http.MethodPost, "/api/upstream/invite", ""))
+	wantError(t, w, http.StatusBadGateway, "upstream")
+	var body struct{ Reason string }
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body.Reason != "unreachable" {
+		t.Errorf("refusal %s, want reason unreachable", w.Body.String())
+	}
+}
+
+// A subordinate issues no pairing codes of its own: they would fail with
+// notMain.
+func TestPairingOnASubordinate(t *testing.T) {
+	f := newFake()
+	f.pairErr = ErrNotMain
+	wantError(t, serve(newTestHandler(f), request(http.MethodPost, "/api/pairing", "")), http.StatusConflict, "notMain")
 }

@@ -129,6 +129,12 @@ type Backend interface {
 	// session calls it only for a link session; an error with CodeProtocol
 	// closes the session.
 	Announce(s *Session, server ServerInfo) *Error
+	// Invite issues a pairing code of this server for a subordinate, which
+	// shows it for a browser on its own computer: the code this server's own
+	// page issues, with a new secret. The session calls it only for a link
+	// session; an error with CodeProtocol closes the session, any other is
+	// answered and the session stays open.
+	Invite(s *Session) (code string, expires time.Time, err *Error)
 	Head(app string) (*string, *Error)
 	Get(app string) ([]byte, *string, *Error)
 	// MaxBytes is the largest body a put to app may announce.

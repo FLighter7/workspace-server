@@ -1,4 +1,7 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath, URL } from 'node:url';
+import type { Plugin } from 'vite';
 import { defineConfig } from 'vitest/config';
 import vue from '@vitejs/plugin-vue';
 import vuetify from 'vite-plugin-vuetify';
@@ -11,8 +14,55 @@ import vueI18n from '@intlify/unplugin-vue-i18n/vite';
  */
 const target = process.env.WSS_TARGET ?? 'http://127.0.0.1:47810';
 
+/**
+ * qr-scanner starts its decoder as a Worker made from a blob: URL, which the
+ * page's CSP refuses: a worker's source falls back to default-src 'self'. In
+ * the build, its worker module is replaced by one that starts the same code
+ * from a file of the page's own, under /assets/, which the CSP allows. The
+ * code is taken from the package's own module at build time, by running it
+ * with stand-ins for Worker, URL and Blob, so it follows the package's
+ * updates. The dev server sends no CSP and keeps the blob.
+ */
+function qrScannerWorkerAsFile(): Plugin {
+	const WORKER = /[\\/]qr-scanner[\\/]qr-scanner-worker\.min\.js$/;
+
+	return {
+		name: 'qr-scanner-worker-as-file',
+		apply: 'build',
+		load(id) {
+			if (!WORKER.test(id)) return null;
+
+			// export const createWorker=()=>new Worker(URL.createObjectURL(new Blob([`…`],…)))
+			const module = readFileSync(id, 'utf8')
+				.replace(/\/\/# sourceMappingURL=\S*\s*$/, '')
+				.replace(/^export const createWorker\s*=/, 'return ');
+			let source = '';
+			class Blob {
+				constructor(parts: string[]) {
+					source = parts.join('');
+				}
+			}
+			const createWorker = new Function('Worker', 'URL', 'Blob', module)(
+				class {},
+				{ createObjectURL: () => '' },
+				Blob,
+			) as () => void;
+			createWorker();
+			if (!source.includes('onmessage')) {
+				throw new Error(`qr-scanner's worker module changed shape: ${id}`);
+			}
+
+			const hash = createHash('sha256').update(source).digest('hex').slice(0, 8);
+			const fileName = `assets/qr-scanner-worker-${hash}.js`;
+			this.emitFile({ type: 'asset', fileName, source });
+			return `export const createWorker = () => new Worker(${JSON.stringify(`/${fileName}`)});`;
+		},
+	};
+}
+
 export default defineConfig({
 	plugins: [
+		qrScannerWorkerAsFile(),
 		vue(),
 		vuetify({ autoImport: true }),
 		vueI18n({

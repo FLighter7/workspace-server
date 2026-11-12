@@ -19,10 +19,18 @@ const status: Status = {
 	dataDir: 'C:\\ws',
 	mainServer: true,
 	lastError: '',
+	role: 'main',
 };
 
 beforeEach(() => {
 	vi.spyOn(serverApi, 'status').mockResolvedValue(status);
+	vi.spyOn(serverApi, 'upstream').mockResolvedValue({
+		linked: false,
+		connected: false,
+		halted: false,
+		apps: [],
+		subordinates: 0,
+	});
 });
 
 afterEach(() => {

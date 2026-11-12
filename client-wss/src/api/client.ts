@@ -8,13 +8,19 @@ import type {
 	Pairing,
 	Refusal,
 	Status,
+	Unlinked,
+	UpstreamStatus,
 } from './types';
 
-/** An error of the API: the server's code ("invalid", "exists", …), or "network". */
+/**
+ * An error of the API: the server's code ("invalid", "exists", …), or
+ * "network". reason: why the upstream server refused, when code is "upstream".
+ */
 export class ApiError extends Error {
 	constructor(
 		readonly code: string,
 		message: string,
+		readonly reason = '',
 	) {
 		super(message);
 		this.name = 'ApiError';
@@ -54,10 +60,11 @@ export async function request<T>(method: string, path: string, body?: unknown): 
 	}
 
 	if (!response.ok) {
-		const error = (data ?? {}) as { error?: unknown; message?: unknown };
+		const error = (data ?? {}) as { error?: unknown; message?: unknown; reason?: unknown };
 		throw new ApiError(
 			typeof error.error === 'string' && error.error ? error.error : 'internal',
 			typeof error.message === 'string' && error.message ? error.message : response.statusText,
+			typeof error.reason === 'string' ? error.reason : '',
 		);
 	}
 
@@ -90,4 +97,11 @@ export const serverApi = {
 
 	issuePairing: () => request<Pairing>('POST', '/api/pairing'),
 	refusals: () => request<Refusal[]>('GET', '/api/pairing/refusals'),
+
+	upstream: () => request<UpstreamStatus>('GET', '/api/upstream'),
+	/** Answers once the pairing with the main is done, which can take a while. */
+	link: (code: string) => request<UpstreamStatus>('POST', '/api/upstream', { code }),
+	unlink: () => request<Unlinked>('DELETE', '/api/upstream'),
+	/** A pairing code of the main, which it issues over the link. */
+	invite: () => request<Pairing>('POST', '/api/upstream/invite'),
 };

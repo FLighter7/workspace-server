@@ -107,13 +107,14 @@ On the first start the server creates its folder and an entry for the `todo` app
   - shows the name devices see, the computer's addresses, the server's `.local` name and whether it is published, and the two ports; a warning under the addresses means devices cannot connect at the moment (the reason is in `server.log`), and the server keeps trying;
   - you can change the name and the ports here;
   - **Data folder** (Папка данных): where the apps' data is kept; see "Where your data lives";
+  - **Upstream server** (Связь с главным сервером): links this server to a main one, as a laptop's server is linked to the PC's; see "A laptop as a second server";
   - **Manage the server** (Управление сервером): three buttons, each of which asks first:
     - **Stop the server** stops it and stops it starting at login, like `stop`. Your data is kept.
     - **Delete data** starts the server over as if it were new: every app's documents and versions, the list of apps and the paired devices are deleted, and every device must pair again. The name, the ports and the data folder are kept. The question lists each app's data and lets you download it first.
     - **Delete the server and all data** stops the server and removes it from the computer, like `delete`: its data, its folders, the program file and the autostart.
 - **Devices** (Устройства):
-  - **Pair a device** at the top opens the pairing code;
-  - lists, for each app, its paired devices: when each paired, when it was last seen, and whether it is connected now;
+  - **Pair a device** at the top opens the pairing code; on a server linked to a main, devices pair with the main instead;
+  - lists, for each app, its paired devices: when each paired, when it was last seen, and whether it is connected now; servers linked to this one are listed first, under **Linked servers**;
   - **Remove** disconnects a device and ends its access.
 - **Apps** (Приложения):
   - lists each app with its document size, last change, number of saved versions and number of devices;
@@ -135,11 +136,37 @@ If a device asks for an app the server does not serve yet, the page offers to ad
 
 ## A laptop as a second server
 
-**Not available yet:** this is being built. The diagram shows how it is planned to work.
+**Not available yet:** making the laptop the main server (the third part of the diagram) is still being built, and devices sync through the laptop's server only once their app has an update that is not released yet. Linking the laptop, pairing its browser and unlinking, described below, work now.
 
 ![How the PC's main server, the laptop's server and the devices connect: at home, away, and when the laptop becomes the main](images/connections.svg)
 
 The PC runs the main server, and a laptop can run a second one that keeps a copy of every app's data on its own disk. At home your devices sync with the PC; away from home they sync with the laptop's server without pairing again, and the two servers exchange the changes when the laptop is back.
+
+### Setting up the laptop
+
+1. Install workspace-server on the laptop as on any computer (see "Installing"), and open its page.
+2. Get a pairing code from the main server: on the PC's page, **Devices** → **Pair a device**, or from a phone paired with it (in todo: Sync → Pair another device).
+3. On the laptop's page, open **Server** and find **Upstream server**. Paste the code and press **Link**, or press **Scan with the camera** and hold the QR code up to the laptop's camera.
+4. The laptop's server is now linked to the main: it takes the main's apps, copies their data, and shows the link's state.
+
+Linking deletes nothing. If both servers already hold an app's data, the main's copy wins on the laptop, the laptop's copy is kept among its saved versions, and the devices merge the two. A server that other servers are linked to cannot be linked to another main itself.
+
+### Pairing the laptop's browser
+
+Devices pair only with the main, the laptop's own browser too. On the laptop's page, press **Pair this computer's browser** (under Devices, or under Server → Upstream server). The laptop asks the main for a pairing code and shows it as a QR code and as text with a Copy button; paste it into the app's sync settings in the browser. This needs the main to be reachable. As with any new code, the one on the main's page stops working.
+
+### At home and away
+
+- **At home** the devices sync with the main, and the laptop's server keeps its copy in step with the main's.
+- **Away**, with the main out of reach, devices paired with the main sync with the laptop's server instead, without pairing again: the main told them about it. The laptop keeps the changes.
+- **Back home**, the laptop sends the main what changed. If both sides changed, the main's copy wins on the laptop, the laptop's goes to its saved versions, and the devices merge the two, as they always do.
+- A device paired while the laptop could not reach the main syncs with the laptop only after the two have met again.
+
+### Keeping an eye on it
+
+- The laptop's **Upstream server** shows the main, whether it is connected, when it was linked, the last sync and the apps synced. If an app writes to the main too often within a minute, it stops syncing with the main, to protect the saved versions on both servers; the section lists it, its devices still sync with the laptop, and a restart of the laptop's server resumes it.
+- The main's **Devices** lists the laptop's server under **Linked servers**, with its addresses. **Remove** there stops it syncing with the main; its data stays on the laptop.
+- **Unlink** on the laptop's page makes it a main again. Nothing is deleted on either side, and the main's devices no longer sync through the laptop. If the main cannot be reached at that moment, the page says so: remove the laptop on the main's page later.
 
 ## Updating
 

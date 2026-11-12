@@ -107,6 +107,9 @@
 			<StatusLine :message="dataMessage" />
 		</VForm>
 
+		<!-- The link to a main server: what this server is to the others. -->
+		<UpstreamPanel />
+
 		<!-- The danger zone: every button here stops or wipes the server. -->
 		<fieldset :class="$style.danger">
 			<legend :class="$style.legend">
@@ -139,11 +142,12 @@ import WipeDialog from '@/components/WipeDialog.vue';
 import type { Wipe, WipeFact } from '@/components/wipe';
 import { errorMessage, info, type Message } from '@/composables/messages';
 import { ask } from '@/composables/useConfirm';
-import { dropCode } from '@/composables/usePairingCode';
+import { ownCode } from '@/composables/usePairingCode';
 import { waitRestart } from '@/composables/useRestart';
 import { useRules } from '@/composables/rules';
 import { showStopped } from '@/composables/useSection';
 import s from '@/styles/section.module.scss';
+import UpstreamPanel from './UpstreamPanel.vue';
 
 const { t } = useI18n();
 const rules = useRules();
@@ -227,7 +231,7 @@ async function saveServer(): Promise<void> {
 
 	// A code on screen carries the old port and name; the pairing dialog
 	// issues a new one the next time it opens.
-	if (change.udpPort !== undefined || change.name !== undefined) dropCode();
+	if (change.udpPort !== undefined || change.name !== undefined) ownCode.drop();
 
 	if (change.httpPort !== undefined) {
 		// The server now answers on the new port only; the browser follows.
@@ -372,7 +376,7 @@ async function resetData(): Promise<void> {
 		facts: gathered.facts,
 		action: async () => {
 			await serverApi.reset();
-			dropCode();
+			ownCode.drop();
 			void waitRestart(
 				(message) => {
 					manageMessage.value = message;

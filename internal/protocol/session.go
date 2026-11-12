@@ -131,7 +131,7 @@ func (s *Session) HandleText(msg string) {
 		return
 	}
 	switch f.T {
-	case "hello", "pair", "head", "get", "put", "forget", "apps", "announce":
+	case "hello", "pair", "head", "get", "put", "forget", "apps", "announce", "invite":
 	default:
 		s.fail(CodeProtocol, fmt.Sprintf("unknown frame type %q", f.T))
 		return
@@ -220,6 +220,20 @@ func (s *Session) HandleText(msg string) {
 					s.reply(e)
 				}
 			}
+		}
+	case "invite":
+		if app != "" {
+			s.fail(CodeProtocol, "only a link session may ask for a pairing code")
+			return
+		}
+		code, expires, e := s.b.Invite(s)
+		switch {
+		case e == nil:
+			s.queueFrame(invitedFrame{"invited", code, expires.UTC().Format(time.RFC3339)}, nil)
+		case e.Code == CodeProtocol:
+			s.fail(e.Code, e.Message)
+		default:
+			s.reply(e)
 		}
 	}
 }
@@ -691,6 +705,13 @@ type (
 	devicesFrame struct {
 		T       string        `json:"t"`
 		Devices []DeviceEntry `json:"devices"`
+	}
+	// invitedFrame answers invite: a pairing code of this server and when
+	// it expires, in RFC 3339 UTC.
+	invitedFrame struct {
+		T         string `json:"t"`
+		Code      string `json:"code"`
+		ExpiresAt string `json:"expiresAt"`
 	}
 )
 

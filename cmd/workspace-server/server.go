@@ -578,6 +578,9 @@ func newServer(opts serverOptions, logger *log.Logger) (*server, error) {
 		// A device's write here goes on to the main when this server is a
 		// subordinate.
 		Stored: func(app string) { s.link.LocalWrite(app) },
+		// A subordinate's page asks for a code for a browser on its
+		// computer: the one this server's page would issue.
+		Invite: s.IssuePairing,
 	})
 	s.link, err = upstream.Open(upstream.Deps{
 		Path:     filepath.Join(dir, upstreamFile),

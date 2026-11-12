@@ -61,6 +61,26 @@ describe('request', () => {
 		);
 	});
 
+	it("keeps why the upstream server refused, and the routes' paths", async () => {
+		respond(502, { error: 'upstream', message: 'used (badSecret)', reason: 'badSecret' });
+		const error = await serverApi.link('wsrv1.x').catch((e: unknown) => e);
+		expect(error).toMatchObject({ code: 'upstream', reason: 'badSecret' });
+		const [path, init] = vi.mocked(fetch).mock.calls[0];
+		expect([path, init?.method, init?.body]).toEqual([
+			'/api/upstream',
+			'POST',
+			'{"code":"wsrv1.x"}',
+		]);
+
+		respond(200, { forgotten: true });
+		await serverApi.unlink();
+		expect(vi.mocked(fetch).mock.calls[0].slice(0, 1)).toEqual(['/api/upstream']);
+		expect(vi.mocked(fetch).mock.calls[0][1]?.method).toBe('DELETE');
+		respond(200, { code: 'c', expiresAt: '', qr: '' });
+		await serverApi.invite();
+		expect(vi.mocked(fetch).mock.calls[0][0]).toBe('/api/upstream/invite');
+	});
+
 	it('reads a failure without JSON as internal, with the status text', async () => {
 		respond(502, 'Bad gateway', 'Bad Gateway');
 		const error = await request('GET', '/api/status').catch((e: unknown) => e);

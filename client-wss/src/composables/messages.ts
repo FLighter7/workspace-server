@@ -26,6 +26,7 @@ const ERROR_KEYS: Record<string, MessageKey> = {
 	dataExists: 'errDataExists',
 	changed: 'errDataChanged',
 	busy: 'errBusy',
+	notMain: 'errNotMain',
 };
 
 /** The page's text for an error: by its code, or the generic one. */

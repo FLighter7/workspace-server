@@ -330,6 +330,9 @@ func start(cl *Client, c *call) (any, error) {
 		return cl.Apps(ctx)
 	case "announce":
 		return cl.Announce(ctx, *c.Server)
+	case "invite":
+		inv, err := cl.Invite(ctx)
+		return map[string]any{"code": inv.Code, "expiresAt": inv.ExpiresAt.UTC().Format(time.RFC3339)}, err
 	}
 	panic("unknown method " + c.Method)
 }

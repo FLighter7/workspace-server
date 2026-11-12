@@ -1,28 +1,3 @@
-<style lang="scss" module>
-.code {
-	display: grid;
-	gap: 1rem;
-	max-width: 32rem;
-	margin-block: 1rem;
-}
-
-// The QR code keeps its own white background in the dark theme: phones scan
-// dark modules on light best.
-.qr {
-	width: 100%;
-	max-width: 20rem;
-	height: auto;
-	image-rendering: pixelated;
-	border: 1px solid rgb(var(--v-theme-outline));
-	border-radius: 0.5rem;
-}
-
-.timer {
-	margin: 0;
-	font-variant-numeric: tabular-nums;
-}
-</style>
-
 <template>
 	<div ref="panel">
 		<p class="mb-2">{{ t('pairIntro') }}</p>
@@ -32,29 +7,7 @@
 		</div>
 		<StatusLine :message="message" />
 
-		<div v-if="pairingCode.qr" :class="$style.code">
-			<img :class="$style.qr" :src="pairingCode.qr" :alt="t('qrAlt')" width="512" height="512" />
-			<p :class="$style.timer">
-				<I18nT keypath="expiresIn" scope="global">
-					<template #time>
-						<bdi>{{ formatLeft(pairingCode.left) }}</bdi>
-					</template>
-				</I18nT>
-			</p>
-			<div ref="codeField">
-				<VTextarea
-					:model-value="pairingCode.text"
-					:label="t('codeText')"
-					rows="4"
-					readonly
-					spellcheck="false"
-				/>
-			</div>
-			<div :class="s.actions">
-				<VBtn @click="copy">{{ t('copy') }}</VBtn>
-			</div>
-		</div>
-		<p v-if="pairingCode.expired">{{ t('expired') }}</p>
+		<PairingCodeView :code="ownCode.state" @message="message = $event" />
 
 		<div v-if="refusals.length">
 			<h3 :class="['text-title-large', s.subtitle]">{{ t('refusedTitle') }}</h3>
@@ -100,10 +53,11 @@ import type { Refusal } from '@/api/types';
 import FactItem from '@/components/FactItem.vue';
 import FactList from '@/components/FactList.vue';
 import ItemCard from '@/components/ItemCard.vue';
+import PairingCodeView from '@/components/PairingCodeView.vue';
 import StatusLine from '@/components/StatusLine.vue';
 import { errorMessage, info, type Message } from '@/composables/messages';
 import { useFormat } from '@/composables/useFormat';
-import { codeValid, formatLeft, issueCode, pairingCode } from '@/composables/usePairingCode';
+import { ownCode } from '@/composables/usePairingCode';
 import { usePolling } from '@/composables/usePolling';
 import { rescueFocus } from '@/composables/useReturnFocus';
 import s from '@/styles/section.module.scss';
@@ -112,12 +66,11 @@ const { t } = useI18n();
 const format = useFormat();
 const message = ref<Message | null>(null);
 const refusals = ref<Refusal[]>([]);
-const codeField = useTemplateRef<HTMLElement>('codeField');
 const panel = useTemplateRef<HTMLElement>('panel');
 
 async function newCode(): Promise<void> {
 	try {
-		await issueCode();
+		await ownCode.issue();
 	} catch (error) {
 		message.value = errorMessage(error);
 		return;
@@ -129,18 +82,8 @@ async function newCode(): Promise<void> {
 // so opening it again does not revoke it. An expired code is replaced only on
 // opening again or by the New code button, never by itself.
 onMounted(() => {
-	if (!codeValid()) void newCode();
+	if (!ownCode.valid()) void newCode();
 });
-
-async function copy(): Promise<void> {
-	try {
-		await navigator.clipboard.writeText(pairingCode.text);
-		message.value = info('copied');
-	} catch {
-		codeField.value?.querySelector('textarea')?.select();
-		message.value = info('copyFailed');
-	}
-}
 
 async function loadRefusals(): Promise<void> {
 	try {

@@ -1,161 +1,37 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { createSocket } from 'node:dgram';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { createServer } from 'node:net';
-import { join, resolve } from 'node:path';
-import {
-	expect,
-	test,
-	type Browser,
-	type BrowserContextOptions,
-	type Page,
-} from '@playwright/test';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { expect, test, type Browser, type BrowserContextOptions } from '@playwright/test';
+import { expectNoCspViolations, nav, openPage as open } from './harness';
+import { buildServer, SCRATCH, Server } from './servers';
 
 /**
- * The built page in a real workspace-server, in a real browser. The server is
- * built with Go from this repository, embedding internal/web/ui/dist (which
- * `pnpm run test:e2e` builds first), or WORKSPACE_SERVER_BIN runs one already
- * built. Its data stays under the repository's tmp/.
+ * The built page in a real workspace-server, in a real browser. Its data
+ * stays under the repository's tmp/.
  */
 
-declare global {
-	interface Window {
-		cspViolations: string[];
-	}
-}
-
-const REPO = resolve(import.meta.dirname, '..', '..');
-
-let server: ChildProcess | null = null;
+let server: Server | null = null;
 let tmp = '';
-let base = '';
 
 test.describe.configure({ mode: 'serial' });
-
-function freeTcpPort(): Promise<number> {
-	return new Promise((resolvePort, reject) => {
-		const probe = createServer();
-		probe.once('error', reject);
-		probe.listen(0, '127.0.0.1', () => {
-			const address = probe.address();
-			probe.close(() => resolvePort(typeof address === 'object' && address ? address.port : 0));
-		});
-	});
-}
-
-function freeUdpPort(): Promise<number> {
-	return new Promise((resolvePort, reject) => {
-		const probe = createSocket('udp4');
-		probe.once('error', reject);
-		probe.bind(0, () => {
-			const { port } = probe.address();
-			probe.close(() => resolvePort(port));
-		});
-	});
-}
-
-function buildServer(): string {
-	if (process.env.WORKSPACE_SERVER_BIN) return resolve(process.env.WORKSPACE_SERVER_BIN);
-	if (!existsSync(join(REPO, 'internal', 'web', 'ui', 'dist', 'index.html'))) {
-		throw new Error('the page is not built: run `pnpm run build` first');
-	}
-
-	const binary = join(
-		tmp,
-		process.platform === 'win32' ? 'workspace-server.exe' : 'workspace-server',
-	);
-	const build = spawnSync('go', ['build', '-o', binary, './cmd/workspace-server'], {
-		cwd: REPO,
-		encoding: 'utf8',
-	});
-	if (build.status !== 0) {
-		throw new Error(`go build failed: ${build.error?.message ?? ''}${build.stderr ?? ''}`);
-	}
-
-	return binary;
-}
-
-async function waitForServer(): Promise<void> {
-	const deadline = Date.now() + 30_000;
-	while (Date.now() < deadline) {
-		if (server?.exitCode !== null) throw new Error('workspace-server exited at start');
-		try {
-			const response = await fetch(`${base}/api/status`);
-			if (response.ok) return;
-		} catch {
-			// Not listening yet.
-		}
-		await new Promise((done) => setTimeout(done, 200));
-	}
-
-	throw new Error('workspace-server did not start within 30 s');
-}
 
 test.beforeAll(async () => {
 	// Building the server with Go takes a while on a cold cache.
 	test.setTimeout(180_000);
-	const scratch = join(REPO, 'tmp');
-	mkdirSync(scratch, { recursive: true });
-	tmp = mkdtempSync(join(scratch, 'page-e2e-'));
-	const binary = buildServer();
-	const httpPort = await freeTcpPort();
-	const udpPort = await freeUdpPort();
-	// localhost, as the program opens it: the browser tries ::1 first and falls back.
-	base = `http://localhost:${httpPort}`;
-
-	server = spawn(
-		binary,
-		[
-			'run',
-			'-dir',
-			join(tmp, 'server'),
-			'-udp-port',
-			String(udpPort),
-			'-http-port',
-			String(httpPort),
-		],
-		{ stdio: 'ignore' },
-	);
-	await waitForServer();
+	mkdirSync(SCRATCH, { recursive: true });
+	tmp = mkdtempSync(join(SCRATCH, 'page-e2e-'));
+	server = await Server.start(buildServer(tmp), join(tmp, 'server'));
 });
 
 test.afterAll(async () => {
-	if (server && server.exitCode === null) {
-		// Windows releases the server's files only once the process is gone.
-		const exited = new Promise((done) => server?.once('exit', done));
-		server.kill();
-		await exited;
-	}
+	await server?.stop();
 	server = null;
 	rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 });
 
-/** A page in a fresh context that records every CSP violation it meets. */
-async function openPage(
-	browser: Browser,
-	hash = '',
-	options: BrowserContextOptions = {},
-): Promise<Page> {
-	const context = await browser.newContext({ locale: 'en-US', ...options });
-	await context.addInitScript(() => {
-		window.cspViolations = [];
-		document.addEventListener('securitypolicyviolation', (event) => {
-			window.cspViolations.push(`${event.violatedDirective}: ${event.blockedURI}`);
-		});
-	});
-	const page = await context.newPage();
-	await page.goto(`${base}/${hash}`);
-	await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
-
-	return page;
+/** A page of the server in a fresh context that records every CSP violation it meets. */
+function openPage(browser: Browser, hash = '', options: BrowserContextOptions = {}) {
+	return open(browser, server?.base ?? '', hash, options);
 }
-
-async function expectNoCspViolations(page: Page): Promise<void> {
-	expect(await page.evaluate(() => window.cspViolations)).toEqual([]);
-}
-
-// By role alone: its name is translated too.
-const nav = (page: Page) => page.getByRole('navigation');
 
 test('every section opens from the header, and the CSP blocks nothing', async ({ browser }) => {
 	const page = await openPage(browser);

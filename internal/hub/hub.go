@@ -60,6 +60,11 @@ type Deps struct {
 	// does not call it: the link writes with Replace, and a hook on its own
 	// writes would send them back where they came from.
 	Stored func(app string)
+	// Invite, if set, issues a pairing code of this server with a new
+	// secret, as its page's "Pair a device" does (the new secret revokes the
+	// previous one). A subordinate asks for one over its link session
+	// (invite), for a browser on its own computer.
+	Invite func() (code string, expires time.Time, err error)
 }
 
 // SessionInfo describes one authenticated session. App is empty for a link
@@ -385,6 +390,41 @@ func (h *Hub) Announce(s *protocol.Session, server protocol.ServerInfo) *protoco
 		s.PushDevices(h.registry())
 	}
 	return nil
+}
+
+// Invite issues a pairing code of this server for the subordinate whose link
+// session s is: the code this server's own page issues, so a browser on the
+// subordinate's computer pairs with this server, the main, and then learns
+// the subordinate from its welcome. The code names no app, as no pairing
+// code does: the device's pair names its own. Only a link session of a
+// server-kind device may ask; any other session gets a protocol error, which
+// closes it. A subordinate answers notMain: its codes would be refused.
+func (h *Hub) Invite(s *protocol.Session) (string, time.Time, *protocol.Error) {
+	h.mu.Lock()
+	m, ok := h.sessions[s]
+	h.mu.Unlock()
+	if !ok || !m.server || m.app != "" {
+		return "", time.Time{}, &protocol.Error{Code: protocol.CodeProtocol, Message: "only a server's link session may ask for a pairing code"}
+	}
+	if h.role() == protocol.RoleSubordinate {
+		return "", time.Time{}, errNotMain()
+	}
+	if h.d.Invite == nil {
+		return "", time.Time{}, h.errInternal(errors.New("this server issues no pairing codes"))
+	}
+	code, expires, err := h.d.Invite()
+	if err != nil {
+		return "", time.Time{}, h.errInternal(err)
+	}
+	name := m.device
+	if d, ok := h.d.Devices.Get(m.device); ok {
+		name = d.Name
+		if d.Server != nil {
+			name = d.Server.Name
+		}
+	}
+	h.d.Logf("issued a pairing code for a browser on the subordinate %q; it replaces any code this server's page showed", name)
+	return code, expires, nil
 }
 
 // DevicesChanged tells every link session that announced itself the device

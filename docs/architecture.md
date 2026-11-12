@@ -94,11 +94,11 @@ Module `github.com/FLighter7/workspace-server`, Go 1.27. Dependencies:
 | `internal/fsutil` | `WriteFileAtomic`, shared by every file writer. |
 | `internal/pairing` | The pairing code, secrets and refused pairings, in memory. |
 | `internal/protocol` | One session over a data channel: framing, the message state machine, the ordered send queue. |
-| `internal/hub` | The protocol's backend: authentication, rate limits, broadcast of `changed`, closing sessions on removal; server-kind devices, link sessions, the app list, `announce`, the subordinates in `welcome` and the device registry pushed to subordinates; `pair` refused on a subordinate. |
+| `internal/hub` | The protocol's backend: authentication, rate limits, broadcast of `changed`, closing sessions on removal; server-kind devices, link sessions, the app list, `announce`, the subordinates in `welcome` and the device registry pushed to subordinates; `pair` refused on a subordinate; a pairing code for a subordinate's browser (`invite`). |
 | `internal/rtc` | The UDP listener and the signaling-free accept path. It creates a peer connection per unknown ufrag. |
 | `internal/mdns` | The minimal mDNS responder for the `<uuid>.local` name, and a one-shot resolver for a main's name. |
 | `internal/wsclient` | A Go client of the protocol: the answer, the pairing code, framing and the messages, as in `client/`, and `Dial` with Pion as the offerer. |
-| `internal/upstream` | A subordinate's link to its main: `upstream.json`, the link and app sessions, the sync rule (pull, push, the main's copy winning a divergence), the write guard; announcing this server and keeping the main's device registry. |
+| `internal/upstream` | A subordinate's link to its main: `upstream.json`, the link and app sessions, the sync rule (pull, push, the main's copy winning a divergence), the write guard; announcing this server and keeping the main's device registry; asking the main for a pairing code (`invite`); unlinking. |
 | `internal/netaddr` | LAN IPv4 addresses and interfaces. |
 | `internal/web` | The localhost page: serves the page built from `client-wss/` (embedded from `ui/dist`), the API, the guard. |
 | `internal/autostart` | LaunchAgent, `systemd --user` unit, Windows logon task; opening the page. |
@@ -113,12 +113,14 @@ The page `internal/web` serves: Vue 3, Vuetify 4 and vue-i18n, built with Vite. 
 - **The strings** are in `src/i18n/locales/{en,ru,pl}.json`, precompiled by `@intlify/unplugin-vue-i18n` (the runtime compiler needs `eval`, which the CSP forbids). The type checker holds every `t()` key to the English catalog; the unit tests hold the other languages to the same keys and placeholders, and fail on a key nothing names.
 - **Language and theme are the viewer's:** the language comes from the choice saved in this browser, else `navigator.languages`, else English; the theme is system, light or dark, `system` following the OS live. Two buttons at the right of the header open their pickers, as in the todo app. The choice lives in `localStorage['workspace-server.preferences']`, every access guarded. The origin includes the port, so a new HTTP port, or `127.0.0.1` instead of `localhost`, starts from the defaults again; accepted for a page on loopback.
 - **The sections are links, not tabs:** a `<nav>` of `VBtn` links, centred, to `#server`, `#devices`, `#apps`, the current one with `aria-current="page"`. `VTabs` would give each link `role="tab"`, `aria-selected` and `tabindex="-1"`, which are wrong for navigation.
-- **Pairing is a full-screen dialog** opened by the button at the top of Devices, not a section of its own: the panel inside mounts only while the dialog is open, so opening it issues a code (unless the one on screen is still valid) and the refusals are polled only then. The dialog focuses its title on open.
+- **Pairing is a full-screen dialog** opened by the button at the top of Devices, not a section of its own: the panel inside mounts only while the dialog is open, so opening it issues a code (unless the one on screen is still valid) and the refusals are polled only then. The dialog focuses its title on open. "Pair this computer's browser" on a subordinate is the same kind of dialog (`FullScreenDialog.vue`), around the main's code instead of this server's (see "The page" under "Server modes and the link").
+- **The Upstream server subsection** is part of Server, an `h2` region after the data folder and before the danger zone: the link is what this server is to the others, a setting of the server like its name, and too rarely used on a main to earn a link in the header. It polls `GET /api/upstream` while Server is shown.
+- **The camera** reads a pairing code with `qr-scanner`, loaded only when the user presses "Scan with the camera". The package starts its decoder as a Worker from a `blob:` URL, which the CSP refuses (a worker's source falls back to `default-src 'self'`); a small Vite plugin in `vite.config.ts` replaces its worker module at build time with one that starts the same code from `/assets/qr-scanner-worker-<hash>.js`, a file of the page's own, so the CSP stays as it is. The code is taken from the package's module by running it with stand-ins for `Worker`, `URL` and `Blob`, so it follows the package's updates; the dev server, which sends no CSP, keeps the blob. Its overlays (`highlightScanRegion`, `highlightCodeOutline`) stay off: they are SVG with `style` attributes, which the CSP refuses too. The e2e reads a QR code through Chromium's fake camera and checks that the worker file was loaded and nothing was blocked.
 - **Managing the server is a danger zone:** its buttons sit in a `<fieldset>` outlined in the theme's error colour, the section's `h2` inside the `<legend>`.
 - **Nothing is parsed as HTML:** names, device names and refused ids are text in `<bdi>`, and `vue/no-v-html` is an error.
 - **Dialogs** focus their safe button (Cancel) or their input on open and give the focus back on close; when the element that had it is gone with its row (a deleted app, a removed device), the section's `h1` gets it, never the body.
 - **Development:** `pnpm --dir client-wss dev` proxies `/api` to `WSS_TARGET` (default `http://127.0.0.1:47810`, a throwaway server). The guard wants its own `Host` and `Origin`, so the proxy rewrites both; the server still sends no CORS headers. The boot block is then unfilled, and the page falls back to the defaults in `src/boot.ts`, which mirror `internal/apps`.
-- **Tests:** Vitest for the logic and components (happy-dom), Playwright e2e against a real server built with the page embedded, which also checks that no CSP violation happens on any section, dialog or theme.
+- **Tests:** Vitest for the logic and components (happy-dom), Playwright e2e against real servers built with the page embedded (two of them, a main and a server linked to it, for the Upstream server section), which also checks that no CSP violation happens on any section, dialog or theme, the camera included.
 
 ### The client package (`client/`)
 
@@ -374,14 +376,15 @@ The code format and the outcomes are in [protocol.md](protocol.md).
 
 A server is a **main** or a **subordinate**. A main has no upstream server. A subordinate is linked to one main and mirrors its apps on its own disk: a laptop that keeps a PC's documents when it travels. This section describes what is built; "Not built yet" at its end lists the rest.
 
-**The design of the whole hub** (at home, away, switching the main) is drawn in [images/connections.svg](images/connections.svg). It shows the planned design: of it, the link, the sync rule (pull, push, divergence) and handing subordinates out to devices are built so far.
+**The design of the whole hub** (at home, away, switching the main) is drawn in [images/connections.svg](images/connections.svg). It shows the planned design: of it, the link, the sync rule (pull, push, divergence), handing subordinates out to devices and the page's part (linking, unlinking, a code for a browser on the subordinate) are built so far.
 
 - **The role** is a subordinate's while `upstream.json` exists in the server folder. Every `welcome` names it (`role`), and `/api/status` shows it.
 - **Only a main can be an upstream.** The link checks the role in every `welcome` it gets and refuses any but `main`, a missing one included (a server from before roles): subordinates form a star of depth one around a main, which cannot hold a cycle. A main that links to another becomes a subordinate and closes the sessions of its own server-kind devices; its subordinates reconnect, read `subordinate`, and stop.
 
 ### Linking
 
-- **How a server is told to link:** `POST /api/upstream {"code": "<the main's pairing code>"}` on its page's API, guarded like every route. It answers once the pairing is done (within 30 s) with the link's status; `GET /api/upstream` reports the status at any time, with `devices`, the number of the main's devices this server admits. The page has no section for it yet, and there is no unlinking: a halted link, or a link to the wrong main, is undone only by a reset, which forgets the link, or by deleting `upstream.json` while the server is stopped.
+- **How a server is told to link:** `POST /api/upstream {"code": "<the main's pairing code>"}` on its page's API, guarded like every route, which the page's Upstream server section sends with the code pasted or scanned. It answers once the pairing is done (within 30 s) with the link's status; `GET /api/upstream` reports the status at any time, with `devices`, the number of the main's devices this server admits, and `subordinates`, the number of servers linked to this one. A halted link, or a link to the wrong main, is undone by unlinking (below).
+- **A main with subordinates of its own does not link** (409 `hasSubordinates`): only a main may be an upstream, so its subordinates would stop for good, and every device's way to them with them. Its page says so and offers no link until they are removed. Should one pair while it links, its sessions are closed (`Hub.CloseServers`): it reconnects, reads `subordinate` and stops. Handing the role on with its family is stage 5's switch, not a link.
 - **The steps:**
   1. parse the code as the client package does (the vectors pin it), and refuse this server's own code;
   2. reach the main and `pair` as a device of kind `server`, named with this server's name;
@@ -390,7 +393,7 @@ A server is a **main** or a **subordinate**. A main has no upstream server. A su
   5. confirm the pairing by asking for the app list (`apps`), and start the link.
 
   The pairing is confirmed only after the token is saved, so the main never keeps a pairing whose token this server lost. If the confirmation fails, `upstream.json` is deleted again: the main drops an unconfirmed pairing.
-- **Refusals:** 400 `invalid` (not a pairing code, or this server's own), 409 `exists` (already linked), 409 `busy` (a link is being made), 502 `upstream` with a `reason`: a protocol code (`badSecret`, `blocked`, `unknownApp` from a main too old to know server-kind pairing), `connectTimeout`, `closed`, or `notMain` and `serverChanged`.
+- **Refusals:** 400 `invalid` (not a pairing code, or this server's own), 409 `exists` (already linked), 409 `busy` (a link is being made or undone), 409 `hasSubordinates`, 502 `upstream` with a `reason`: a protocol code (`badSecret`, `blocked`, `unknownApp` from a main too old to know server-kind pairing), `connectTimeout`, `closed`, or `notMain` and `serverChanged`.
 
 ### Sessions to the main
 
@@ -453,13 +456,44 @@ Devices pair only with the main, which hands its subordinates out to them; a pho
 - **The device registry:** the main answers `announce` with its devices of apps (id, app, token hash) and pushes the registry again to every link session that announced after each change it makes: a pairing, its undoing, a removal, an app's removal. The answer goes out through the same push, under the same lock, so the last registry a subordinate hears is the newest. Server-kind devices are not in it.
 - **Admitting the main's devices:** the link keeps the registry in `upstream.json` and hands it to the hub (`Hub.Replicate`), which makes it the registry's replica: `Devices.Authenticate` and `Get` see it after this server's own devices, `List` and `devices.json` never do. A device of the replica is admitted to its own app by the SHA-256 of the token it presents: tokens are 32 random bytes, so the hash proves the token with no salt, and a stolen hash does not connect. `upstream.json` is read at start, before the main is reached, so the main's devices sync here while it is away, a restart included. A device the registry drops has its sessions closed at once; its in-flight `put` gets `badToken`.
 - **Removals reach a subordinate late:** while the link is down, a device removed on the main is still admitted here, until the next link brings the registry. Accepted for a single user. A subordinate the main removed (its link halts on `badToken`) clears the registry: the main's devices are no longer admitted here.
-- **`pair` on a subordinate** is `notMain`, of either kind, before anything is checked: no secret is used and no failure counted. The page still issues codes (stage 4 replaces that with `invite`), and they fail with `notMain`.
+- **`pair` on a subordinate** is `notMain`, of either kind, before anything is checked: no secret is used and no failure counted. So its page issues no code of its own: `POST /api/pairing` answers 409 `notMain`, and Devices points to the main, or to a code of the main for a browser here (`invite`, below).
 - **`forget` through a subordinate** closes the device's sessions here and does not reach the main, which keeps the device until it is removed on its page; this server cannot delete a device of the replica.
 - **On the device** (the client package): see "The client package" below and its README. The engine connects to the main and every subordinate at once and prefers the main.
 
+### A browser on the subordinate's computer (`invite`)
+
+A browser on the laptop pairs with the main like any device, but the laptop's page cannot show a code of its own (`notMain`), and the user may have no phone at hand. So the subordinate asks the main for one over its link session: `invite`, answered with `invited {code, expiresAt}` (see [protocol.md](protocol.md)).
+
+- **The main issues an ordinary code,** the one its page's Pair a device shows (`Hub.Invite` calls `Deps.Invite`, which is `IssuePairing`): a new secret, good for one pairing within 10 minutes, which revokes the code on the main's page. It logs that it issued one for the subordinate.
+- **It names no app,** as no code does: the browser's app names itself in `pair`. An app the main does not serve gets `unknownApp`, and the refusal shows on the main's page, which offers to add it.
+- **Only a link session of a server-kind device** gets one; any other session gets `protocol` and closes. A subordinate answers `notMain`, and the session stays open.
+- **On the subordinate,** `POST /api/upstream/invite` hands the request to the link session's loop, which asks the main beside the loop (10 s at most) and checks that the code is the main's own. It needs the main: a link that is not connected now is 502 `upstream` with reason `unreachable` at once, a halted one names why it halted, and a server that is not linked is 409 `notLinked`. The answer has the shape of `POST /api/pairing`'s, QR code included.
+- **The browser pairs with the main,** hears of the subordinate in the main's `welcome`, and is admitted on the subordinate once the main's registry reaches it, at once while linked.
+
+### Unlinking
+
+`DELETE /api/upstream` ends the link, and the server is a main again:
+
+1. the link stops (nothing syncs, reconnects or saves `upstream.json` any more);
+2. `upstream.json` is deleted; if that fails, the link starts again as it was, and the request fails;
+3. the replica is cleared (`Admit(nil)`, `Hub.Replicate(nil)`): the main's devices are no longer admitted, and their sessions here close;
+4. if the link was connected, a link session of its own says `hello` and `forget` to the main (5 s at most), which deletes the server-kind device: the main stops listing it in `welcome`, so devices drop it as a fallback.
+
+- **The data stays:** the apps taken from the main stay in `apps.json` with their documents and history, and the main keeps its own.
+- **The answer** is `{"forgotten": bool}`: whether the main no longer knows this server, because it was told now, or had removed it already (the link halted on `badToken`). A main that could not be told keeps the server-kind device until it is removed on its page; the page says so. A device that still tries this server as a fallback meanwhile gets `badToken` here, which does not stop its sync (only the paired server's refusals do).
+- **Refusals:** 409 `notLinked`; 409 `busy` while a link is being made or undone. Linking again afterwards needs a new code.
+
+### The page
+
+- **The Upstream server subsection** (in Server; see "The web page" above for where and why):
+  - on a main, what linking does, a field for the main's code and "Scan with the camera"; before linking it says that nothing is deleted, and that where both servers hold a document the main's wins and this server's goes to history. A main with subordinates gets an explanation instead of the field;
+  - on a subordinate, the main's name and id, the state (connected, not connected, or stopped, with what the reason means and what to do), when it was linked, the last sync, the apps synced, the apps the write guard stopped with a line saying that a restart of the server resumes them, and the number of the main's devices admitted; then "Pair this computer's browser" (not on a halted link, which reaches no main) and "Unlink", whose confirmation says that no data is deleted;
+  - results go to a `role="status"` line, so a screen reader hears them; after linking or unlinking the focus moves to the subsection's heading, since the button that had it is gone.
+- **Devices on a main** lists server-kind devices first, under "Linked servers", by the name they announced (their pairing name until they have), with their server id, hosts and UDP port; removing one says that the server on that computer stops syncing with this one and that its data stays there. `GET /api/devices` gives a server-kind device `kind: "server"` and `server: {serverId, name, port, hosts}`, what it announced, without its password and fingerprint.
+- **Devices on a subordinate** shows no "Pair a device": it names the main, says that devices pair there, and offers "Pair this computer's browser".
+
 ### Not built yet
 
-- The page: the "Upstream server" section, unlinking, `invite`, and server-kind devices marked on the main's page (until then a server-kind device shows on the Devices page in a group with no app name, and a subordinate's page offers pairing codes that fail with `notMain`).
 - Switching the main (`term`).
 
 ## Storage
@@ -544,7 +578,7 @@ apps/<id>/history/     previous documents
   - `DELETE /api/data`: reset (202);
   - `DELETE /api/server`: stop and remove the server from the machine (202);
   - `GET /api/data-dir?path=`: check a data folder;
-  - `GET|POST /api/upstream`: the link to an upstream server, and linking (see "Server modes and the link").
+  - `GET|POST|DELETE /api/upstream`: the link to an upstream server, linking, and unlinking; `POST /api/upstream/invite`: a pairing code of the main for a browser on this computer (see "Server modes and the link").
 - **`/api/status`** also carries `listening` (the UDP port is open, so devices can connect), `program` (the program file), `serverDir`, `dataDir`, `mainServer` (the default server folder), `lastError` (why the last reset or move failed, or why a restart needed retries) and `role` (`main`, or `subordinate` while linked).
 - **The server controls answer first:** each handler that stops or restarts the server writes and flushes its 202, then asks the server; the web server's shutdown waits for requests in flight (5 s). The first request wins; a later one while the server stops is ignored. The destructive actions have their own routes and take no confirmation word: a wrong flag in a body cannot turn a stop into a deletion.
 - **The guard** applies to every route, the page and assets included:
@@ -772,7 +806,7 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 - **L11, the hook is in `Hub.Put` and not in `Hub.Replace`:** a device's write is the only thing that makes the subordinate's copy move. The hook runs after the hub's locks are released and only wakes a worker, so a device's write never waits for the main.
 - **L12, nothing is queued for the main:** a write made while the main is out of reach is pushed by the next `welcome`, as whatever the subordinate's document is then. Content hashes make every step idempotent: a crash between a write and saving `base` is settled by the next decision, which finds the two etags equal.
 - **L13, the write guard counts one app's pushes and stops that app, both ways, until the server starts again** (see "The write guard"), like the client package's engine, which stops writing until the app opens again.
-  - Cost: a subordinate whose devices write one app more than 10 times a minute between them (several busy devices on the laptop, which their own guards make unlikely) stops syncing that app with the main until the server restarts. Until the page's "Upstream server" section shows it, only the log and `GET /api/upstream` do.
+  - Cost: a subordinate whose devices write one app more than 10 times a minute between them (several busy devices on the laptop, which their own guards make unlikely) stops syncing that app with the main until the server restarts. The page's Upstream server section lists it and says that a restart resumes it; there is no other control to resume it (whether there should be is the user's open question).
 
 ### Handing out (2026-11-12)
 
@@ -783,6 +817,17 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 - **L18, `pair` on a subordinate gets a new code, `notMain`,** checked before the secret: nothing to consume, and no failure counted, since the device did nothing wrong. An old client reads it as `internal`. No `proto` bump (codes may be added).
 - **L19, the device prefers the main by its `role`,** then the server it paired with: the paired main answering is taken at once; any other answer waits until 2 s after the start (`MAIN_GRACE_MS`), or until every attempt ended. A dead server holds an attempt until it times out (8 s in the browser), which is why nothing waits for every attempt. Only the paired server's refusals stop sync: a subordinate's `badToken` can mean a device it has not heard of yet. `serverChanged` is a `welcome` from outside the known set. `lastEtag` stays shared: etags are content hashes.
 - **L20, `forget` through a subordinate stays there:** relaying it would need a new frame for a rare case; the main's page removes the device.
+
+### The page and invite (2026-11-12)
+
+- **L21, `invite` asks the main for its ordinary code,** over the link session, rather than letting a subordinate pair devices itself: devices pair only with the main, and the code the browser gets is exactly what the main's page would show, so nothing new is trusted. The subordinate is a server-kind device already admitted to every app.
+  - Cost: the code revokes the one on the main's page, as any new code does.
+- **L22, `invite` names no app:** a pairing code never does; the app that pastes it names itself in `pair`. A field would only restate what the browser's app already says, and the main's `unknownApp` offer covers an app it does not serve.
+- **L23, the subordinate's own `POST /api/pairing` is refused** (409 `notMain`) rather than relayed to the main: a code of the main is shown only where the page says that it is the main's, under "Pair this computer's browser".
+- **L24, a main with subordinates does not link** (409 `hasSubordinates`), instead of linking and leaving its subordinates halted: re-parenting a family is the switch of stage 5.
+- **L25, unlinking tells the main when it can,** over a link session of its own after the link has stopped, and goes ahead when it cannot; the page says which. The main's devices are no longer admitted: the main no longer vouches for them here.
+- **L26, the Upstream server section lives in Server,** not in the header's links: it is a setting of this server, and a fourth link would crowd a phone's header for a section a main rarely uses.
+- **L27, the CSP stays as it is for the camera:** qr-scanner's worker is built as a file of the page's own instead of allowing `worker-src blob:`, and its overlays, which need `style` attributes, stay off.
 
 ### Process
 
@@ -803,9 +848,10 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 - `.local` resolution costs about 1 s on Windows.
 - A subordinate holds N + 1 of the main's 64 sessions for N apps.
 - When the main removes a subordinate, each of the subordinate's sessions fails once on reconnecting. With 10 apps or more that is the 10th failure within a minute, and the main blocks the subordinate's address for 10 minutes, the browser on that machine included.
-- A subordinate cannot be unlinked yet, except by a reset.
 - A device removed on the main is still admitted by a subordinate whose link is down, until its next link; `forget` sent to a subordinate does not reach the main.
-- A subordinate's page still issues pairing codes, which fail with `notMain` (until stage 4's `invite`).
+- A code a subordinate's page gets for a browser (`invite`) revokes the code the main's page shows, and needs the main to be reachable.
+- A subordinate unlinked while its main is out of reach stays listed on the main until it is removed on the main's page.
+- An app the write guard stopped resumes only when the server restarts; the page says so and offers no other control.
 - The device registry travels in one text frame, which must fit one data-channel message (256 KiB): about 1,500 devices.
 - A divergence between a subordinate and its main is settled by the main's copy; a change that only lived on the subordinate, whose writing device vanished before it merged again, survives only in the subordinate's `history/` (see "The sync rule").
 - The write guard stops an app on a subordinate after more than 10 pushes to the main within a minute, until the server starts again.
@@ -828,6 +874,7 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 | Mac Safari, Android | | never tried |
 | Two servers linked in one process over real WebRTC on `127.0.0.1` (Go tests: pairing as a server, the app list, the pull, reconnects; then push, divergence, a conflict during a push, the write guard, no ping-pong); the mDNS resolver against the server's own responder on this machine's LAN | Windows 10 22H2 (19045), 2026-11-12 | pass. A subordinate and a main on two machines: not tried. |
 | Handing out: `announce`, the subordinates in `welcome`, the registry replicated and removals, the replica admitted with the main stopped and after the subordinate's restart, `pair` refused (Go, real WebRTC on `127.0.0.1`); Chromium devices paired with a main falling back to its subordinate when the main stops, and both servers converging after both moved (the client package's e2e and the todo app's, two server processes on this machine) | Windows 10 22H2 (19045), 2026-11-12 | pass. Two machines, phones, Safari: not tried. |
+| The page's part: `invite` (a code that pairs a device with the main, refused to any other session), unlinking with the main reachable and away (Go, real WebRTC on `127.0.0.1`, and two whole servers through the page's API); the page in Chromium against two server processes: linking by a pasted code and by a QR code read through Chromium's fake camera (qr-scanner's worker loaded from `/assets/`, no CSP violation), the main's Devices marking the server, "Pair this computer's browser", unlinking, the main's removal halting the link; screenshots light and dark at 390 and 1280 px | Windows 10 22H2 (19045), 2026-11-12 | pass. A real camera, Safari, two machines: not tried. |
 
 ## Testing
 
@@ -877,6 +924,7 @@ pnpm --dir client run test:e2e   # builds the server with Go, two Chromium devic
 - Server-kind devices in the hub: pairing, admission to every app and to link sessions, the app list and its pushes, `Replace`, removal across apps; the `Stored` hook (after a stored put only, outside the hub's locks, never after `Replace`); `announce` and its refusals, the subordinates in a main's `welcome` (none in a subordinate's), the registry pushed after every change and only to link sessions that announced, `pair` refused on a subordinate with nothing used or counted, the replica admitted by hash to its own app and its dropped devices' sessions closed.
 - The mDNS resolver: query and answer as pure functions, and a lookup of the server's own responder on the real port 5353 (skipped where it cannot run).
 - The link, on real servers in one process linked over real WebRTC on `127.0.0.1`: every row of the sync table (the same document on both sides before a first link; only U moved; only L moved, pushed at once after each device's write; a first link where only L has a document; both moved while the link was down; a first link with different documents on both sides, U winning and L's version found in its history; the devices' merge written back and pushed), a conflict during a push (U's document changed behind its hub, so L pushes against a stale etag and U wins), writes made on L while U was down pushed once it is back (the last only), the write guard stopping one app while another goes on, the guard's sliding minute with a fake clock, and no write ping-pong (devices on both sides, the histories and the link's log stay still for 1.5 s after convergence); the app list (added and removed on the main), a subordinate refused as an upstream (`notMain`), a subordinate removed on the main (and its replica cleared), reconnects after the main's listener restarts, after a restart from `upstream.json` and after a network change; handing out: the main's `welcome` listing what the subordinate announced, re-announcing after a change, the registry replicated and a removal refused at once while linked, the replica admitted with the main stopped and after the subordinate's restart, a removal while away admitted until the next link; every device "on the subordinate" pairs with the main and is admitted on its word. In `cmd/workspace-server`, two whole servers linked through `POST /api/upstream`: the subordinate announced (as its status says) in the main's `welcome`, `pair` refused on it, a device paired with the main admitted there and its write pushed to the main, then reset.
+- The page's part of the link (stage 4): `invite` in the hub (a code for a link session only; `protocol` and closed for a device's or an app session; `notAuthenticated` before hello; `notMain` on a subordinate with the session kept; `internal` on a failure) and its vectors in `frames.json`; on real servers, a code got with `invite` pairing a device with the main, which then lists the subordinate and is admitted there, and `unreachable` with the main away; unlinking (the main told and forgetting the server, `upstream.json` gone, the replica cleared and its sessions closed, the data kept, no more sync, linking again) and unlinking with the main away (not told; a server the main had removed counts as forgotten). In `cmd/workspace-server`, two whole servers through the page's API: the subordinate's own code refused, the main's `/api/devices` marking the server, the main refusing to link while it has one, `invite`, unlinking. The page: Vitest for the Upstream section's states and actions (a stand-in camera included) and for Devices on a main and on a subordinate; Playwright on two server processes (see "What has been verified, where").
 - The client package:
   - its unit tests: framing, the pairing code, the protocol client, the pairing store, the answer;
   - the engine against a small union-merge adapter and a `FakeServer`;

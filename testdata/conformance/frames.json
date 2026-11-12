@@ -2,7 +2,7 @@
 	"about": [
 		"Exchanges. A session is new, authenticated as device \"d1\" of app \"todo\", or a link session (authenticated as the server-kind device \"s1\", with no app). With the backend in the state given, a client call sends the client frame (and clientBody, if any); the server answers with the server frames (and serverBody); the call resolves with result or fails with the error code. push is a changed frame the server sends unasked; pushApps is an apps frame and pushDevices a devices frame the server sends unasked.",
 		"closes: the server closes the channel after its frames. An error frame also carries a message, English text for a developer whose wording is the server's; it is not compared.",
-		"Bodies are UTF-8 text. backend keys: welcome, helloError, paired, pairError, head, doc, put ({stored} or {conflict}), putError, apps, appsError, devices, announceError. A welcome result holds role and subordinates when the frame carries them.",
+		"Bodies are UTF-8 text. backend keys: welcome, helloError, paired, pairError, head, doc, put ({stored} or {conflict}), putError, apps, appsError, devices, announceError, invite ({code, expiresAt}), inviteError. A welcome result holds role and subordinates when the frame carries them.",
 		"exchanges are spoken by every client. serverKind holds the exchanges of a server-kind device: a subordinate server linking to its main. The client package does not speak them; the server's Session and its Go client play them.",
 		"tolerated: frames one side accepts although the other side never sends them."
 	],
@@ -1310,6 +1310,112 @@
 						"192.168.1.30"
 					]
 				}
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "notAuthenticated"
+				}
+			],
+			"error": "notAuthenticated"
+		},
+		{
+			"name": "invite, which a main answers with a pairing code of its own",
+			"session": "link",
+			"backend": {
+				"invite": {
+					"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOlsiMGI3YzVhNTItNmEzZS00ZDJiLTlmMWUtN2QyYzNiNGE1ZjYwLmxvY2FsIiwiMTkyLjE2OC4xLjIwIiwiMTAuMC4wLjUiXSwicyI6InE4M3ZFalJXZUpDcnplOFNORlo0a0EifQ",
+					"expiresAt": "2026-11-12T10:10:00Z"
+				}
+			},
+			"call": {
+				"method": "invite"
+			},
+			"client": {
+				"t": "invite"
+			},
+			"server": [
+				{
+					"t": "invited",
+					"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOlsiMGI3YzVhNTItNmEzZS00ZDJiLTlmMWUtN2QyYzNiNGE1ZjYwLmxvY2FsIiwiMTkyLjE2OC4xLjIwIiwiMTAuMC4wLjUiXSwicyI6InE4M3ZFalJXZUpDcnplOFNORlo0a0EifQ",
+					"expiresAt": "2026-11-12T10:10:00Z"
+				}
+			],
+			"result": {
+				"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOlsiMGI3YzVhNTItNmEzZS00ZDJiLTlmMWUtN2QyYzNiNGE1ZjYwLmxvY2FsIiwiMTkyLjE2OC4xLjIwIiwiMTAuMC4wLjUiXSwicyI6InE4M3ZFalJXZUpDcnplOFNORlo0a0EifQ",
+				"expiresAt": "2026-11-12T10:10:00Z"
+			}
+		},
+		{
+			"name": "invite to a subordinate, which pairs nothing",
+			"session": "link",
+			"backend": {
+				"inviteError": "notMain"
+			},
+			"call": {
+				"method": "invite"
+			},
+			"client": {
+				"t": "invite"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "notMain"
+				}
+			],
+			"error": "notMain"
+		},
+		{
+			"name": "invite that the main refuses",
+			"session": "link",
+			"backend": {
+				"inviteError": "protocol"
+			},
+			"call": {
+				"method": "invite"
+			},
+			"client": {
+				"t": "invite"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "protocol"
+				}
+			],
+			"closes": true,
+			"error": "protocol"
+		},
+		{
+			"name": "invite on an app session",
+			"session": "authenticated",
+			"backend": {},
+			"call": {
+				"method": "invite",
+				"app": "todo"
+			},
+			"client": {
+				"t": "invite"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "protocol"
+				}
+			],
+			"closes": true,
+			"error": "protocol"
+		},
+		{
+			"name": "invite before hello",
+			"session": "new",
+			"backend": {},
+			"call": {
+				"method": "invite"
+			},
+			"client": {
+				"t": "invite"
 			},
 			"server": [
 				{

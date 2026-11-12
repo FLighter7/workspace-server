@@ -18,7 +18,11 @@ export interface Status {
 	mainServer: boolean;
 	/** Why the last reset or data move failed; "" when none did. */
 	lastError: string;
+	/** A subordinate while linked to an upstream server, else a main. */
+	role: Role;
 }
+
+export type Role = 'main' | 'subordinate';
 
 /** PUT /api/config: the fields to change. */
 export interface ConfigChange {
@@ -73,12 +77,25 @@ export interface NewApp {
 /** GET /api/devices: one paired device. */
 export interface DeviceInfo {
 	id: string;
+	/** "" for a server-kind device. */
 	app: string;
+	/** "server": a server linked to this one, its subordinate. */
+	kind?: 'server';
 	name: string;
 	pairedAt: string;
 	lastSeen: string;
 	/** A session is open now. */
 	connected: boolean;
+	/** What a server-kind device announced; absent until it has. */
+	server?: LinkedServer;
+}
+
+/** How devices reach a server linked to this one, as it announced it. */
+export interface LinkedServer {
+	serverId: string;
+	name: string;
+	port: number;
+	hosts: string[];
 }
 
 /** POST /api/pairing. */
@@ -94,4 +111,35 @@ export interface Refusal {
 	app: string;
 	device: string;
 	at: string;
+}
+
+/** GET /api/upstream: the link to an upstream server (internal/upstream, Status). */
+export interface UpstreamStatus {
+	linked: boolean;
+	/** The main's. */
+	serverId?: string;
+	name?: string;
+	hosts?: string[];
+	linkedAt?: string;
+	connected: boolean;
+	/** The link stopped until the server starts again; reason says why. */
+	halted: boolean;
+	reason?: string;
+	lastError?: string;
+	/** The last time a document moved between the two servers. */
+	lastSync?: string;
+	/** The apps synced now. */
+	apps: string[];
+	/** The apps the write guard stopped until the server starts again. */
+	stopped?: string[];
+	/** The main's devices this server admits. */
+	devices?: number;
+	/** The servers linked to this one: a main with any does not link. */
+	subordinates: number;
+}
+
+/** DELETE /api/upstream. */
+export interface Unlinked {
+	/** The main no longer knows this server: it was told, or had removed it already. */
+	forgotten: boolean;
 }

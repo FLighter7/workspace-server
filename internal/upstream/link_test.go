@@ -138,6 +138,10 @@ func (n *node) open() {
 		Role:     func() string { return n.cur.Load().Role() },
 		Logf:     n.logs.printf,
 		Stored:   func(app string) { n.cur.Load().LocalWrite(app) },
+		Invite: func() (string, time.Time, error) {
+			secret, expires := n.secrets.Issue()
+			return n.codeWith(secret), expires, nil
+		},
 	})
 	n.cfg.Backend = n.hub
 	n.linkDeps = Deps{
@@ -213,6 +217,11 @@ func (n *node) listen() {
 // 127.0.0.1.
 func (n *node) code() string {
 	secret, _ := n.secrets.Issue()
+	return n.codeWith(secret)
+}
+
+// codeWith is a pairing code of n with secret; its only host is 127.0.0.1.
+func (n *node) codeWith(secret string) string {
 	return pairing.EncodeCode(pairing.Code{
 		V: 1, ID: n.id.ServerID, N: n.name, P: n.id.ICEPwd, F: n.fp, O: n.cfg.Port,
 		H: []string{"127.0.0.1"}, S: secret,

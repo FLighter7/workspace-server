@@ -3,8 +3,11 @@ package hub
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/FLighter7/workspace-server/internal/apps"
 	"github.com/FLighter7/workspace-server/internal/devices"
@@ -188,6 +191,74 @@ func TestAnnounceRefusals(t *testing.T) {
 	}
 	if d, _ := e.devices.Get(srv); d.Server != nil {
 		t.Errorf("the server-kind device kept %+v from a refused announce", d.Server)
+	}
+}
+
+// invite: a subordinate's link session gets a pairing code of the main, the
+// code its page issues, and the main logs it. Any other session gets
+// protocol and closes, before authentication notAuthenticated; nothing is
+// issued for them. A subordinate answers notMain and keeps the session, and
+// a failure to issue is internal.
+func TestInvite(t *testing.T) {
+	e := newEnv(t)
+	issued := 0
+	var fail error
+	e.hub.d.Invite = func() (string, time.Time, error) {
+		if fail != nil {
+			return "", time.Time{}, fail
+		}
+		issued++
+		return "wsrv1.code" + string(rune('0'+issued)), time.Date(2026, 11, 12, 10, 10, 0, 500, time.UTC), nil
+	}
+	phone, phoneToken := e.device(t, "todo")
+	srv, srvToken := e.serverDevice(t)
+
+	link, linkFc := e.linkSession(t, "192.168.1.9:5000", srv, srvToken)
+	link.HandleText(`{"t":"invite"}`)
+	got := waitFrames(t, linkFc, "invited", 1)[0]
+	if want := (obj{"t": "invited", "code": "wsrv1.code1", "expiresAt": "2026-11-12T10:10:00Z"}); !reflect.DeepEqual(got, want) {
+		t.Errorf("the answer %v, want %v", got, want)
+	}
+	if !strings.Contains(e.logs.String(), `issued a pairing code for a browser on the subordinate "Laptop"`) {
+		t.Errorf("the log %q does not name the subordinate", e.logs.String())
+	}
+
+	for _, c := range []struct {
+		name  string
+		login func() (*protocol.Session, *fakeChannel)
+	}{
+		{"a device's session", func() (*protocol.Session, *fakeChannel) {
+			return e.login(t, "192.168.1.10:5000", "todo", phone, phoneToken)
+		}},
+		{"a server-kind device's app session", func() (*protocol.Session, *fakeChannel) {
+			return e.login(t, "192.168.1.9:5001", "todo", srv, srvToken)
+		}},
+	} {
+		s, fc := c.login()
+		s.HandleText(`{"t":"invite"}`)
+		expectClosedWithError(t, fc, protocol.CodeProtocol)
+		if n := len(framesOf(fc, "invited")); n != 0 {
+			t.Errorf("%s: got %d codes", c.name, n)
+		}
+	}
+	s, fc := e.connect(t, "192.168.1.11:5000")
+	s.HandleText(`{"t":"invite"}`)
+	expectOpenAfterError(t, s, fc, protocol.CodeNotAuthenticated)
+	if issued != 1 {
+		t.Errorf("%d codes issued, want only the link session's", issued)
+	}
+
+	fail = errors.New("disk full")
+	link.HandleText(`{"t":"invite"}`)
+	expectError(t, waitFrames(t, linkFc, "error", 1)[0], protocol.CodeInternal)
+	fail = nil
+
+	e.hub.d.Role = func() string { return protocol.RoleSubordinate }
+	link.HandleText(`{"t":"invite"}`)
+	expectError(t, waitFrames(t, linkFc, "error", 2)[1], protocol.CodeNotMain)
+	settleLink(t, link, linkFc) // the session stays open
+	if issued != 1 || linkFc.isClosed() {
+		t.Errorf("a subordinate issued a code (%d), or closed the session", issued)
 	}
 }
 

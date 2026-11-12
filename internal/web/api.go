@@ -34,6 +34,12 @@ const (
 	// codeUpstream: the upstream server refused the link or could not be
 	// reached; the answer's reason says why.
 	codeUpstream = "upstream"
+	// codeNotMain: a subordinate issues no pairing codes.
+	codeNotMain = "notMain"
+	// codeNotLinked: there is no link to undo or to ask through.
+	codeNotLinked = "notLinked"
+	// codeHasSubordinates: a main with subordinates does not link.
+	codeHasSubordinates = "hasSubordinates"
 )
 
 const (
@@ -318,10 +324,18 @@ type pairingResponse struct {
 
 func (a *api) issuePairing(w http.ResponseWriter, r *http.Request) {
 	code, expires, err := a.b.IssuePairing()
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrNotMain):
+		writeError(w, http.StatusConflict, codeNotMain, err.Error())
+	case err != nil:
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
-		return
+	default:
+		writePairing(w, code, expires)
 	}
+}
+
+// writePairing answers with a pairing code, as text and as a QR code.
+func writePairing(w http.ResponseWriter, code string, expires time.Time) {
 	png, err := qrcode.Encode(code, qrcode.Low, qrPixels)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, codeInternal, "QR code: "+err.Error())
@@ -371,7 +385,7 @@ func (a *api) upstreamStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // upstream is the link's status, its app list [] rather than null.
-func (a *api) upstream() upstream.Status {
+func (a *api) upstream() UpstreamStatus {
 	st := a.b.Upstream()
 	if st.Apps == nil {
 		st.Apps = []string{}
@@ -413,6 +427,46 @@ func (a *api) linkUpstream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, codeExists, err.Error())
 	case errors.Is(err, upstream.ErrBusy):
 		writeError(w, http.StatusConflict, codeBusy, err.Error())
+	case errors.Is(err, ErrHasSubordinates):
+		writeError(w, http.StatusConflict, codeHasSubordinates, err.Error())
+	case errors.As(err, &refused):
+		writeJSON(w, http.StatusBadGateway, refusedBody{Error: codeUpstream, Message: err.Error(), Reason: refused.Reason})
+	default:
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+	}
+}
+
+// unlinkUpstream ends the link and answers whether the main no longer knows
+// this server: {"forgotten": bool}.
+func (a *api) unlinkUpstream(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), linkTimeout)
+	defer cancel()
+	forgotten, err := a.b.UnlinkUpstream(ctx)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]bool{"forgotten": forgotten})
+	case errors.Is(err, upstream.ErrNotLinked):
+		writeError(w, http.StatusConflict, codeNotLinked, err.Error())
+	case errors.Is(err, upstream.ErrBusy):
+		writeError(w, http.StatusConflict, codeBusy, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+	}
+}
+
+// inviteUpstream answers with a pairing code of the main, which it issued
+// over the link for a browser on this computer, as POST /api/pairing
+// answers with this server's own.
+func (a *api) inviteUpstream(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), linkTimeout)
+	defer cancel()
+	code, expires, err := a.b.InviteUpstream(ctx)
+	var refused *upstream.RefusedError
+	switch {
+	case err == nil:
+		writePairing(w, code, expires)
+	case errors.Is(err, upstream.ErrNotLinked):
+		writeError(w, http.StatusConflict, codeNotLinked, err.Error())
 	case errors.As(err, &refused):
 		writeJSON(w, http.StatusBadGateway, refusedBody{Error: codeUpstream, Message: err.Error(), Reason: refused.Reason})
 	default:
