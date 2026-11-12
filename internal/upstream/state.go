@@ -32,8 +32,16 @@ type state struct {
 	// one with a null base was agreed to have no document.
 	Apps map[string]appState `json:"apps"`
 	// Devices is the main's device registry, which this server admits by
-	// (hashes only, as the main sent them).
-	Devices []devices.Entry `json:"devices,omitempty"`
+	// (hashes only, as the main sent them), and Removed the devices removed
+	// in the family, which this server needs should it become the main.
+	Devices []devices.Entry     `json:"devices,omitempty"`
+	Removed []devices.Tombstone `json:"removed,omitempty"`
+	// Term is the family's term, as the main last named it.
+	Term int `json:"term,omitempty"`
+	// Handover: this server was a main and stepped down to this one; it
+	// hands its own registry over at its next announce, and forgets it once
+	// the main has it.
+	Handover bool `json:"handover,omitempty"`
 }
 
 type appState struct {
@@ -59,6 +67,7 @@ func (s *state) clone() *state {
 		c.Apps[id] = a
 	}
 	c.Devices = append([]devices.Entry(nil), s.Devices...)
+	c.Removed = append([]devices.Tombstone(nil), s.Removed...)
 	return &c
 }
 
@@ -115,7 +124,20 @@ func (s *state) validate() error {
 			return fmt.Errorf("devices[%d]: %w", i, err)
 		}
 	}
+	for i, t := range s.Removed {
+		if err := t.Validate(); err != nil {
+			return fmt.Errorf("removed[%d]: %w", i, err)
+		}
+	}
+	if s.Term < 0 {
+		return errors.New("term must be 0 or more")
+	}
 	return nil
+}
+
+// server is how devices reach the main, as upstream.json keeps it.
+func (s *state) server() wsclient.Server {
+	return wsclient.Server{ServerID: s.ServerID, Name: s.Name, Password: s.Password, Fingerprint: s.Fingerprint, Port: s.Port, Hosts: append([]string(nil), s.Hosts...)}
 }
 
 // save writes s to path atomically, readable by its owner only: it holds the

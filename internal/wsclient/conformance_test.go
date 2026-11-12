@@ -278,31 +278,36 @@ func TestConformanceChunks(t *testing.T) {
 
 // call is the client call an exchange makes.
 type call struct {
-	Method string  `json:"method"`
-	Kind   string  `json:"kind"`
-	App    string  `json:"app"`
-	Device string  `json:"device"`
-	Token  string  `json:"token"`
-	Secret string  `json:"secret"`
-	Name   string  `json:"name"`
-	IfEtag *string `json:"ifEtag"`
-	Body   string  `json:"body"`
-	Server *Server `json:"server"`
+	Method  string      `json:"method"`
+	Kind    string      `json:"kind"`
+	App     string      `json:"app"`
+	Device  string      `json:"device"`
+	Token   string      `json:"token"`
+	Secret  string      `json:"secret"`
+	Name    string      `json:"name"`
+	IfEtag  *string     `json:"ifEtag"`
+	Body    string      `json:"body"`
+	Server  *Server     `json:"server"`
+	Term    int         `json:"term"`
+	Devices *[]Device   `json:"devices"`
+	Removed []Tombstone `json:"removed"`
 }
 
 type exchange struct {
-	Name        string           `json:"name"`
-	Call        *call            `json:"call"`
-	Client      map[string]any   `json:"client"`
-	ClientBody  string           `json:"clientBody"`
-	Push        *string          `json:"push"`
-	PushApps    []App            `json:"pushApps"`
-	PushDevices []Device         `json:"pushDevices"`
-	Server      []map[string]any `json:"server"`
-	ServerBody  string           `json:"serverBody"`
-	Closes      bool             `json:"closes"`
-	Result      json.RawMessage  `json:"result"`
-	Error       string           `json:"error"`
+	Name         string           `json:"name"`
+	Call         *call            `json:"call"`
+	Client       map[string]any   `json:"client"`
+	ClientBody   string           `json:"clientBody"`
+	Push         *string          `json:"push"`
+	PushApps     []App            `json:"pushApps"`
+	PushDevices  []Device         `json:"pushDevices"`
+	PushRemoved  []Tombstone      `json:"pushRemoved"`
+	PushTakeOver bool             `json:"pushTakeOver"`
+	Server       []map[string]any `json:"server"`
+	ServerBody   string           `json:"serverBody"`
+	Closes       bool             `json:"closes"`
+	Result       json.RawMessage  `json:"result"`
+	Error        string           `json:"error"`
 }
 
 // start makes the call on cl and returns its result as the vectors write
@@ -329,7 +334,15 @@ func start(cl *Client, c *call) (any, error) {
 	case "apps":
 		return cl.Apps(ctx)
 	case "announce":
-		return cl.Announce(ctx, *c.Server)
+		var handover *Registry
+		if c.Devices != nil {
+			handover = &Registry{Devices: *c.Devices, Removed: c.Removed}
+		}
+		reg, err := cl.Announce(ctx, *c.Server, handover)
+		return registryResult(reg), err
+	case "term":
+		a, err := cl.Term(ctx, c.Term, *c.Server, c.Device, c.Token)
+		return map[string]any{"term": a.Term, "main": a.Main}, err
 	case "invite":
 		inv, err := cl.Invite(ctx)
 		return map[string]any{"code": inv.Code, "expiresAt": inv.ExpiresAt.UTC().Format(time.RFC3339)}, err
@@ -344,10 +357,22 @@ func welcomeResult(w Welcome) map[string]any {
 	if w.Role != "" {
 		r["role"] = w.Role
 	}
+	if w.Term != 0 {
+		r["term"] = w.Term
+	}
 	if w.Subordinates != nil {
 		r["subordinates"] = w.Subordinates
 	}
 	return r
+}
+
+// registryResult is reg as the vectors write a registry: the list of
+// devices, or {devices, removed} when some were removed.
+func registryResult(reg Registry) any {
+	if len(reg.Removed) == 0 {
+		return reg.Devices
+	}
+	return map[string]any{"devices": reg.Devices, "removed": reg.Removed}
 }
 
 // play sends the server's frames into the client, a body after the frame
@@ -375,11 +400,12 @@ func playExchange(t *testing.T, ex exchange) {
 	}
 	cl := NewClient(fc, app)
 
-	if ex.Push != nil || ex.PushApps != nil || ex.PushDevices != nil {
+	if ex.Push != nil || ex.PushApps != nil || ex.PushDevices != nil || ex.PushTakeOver {
 		var heard []any
 		cl.OnChanged(func(etag string) { heard = append(heard, etag) })
 		cl.OnApps(func(list []App) { heard = append(heard, list) })
-		cl.OnDevices(func(list []Device) { heard = append(heard, list) })
+		cl.OnDevices(func(reg Registry) { heard = append(heard, registryResult(reg)) })
+		cl.OnTakeOver(func() { heard = append(heard, "takeOver") })
 		play(cl, ex.Server, "")
 		var want any
 		if err := json.Unmarshal(ex.Result, &want); err != nil {
@@ -389,6 +415,10 @@ func playExchange(t *testing.T, ex exchange) {
 			t.Errorf("heard %v, want %v", got, want)
 		}
 		return
+	}
+
+	if ex.Call.Method == "term" && ex.Call.Server == nil {
+		return // a frame this client never sends; only the server's side plays it
 	}
 
 	type outcome struct {

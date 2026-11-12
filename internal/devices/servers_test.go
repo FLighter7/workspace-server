@@ -112,19 +112,21 @@ func serverJSON(t *testing.T, s Server) string {
 		`","fingerprint":"` + s.Fingerprint + `","port":47801,"hosts":["a.local"]}`
 }
 
-// Entries is the own devices of apps, sorted by app and id, with their
-// hashes: never a server-kind device, never the replica.
+// Entries is the own devices, server-kind ones first, then sorted by app and
+// id, with their hashes and labels: never the replica.
 func TestEntries(t *testing.T) {
 	r, _, _ := openFresh(t)
 	todo, _, _ := r.Pair("todo", "Phone")
 	notes, _, _ := r.Pair("notes", "Phone")
-	if _, _, err := r.PairServer("Laptop"); err != nil {
+	laptop, _, err := r.PairServer("Laptop")
+	if err != nil {
 		t.Fatal(err)
 	}
 	r.SetReplica([]Entry{{ID: "Dev0123456789ab", App: "todo", TokenHash: strings.Repeat("a", 64)}})
 	want := []Entry{
-		{ID: notes.ID, App: "notes", TokenHash: notes.TokenHash},
-		{ID: todo.ID, App: "todo", TokenHash: todo.TokenHash},
+		{ID: laptop.ID, App: "", Kind: KindServer, Name: "Laptop", TokenHash: laptop.TokenHash, PairedAt: laptop.PairedAt},
+		{ID: notes.ID, App: "notes", Name: "Phone", TokenHash: notes.TokenHash, PairedAt: notes.PairedAt},
+		{ID: todo.ID, App: "todo", Name: "Phone", TokenHash: todo.TokenHash, PairedAt: todo.PairedAt},
 	}
 	if got := r.Entries(); !reflect.DeepEqual(got, want) {
 		t.Errorf("Entries = %+v, want %+v", got, want)

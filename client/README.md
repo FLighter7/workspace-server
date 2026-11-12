@@ -86,6 +86,7 @@ A server can be linked to the user's main server as its **subordinate**: a lapto
 - **The same pairing:** the device id, the token and `lastEtag` are shared by every server: a subordinate admits the main's devices, and an etag is the document's hash, the same on every server holding it.
 - **Errors:** only the main's refusals stop sync. A subordinate that does not know this device yet (it was paired since the subordinate last reached the main) refuses it with `badToken`, and the engine carries on as though that server were away. A `welcome` from a server that is neither the main nor a known fallback is not taken; from the main's own address it is `serverChanged`.
 - **Keeping the list current:** each `welcome` from the main replaces the list; a subordinate's `welcome` carries none and leaves it as it is.
+- **Following the main:** a subordinate can take the role of main over (the server's guide, "A laptop as a second server"). The main's family then has a higher `term`, which every `welcome` names (`Welcome.term`). When a fallback answers as the main at a term at least the one the paired server last named (`Pairing.term`, optional, so a record saved before reads as 0), the engine makes it the server the device is paired with, and the one it paired with before a fallback: the pairing follows the family's main through every switch, and only the new main's refusals stop sync. Of two mains answering at once (a family split for a while), it takes the higher term, unless the paired server answers as a main first. The device id, the token and `lastEtag` stay.
 - **Showing it:** `SyncState.via` is the name of the fallback the connection goes to, `null` while it goes to the main.
 - **Pairing and disconnecting** go to the main: a subordinate refuses `pair` with `notMain`. `disconnect()` while connected to a subordinate forgets the pairing here, but the main keeps the device until it is removed on the main's page.
 
@@ -107,7 +108,7 @@ A server can be linked to the user's main server as its **subordinate**: a lapto
 
 `@flighter7/workspace-client/testing` has a `FakeServer`: pass its `connect` to the engine, and several engines can share one, standing in for several devices. Switches make it fail as a real one can (`connectError`, `helloError`, `pairError`, `conflicts`, `connectGate` for one slow to answer), and `log` records every call. `FakeChannel` stands in for a data channel under `ServerClient`.
 
-For a main and its subordinates, give each `FakeServer` its own `serverId` and `port`, set `role`, list the subordinates' `entry()` in the main's `subordinates`, let them share the main's `devices`, and pass `FakeServer.route(main, laptop)` as `connect`.
+For a main and its subordinates, give each `FakeServer` its own `serverId` and `port`, set `role`, list the subordinates' `entry()` in the main's `subordinates`, let them share the main's `devices`, and pass `FakeServer.route(main, laptop)` as `connect`. Set `term` for a family that switched its main.
 
 ```ts
 import { FakeServer } from '@flighter7/workspace-client/testing';

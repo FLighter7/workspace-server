@@ -80,6 +80,17 @@ describe('createPairingStore', () => {
 		expect(store.load()).toEqual(makePairing());
 	});
 
+	it('keeps the term, and reads a record without one, or with one it cannot read, as term 0', () => {
+		const { storage, store } = setup();
+		store.save(makePairing({ term: 2 }));
+		expect(store.load()?.term).toBe(2);
+
+		for (const term of [undefined, 0, -1, 1.5, '2']) {
+			storage.setItem(KEY, JSON.stringify({ ...makePairing(), term }));
+			expect(store.load()).toEqual(makePairing());
+		}
+	});
+
 	it('load returns null for a missing record', () => {
 		expect(setup().store.load()).toBeNull();
 	});

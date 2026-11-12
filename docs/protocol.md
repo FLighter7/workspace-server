@@ -15,6 +15,7 @@ This is the contract between `workspace-server` and an app's client. The referen
 - **Scope:** IPv4 and the local network only.
 - **Servers as clients:** a workspace-server can link to another as its subordinate. It speaks this same protocol as a device of kind `server`; see "Servers: roles, server-kind devices and link sessions". An app's client never needs that part.
 - **Fallback servers:** a main lists its subordinates in every `welcome`, and a device may sync with any of them, with the same device id and token, when the main is out of reach; see "Subordinates: fallback servers for a device".
+- **Switching the main:** a subordinate can take the role of main over; every `welcome` names the family's `term`, and a device follows the main of the highest term it reaches; see "Switching the main".
 
 ## The pairing code
 
@@ -126,29 +127,32 @@ a=max-message-size:262144
 
 The first client frame, `hello` or `pair`, carries `proto: 1`. Any other number gets `error {code: 'protocol'}` and the channel closes.
 
-| Client → server                     | Server → client                                                                                       |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `hello {proto, app, device, token}` | `welcome {proto, role, serverId, name, etag, hosts, subordinates}`, or `error` and the channel closes |
-| `pair {proto, app, secret, name}`   | `paired {device, token}` then `welcome {…}`, or `error` (closes unless `unknownApp`)                  |
-| `head`                              | `head {etag}`                                                                                         |
-| `get`                               | `doc {etag, bytes}` + body (`etag: null`, `bytes: 0` when there is none)                              |
-| `put {ifEtag, bytes}` + body        | `stored {etag}` or `conflict {etag}`                                                                  |
-| `forget`                            | the device entry is deleted; the server closes every session of the device                            |
-| `apps` (server-kind devices only)   | `apps {apps}`                                                                                         |
-| `announce {server}` (link sessions) | `devices {devices}`                                                                                   |
-| `invite` (link sessions)            | `invited {code, expiresAt}`                                                                           |
-|                                     | `changed {etag}`: to every other session of the same app after a stored write                         |
-|                                     | `apps {apps}`: to every link session after the server's app list changes                              |
-|                                     | `devices {devices}`: to every link session that announced, after the device registry changes          |
-|                                     | `error {code, message}`                                                                               |
+| Client → server                                         | Server → client                                                                                             |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `hello {proto, app, device, token}`                     | `welcome {proto, role, term, serverId, name, etag, hosts, subordinates}`, or `error` and the channel closes |
+| `pair {proto, app, secret, name}`                       | `paired {device, token}` then `welcome {…}`, or `error` (closes unless `unknownApp`)                        |
+| `head`                                                  | `head {etag}`                                                                                               |
+| `get`                                                   | `doc {etag, bytes}` + body (`etag: null`, `bytes: 0` when there is none)                                    |
+| `put {ifEtag, bytes}` + body                            | `stored {etag}` or `conflict {etag}`                                                                        |
+| `forget`                                                | the device entry is deleted; the server closes every session of the device                                  |
+| `apps` (server-kind devices only)                       | `apps {apps}`                                                                                               |
+| `announce {server, devices?, removed?}` (link sessions) | `devices {devices, removed}`                                                                                |
+| `invite` (link sessions)                                | `invited {code, expiresAt}`                                                                                 |
+| `term {term, server, device?, token?}` (link sessions)  | `term {term, main}`                                                                                         |
+|                                                         | `changed {etag}`: to every other session of the same app after a stored write                               |
+|                                                         | `apps {apps}`: to every link session after the server's app list changes                                    |
+|                                                         | `devices {devices, removed}`: to every link session that announced, after the device registry changes       |
+|                                                         | `takeOver`: to a subordinate's link session, when its main hands it the role of main                        |
+|                                                         | `error {code, message}`                                                                                     |
 
-`pair` may also carry `kind`, and a server-kind device's `hello` may leave `app` out; both, `apps`, `announce` and `invite`, are for servers only (see "Servers: roles, server-kind devices and link sessions").
+`pair` may also carry `kind`, and a server-kind device's `hello` may leave `app` out; both, `apps`, `announce`, `invite`, `term` and `takeOver`, are for servers only (see "Servers: roles, server-kind devices and link sessions" and "Switching the main").
 
 ### Values
 
 - **`etag`** is a string, or `null` when there is no document. It is the lowercase hex SHA-256 of the document's bytes, so two identical writes agree.
 - **`hosts`** is `[mdnsName, ...LAN IPv4]`, the server's current list. A client can refresh the hosts it stored at pairing from it, since addresses change.
 - **`role`** is `"main"` or `"subordinate"`: whether the server is linked to an upstream server (see "Servers"). A server from before roles sends none. An app's client may ignore it.
+- **`term`** is the family's term, a whole number: it goes up by one every time a subordinate becomes the main (see "Switching the main"). A main names its own, a subordinate its main's. It is left out at 0, as it is by a server whose family never switched its main and by a server from before terms; absent reads as 0. An app's client may ignore it; the reference client uses it to follow the main.
 - **`subordinates`** is sent by a main only, always, `[]` when it has none: the servers linked to it that serve its devices too, sorted by name. A subordinate, and a server from before subordinates, sends none. Each entry is a pairing code without the secret, `{serverId, name, password, fingerprint, port, hosts}`, with the fingerprint in uppercase colon hex (`AB:CD:…`, 32 bytes) as the answer's `a=fingerprint` line takes it. A client leaves out an entry it cannot build a connection to (see the vectors' tolerated frames). See "Subordinates: fallback servers for a device".
 - **`device`** is the device id, 16 characters.
 - **`token`** is 32 random bytes, base64url.
@@ -204,7 +208,7 @@ Codes:
 
 **A code the client does not know** should be treated as a temporary server error: report it and retry later. Do not treat it as a reason to drop the pairing. Codes may be added without a new `proto`.
 
-- **Before authentication,** `head`, `get`, `put`, `forget`, `apps`, `announce` and `invite` get `notAuthenticated`.
+- **Before authentication,** `head`, `get`, `put`, `forget`, `apps`, `announce`, `invite` and `term` get `notAuthenticated`.
 - **After authentication,** a second `hello`/`pair` is a `protocol` error.
 - **A frame with an unknown `t`** gets `error {code: 'protocol'}` and the channel closes, before authentication or after.
 - **`hello` failures:**
@@ -235,13 +239,18 @@ A workspace-server can be a **subordinate** of another, its **main**: it mirrors
   - Every link session also gets `apps {apps}` unasked whenever the list changes, never before its `welcome`. The answer and the push look alike: each carries the whole current list, so act on the latest.
 - **Removals:** removing a server-kind device closes every session of it. A server that becomes a subordinate itself closes the sessions of its own server-kind devices; they reconnect, read the new `role`, and stop.
 - **Announcing:** `announce {server: {serverId, name, password, fingerprint, port, hosts}}` on a link session tells the main how devices reach the subordinate: one entry of `subordinates`, the same rules. The main keeps it with the server-kind device and lists it in every `welcome` from then on.
+  - A subordinate that was a main and stepped down to this one (see "Switching the main") hands its own registry over in its first `announce`: `devices` and `removed`, in the form of the `devices` frame below. The main merges it into its own (the union, less every device removed on either side) and answers with the result. Only a main takes one; a subordinate answers `protocol`.
   - The answer is the main's device registry, `devices {devices}` (below).
   - The subordinate announces at every link session and again, on the same session, when its name or UDP port changes; an address change ends the link session, and the next one announces.
   - Only a link session may announce. On any other session, with no `server`, with an entry that breaks the rules, or with the main's own `serverId`, the answer is `protocol`, and the channel closes.
   - A main sends `subordinates` in every `welcome`, `[]` included, so a subordinate announces only to a main whose link-session `welcome` carries the field; a main from before announce has none, and would close the session over the unknown frame.
-- **The device registry:** `devices {devices: [{id, app, tokenHash}, …]}`: the main's devices of apps (server-kind devices are not in it), sorted by app and id, `[]` when there is none. `tokenHash` is the lowercase hex SHA-256 of the device's token: the main never sends a token.
+- **The device registry:** `devices {devices: [{id, app, kind?, name?, tokenHash, pairedAt?, server?}, …], removed?: [{id, at}, …]}`: the main's devices, sorted by app and id, `[]` when there is none. `tokenHash` is the lowercase hex SHA-256 of the device's token: the main never sends a token.
+  - Server-kind devices are in it too (since "Switching the main"), first: `app: ""`, `kind: "server"`, and `server`, what each announced, once it has. They let the servers of a family reach one another (below) and let a subordinate that becomes the main admit every server of the family. A subordinate from before reads such an entry as not valid and leaves it out.
+  - `name` and `pairedAt` (RFC 3339 UTC) label each device for a server that adopts the registry.
+  - `removed` lists the devices removed in the family, with when (RFC 3339 UTC), the newest 1,000; it is left out when empty. A device id is never reused, so a removal is final: a registry merged later never brings it back.
   - It answers `announce`, and every link session that announced gets it again unasked after every change: a pairing, a removal, a pairing undone, an app removed. Each carries the whole registry, so act on the latest. A link session that never announced gets none.
   - A subordinate admits `hello` from these devices, each to its own app, by hashing the token it presents and comparing. It keeps the latest registry on its disk, so it admits them after a restart too, while the main is out of reach.
+  - A server-kind device of the registry (another server of the family) is admitted by a subordinate to a link session only, where it may send `term` and nothing else: `apps`, `announce` and `invite` there are `protocol`, and a `hello` for an app is `badToken`.
   - A device removed on the main is refused by a subordinate from the moment the registry reaches it: at once while linked, otherwise at its next link. Until then the subordinate still admits it.
   - A subordinate's own devices (paired before it was linked) stay admitted, and win an id the registry shares.
   - `forget` from a device of the registry on a subordinate closes its sessions there, and does not reach the main: the main keeps the device until it is removed there.
@@ -251,7 +260,23 @@ A workspace-server can be a **subordinate** of another, its **main**: it mirrors
   - The device pairs with the main, not with the subordinate, and learns the subordinate from the main's `welcome` (`subordinates`); the subordinate admits it once the main's device registry reaches it.
   - Only a link session may ask. On a device's session or an app session, the answer is `protocol`, and the channel closes. A subordinate, whose codes would be refused, answers `notMain`, and the session stays open. A server-side failure is `internal`; the session stays open.
   - A main from before `invite` answers `protocol` and closes the link session, which the subordinate opens again.
-- **`proto` stays 1.** Nothing an old client meets changed: `role` and `subordinates` are more `welcome` fields, which clients ignore (see the vectors' tolerated frames); `notMain` is a new code, which an old client reads as `internal` (a temporary error); `kind`, a `hello` without `app`, `apps`, `announce` and `invite` come only from servers, `apps` frames go only to server-kind sessions, `devices` frames only to link sessions that announced, and `invited` frames only answer `invite`.
+- **`proto` stays 1.** Nothing an old client meets changed: `role`, `term` and `subordinates` are more `welcome` fields, which clients ignore (see the vectors' tolerated frames); `notMain` is a new code, which an old client reads as `internal` (a temporary error); `kind`, a `hello` without `app`, `apps`, `announce`, `invite` and `term` come only from servers, `apps` frames go only to server-kind sessions, `devices` frames only to link sessions that announced, `invited` and `term` frames only answer their requests, and `takeOver` goes only to a subordinate's link session.
+
+## Switching the main
+
+A **family** is a main and the subordinates linked to it. The main is the server whose copy wins a divergence, the one devices prefer, and the source of the device registry. A subordinate can take that role over: planned, while the main is reachable, or forced, while it is not.
+
+- **The term:** a whole number, 0 for a family that never switched its main. It goes up by one every time a subordinate becomes the main. Every `welcome` names it (`term`): a main its own, a subordinate its main's.
+- **The higher main wins:** of two mains, the higher `(term, serverId)` wins, the server id compared as a string when the terms are equal. A server that meets a main higher than its own main follows it: a subordinate links to it, and a main steps down and links to it. A main never steps down without a successor.
+- **Reaching one another:** every server of a family holds the registry, server-kind devices included, so each admits the others to a link session. A subordinate says `hello` with its own server-kind device and token on its main; a subordinate that became the main keeps the device and token it had, and the others still admit it.
+- **`term {term, server, device?, token?}`** on a link session: the sender says it is the main of the family at `term`, reached at `server` (one entry of `subordinates`, the same rules). `device` and `token`, both or neither, are a server-kind credential for the receiver on the sender: a new main mints one for the main it replaces, which has none there.
+  - The receiver follows the sender when `(term, server.serverId)` is higher than its own main's: a subordinate links to the sender with its own credential; a main steps down and links to the sender with the credential given, or with the one it kept from its own time as a subordinate, closes the sessions of its own subordinates (but the sender's), and hands its own registry over at its first `announce` there.
+  - The answer is `term {term, main}`: the term and the `serverId` of the main the receiver follows now. `main` is the sender's id when it follows the sender.
+  - Only a link session may send it; on any other session, without a `term` of 0 or more or a valid `server`, with the receiver's own id, or when the receiver cannot act on it (a main with no credential for the sender), the answer is `protocol`, and the channel closes. Before authentication it is `notAuthenticated`.
+- **`takeOver`:** a main sends it, unasked, on the link session of the subordinate the user hands the role to. The subordinate then switches as planned (below). There is no answer: the switch shows when the subordinate tells the main `term`.
+- **A planned switch:** the subordinate makes sure the documents are the same on both servers, takes the term up by one, makes the main's registry its own, mints a server-kind credential for the main, and tells it `term`. The main steps down and links to it. The main's other subordinates find their main answering as a subordinate, and look for the new main: they say `hello` to every server of the family their registry lists, and follow the highest that answers as a main above their old one. The new main also tells them `term` when it reaches them.
+- **A forced switch:** the subordinate does the same without the main and without the documents' check. If the main still runs, both act as main until they meet; the new main tells the old one `term` whenever it reaches it, and the old main steps down by itself. Two subordinates made the main apart, at the same term, settle by the server id the same way.
+- **Devices** keep their pairing: every server of the family admits the same device id and token. A device paired with the old main finds it answering as a subordinate, or not at all, and the new main answering as a main; the reference client then makes the new main the server it is paired with (see "Subordinates: fallback servers for a device").
 
 ## Subordinates: fallback servers for a device
 
@@ -261,6 +286,7 @@ A device pairs only with a main. The main's `welcome` lists its subordinates (`s
 - **Which server:** the reference client connects to the main and its subordinates at once, takes the main if it answers within a short grace period, and otherwise a subordinate that did. It takes a `welcome` only from a `serverId` it knows; a `welcome` from another one is `serverChanged`, which stops sync when it comes from the main's own address. Only the main's refusals stop sync.
 - **The etag** is the SHA-256 of the bytes on every server, so the etag a device last synced is valid on all of them: a subordinate that holds the same document is not read again.
 - **Keep the list current:** each `welcome` from the main replaces the list; one without `subordinates` (from a subordinate, or an older server) leaves it as it was.
+- **Follow the main:** after a switch of the main, a fallback answers as the main and the paired server as a subordinate, or not at all. The reference client then takes the fallback, when its `term` is at least the one the paired server last named as the main, as the server it is paired with; the server it paired with before becomes a fallback. Of two servers answering as mains (a family split for a while), it takes the higher `term`, unless the paired server answers as a main first.
 - **Pairing and forgetting** go to the main: a subordinate answers `pair` with `notMain`, and a `forget` sent to a subordinate does not reach the main. A subordinate's page shows no code of its own; for a browser on its computer it shows a code of the main, which it gets with `invite`.
 
 ## What the client cannot see

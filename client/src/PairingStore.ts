@@ -23,6 +23,13 @@ export interface Pairing extends ServerTarget {
 	 * as none.
 	 */
 	fallbacks?: FallbackServer[];
+	/**
+	 * The family's term as the paired server last named it as the main (see
+	 * `Welcome.term`). The device follows a fallback that answers as the
+	 * main at this term or a higher one: it becomes the paired server.
+	 * Absent from a record saved before, which reads as 0.
+	 */
+	term?: number;
 }
 
 /** Where the sync engine keeps this device's pairing. */
@@ -99,6 +106,8 @@ function readPairing(value: unknown): Pairing | null {
 				.filter((server): server is FallbackServer => server !== null)
 		: [];
 	if (fallbacks.length > 0) pairing.fallbacks = fallbacks;
+	const { term } = raw;
+	if (typeof term === 'number' && Number.isSafeInteger(term) && term > 0) pairing.term = term;
 
 	return pairing;
 }

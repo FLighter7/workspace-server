@@ -98,8 +98,9 @@ type Channel interface {
 
 // Welcome is what a welcome tells the client. Etag is nil when there is no
 // document, and always on a link session. Role is empty when the server
-// named none: a server from before roles. Subordinates is what a main
-// lists: nil when the welcome carries no list (a subordinate, or a main from
+// named none: a server from before roles. Term is the family's term as the
+// server knows it, 0 when it names none. Subordinates is what a main lists:
+// nil when the welcome carries no list (a subordinate, or a main from
 // before subordinates were handed out, which takes no announce either), and
 // empty but not nil for a main without any. An entry this client cannot
 // read is left out.
@@ -109,6 +110,7 @@ type Welcome struct {
 	Etag         *string  `json:"etag"`
 	Hosts        []string `json:"hosts"`
 	Role         string   `json:"role,omitempty"`
+	Term         int      `json:"term,omitempty"`
 	Subordinates []Server `json:"subordinates,omitempty"`
 }
 
@@ -124,12 +126,39 @@ type Server struct {
 	Hosts       []string `json:"hosts"`
 }
 
-// Device is one device of a main's registry: its id, its app, and its
-// token's SHA-256 in lowercase hex.
+// Device is one device of a main's registry: its id, its app (none for a
+// server-kind device, another server of the family), and its token's
+// SHA-256 in lowercase hex; its kind, name and pairing time (RFC 3339) when
+// the main names them, and what a server-kind device announced.
 type Device struct {
-	ID        string `json:"id"`
-	App       string `json:"app"`
-	TokenHash string `json:"tokenHash"`
+	ID        string  `json:"id"`
+	App       string  `json:"app"`
+	Kind      string  `json:"kind,omitempty"`
+	Name      string  `json:"name,omitempty"`
+	TokenHash string  `json:"tokenHash"`
+	PairedAt  string  `json:"pairedAt,omitempty"`
+	Server    *Server `json:"server,omitempty"`
+}
+
+// Tombstone is a device removed from the family: its id, and when (RFC
+// 3339).
+type Tombstone struct {
+	ID string `json:"id"`
+	At string `json:"at"`
+}
+
+// Registry is a device registry as it travels: the devices, and the ids
+// removed.
+type Registry struct {
+	Devices []Device
+	Removed []Tombstone
+}
+
+// TermAnswer is a server's answer to Term: the term and the main it follows
+// once it handled it.
+type TermAnswer struct {
+	Term int
+	Main string
 }
 
 // Paired is what a successful pair returns: the new device and its token.
@@ -170,13 +199,14 @@ type Client struct {
 
 	reqMu sync.Mutex // one request at a time
 
-	mu        sync.Mutex
-	pending   *pending
-	body      *bodyState // the body arriving, if any
-	ended     error
-	onChanged func(etag string)
-	onApps    func(list []App)
-	onDevices func(list []Device)
+	mu         sync.Mutex
+	pending    *pending
+	body       *bodyState // the body arriving, if any
+	ended      error
+	onChanged  func(etag string)
+	onApps     func(list []App)
+	onDevices  func(reg Registry)
+	onTakeOver func()
 
 	done chan struct{} // closed when the client ends
 	low  chan struct{} // the channel's buffer drained to BufferLow
@@ -220,10 +250,18 @@ func (c *Client) OnApps(f func(list []App)) {
 
 // OnDevices sets the listener of the device registries the main pushes, and
 // of the one Announce reads.
-func (c *Client) OnDevices(f func(list []Device)) {
+func (c *Client) OnDevices(f func(reg Registry)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onDevices = f
+}
+
+// OnTakeOver sets the listener of takeOver: the main asks this server, over
+// its link session, to become the main of the family.
+func (c *Client) OnTakeOver(f func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onTakeOver = f
 }
 
 // Done is closed when the client ends: the channel closed, the server broke
@@ -336,7 +374,7 @@ func (c *Client) assemble(text bool, data []byte) (*incoming, error) {
 // waiting for it.
 func (c *Client) dispatch(in incoming) {
 	c.mu.Lock()
-	onChanged, onApps, onDevices, p := c.onChanged, c.onApps, c.onDevices, c.pending
+	onChanged, onApps, onDevices, onTakeOver, p := c.onChanged, c.onApps, c.onDevices, c.onTakeOver, c.pending
 	c.mu.Unlock()
 
 	switch in.t {
@@ -358,17 +396,22 @@ func (c *Client) dispatch(in incoming) {
 			return // a push
 		}
 	case "devices":
-		list, err := readDevices(in.frame)
+		reg, err := readRegistry(in.frame)
 		if err != nil {
 			c.fail(err)
 			return
 		}
 		if onDevices != nil {
-			onDevices(list)
+			onDevices(reg)
 		}
 		if p == nil || p.kind != "announce" {
 			return // a push
 		}
+	case "takeOver":
+		if onTakeOver != nil {
+			onTakeOver()
+		}
+		return
 	case "error":
 		if p == nil {
 			return
@@ -596,17 +639,53 @@ func (c *Client) Apps(ctx context.Context) ([]App, error) {
 // Announce tells the main, over a link session, how devices reach this
 // server, and returns the main's device registry, which the main pushes
 // again on every change. The listener set with OnDevices hears it too.
-func (c *Client) Announce(ctx context.Context, self Server) ([]Device, error) {
-	var list []Device
-	err := c.request(ctx, map[string]any{"t": "announce", "server": self}, nil, func(in incoming) (bool, error) {
+// handover, when not nil, is this server's own registry, which it hands
+// over to the main it follows after stepping down as a main itself.
+func (c *Client) Announce(ctx context.Context, self Server, handover *Registry) (Registry, error) {
+	frame := map[string]any{"t": "announce", "server": self}
+	if handover != nil {
+		list := handover.Devices
+		if list == nil {
+			list = []Device{}
+		}
+		frame["devices"] = list
+		if len(handover.Removed) > 0 {
+			frame["removed"] = handover.Removed
+		}
+	}
+	var reg Registry
+	err := c.request(ctx, frame, nil, func(in incoming) (bool, error) {
 		if in.t != "devices" {
 			return false, protocolError("unexpected %s", in.t)
 		}
 		var err error
-		list, err = readDevices(in.frame)
+		reg, err = readRegistry(in.frame)
 		return true, err
 	})
-	return list, err
+	return reg, err
+}
+
+// Term tells the server, over a link session, that this server is the main
+// of the family at term, reached at self; device and token, when not empty,
+// are a server-kind credential for the receiver here, to link with. The
+// receiver follows this server when that is higher than its own main, and
+// answers with the term and main it follows then.
+func (c *Client) Term(ctx context.Context, term int, self Server, device, token string) (TermAnswer, error) {
+	frame := map[string]any{"t": "term", "term": term, "server": self}
+	if device != "" {
+		frame["device"], frame["token"] = device, token
+	}
+	var a TermAnswer
+	err := c.request(ctx, frame, nil, func(in incoming) (bool, error) {
+		var n float64
+		main, ok := readString(in.frame["main"])
+		if in.t != "term" || json.Unmarshal(in.frame["term"], &n) != nil || n < 0 || n != math.Trunc(n) || !ok {
+			return false, protocolError("a malformed term")
+		}
+		a = TermAnswer{Term: int(n), Main: main}
+		return true, nil
+	})
+	return a, err
 }
 
 // Invitation is a pairing code of the main, which it issued for a browser on
@@ -692,6 +771,10 @@ func readWelcome(frame map[string]json.RawMessage) (Welcome, error) {
 	}
 	role, _ := readString(frame["role"])
 	w := Welcome{ServerID: serverID, Name: name, Etag: etag, Hosts: hosts, Role: role}
+	var term float64
+	if raw, ok := frame["term"]; ok && json.Unmarshal(raw, &term) == nil && term >= 0 && term == math.Trunc(term) && term <= 1<<53 {
+		w.Term = int(term)
+	}
 	if raw, ok := frame["subordinates"]; ok {
 		w.Subordinates = readServers(raw)
 	}
@@ -733,23 +816,40 @@ func (s Server) valid() bool {
 	return true
 }
 
-func readDevices(frame map[string]json.RawMessage) ([]Device, error) {
+// readRegistry reads a devices frame. An entry without id, app or tokenHash
+// breaks the frame; the labels are taken when they read, and a server that
+// does not read is left out of its entry.
+func readRegistry(frame map[string]json.RawMessage) (Registry, error) {
 	var raw []struct {
-		ID        *string `json:"id"`
-		App       *string `json:"app"`
-		TokenHash *string `json:"tokenHash"`
+		ID        *string         `json:"id"`
+		App       *string         `json:"app"`
+		Kind      string          `json:"kind"`
+		Name      string          `json:"name"`
+		TokenHash *string         `json:"tokenHash"`
+		PairedAt  string          `json:"pairedAt"`
+		Server    json.RawMessage `json:"server"`
 	}
 	if json.Unmarshal(frame["devices"], &raw) != nil || raw == nil {
-		return nil, protocolError("a malformed devices")
+		return Registry{}, protocolError("a malformed devices")
 	}
-	list := make([]Device, 0, len(raw))
+	reg := Registry{Devices: make([]Device, 0, len(raw))}
 	for _, d := range raw {
 		if d.ID == nil || d.App == nil || d.TokenHash == nil {
-			return nil, protocolError("a malformed devices")
+			return Registry{}, protocolError("a malformed devices")
 		}
-		list = append(list, Device{ID: *d.ID, App: *d.App, TokenHash: *d.TokenHash})
+		dev := Device{ID: *d.ID, App: *d.App, Kind: d.Kind, Name: d.Name, TokenHash: *d.TokenHash, PairedAt: d.PairedAt}
+		var s Server
+		if d.Server != nil && json.Unmarshal(d.Server, &s) == nil && s.valid() {
+			dev.Server = &s
+		}
+		reg.Devices = append(reg.Devices, dev)
 	}
-	return list, nil
+	if raw, ok := frame["removed"]; ok {
+		if json.Unmarshal(raw, &reg.Removed) != nil {
+			return Registry{}, protocolError("a malformed devices")
+		}
+	}
+	return reg, nil
 }
 
 func readApps(frame map[string]json.RawMessage) ([]App, error) {

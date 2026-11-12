@@ -301,4 +301,106 @@ describe('SyncEngine with fallback servers', () => {
 
 		expect(last()).toMatchObject({ status: 'unreachable', via: null });
 	});
+
+	describe('a family that switched its main', () => {
+		/** The laptop took the main's role over at term 1; the desk follows it. */
+		function switched(options: { deskAway?: boolean } = {}) {
+			const s = setup();
+			s.sub.role = 'main';
+			s.sub.term = 1;
+			s.sub.subordinates = [s.main.entry()];
+			s.main.role = 'subordinate';
+			s.main.subordinates = undefined;
+			if (options.deskAway) s.main.connectError = 'connectTimeout';
+			return s;
+		}
+
+		it('follows the new main after a planned switch: it becomes the paired server', async () => {
+			const { engine, last, main, sub, state } = switched();
+
+			engine.start(true);
+			await settle();
+
+			expect(last()).toMatchObject({ status: 'connected', serverName: 'Laptop', via: null });
+			expect(state.pairing).toMatchObject({ serverId: sub.serverId, port: sub.port, term: 1 });
+			expect(state.pairing?.fallbacks).toEqual([main.entry()]);
+			expect(state.pairing?.device).toBe('dev1');
+
+			// The next connection takes the new main at once.
+			engine.setVisible(false);
+			engine.setVisible(true);
+			await settle();
+			expect(last()).toMatchObject({ status: 'connected', via: null });
+			expect(sub.log.filter((entry) => entry === 'connect')).toHaveLength(2);
+		});
+
+		it('follows the new main after a forced switch, the old main gone for good', async () => {
+			const { engine, last, sub, state } = switched({ deskAway: true });
+
+			engine.start(true);
+			await settle();
+
+			expect(last()).toMatchObject({ status: 'connected', serverName: 'Laptop', via: null });
+			expect(state.pairing?.serverId).toBe(sub.serverId);
+			expect(state.pairing?.lastEtag).toBe(sub.etag);
+		});
+
+		it('only the new main’s refusals stop sync once it is the paired server', async () => {
+			const { engine, last, main } = switched();
+			engine.start(true);
+			await settle();
+
+			main.helloError = 'badToken';
+			engine.setVisible(false);
+			engine.setVisible(true);
+			await settle();
+
+			expect(last()).toMatchObject({ status: 'connected', via: null });
+		});
+
+		it('does not follow a main of a lower term than the one it knows', async () => {
+			const { engine, last, main, sub, state } = setup();
+			if (state.pairing) state.pairing.term = 2;
+			main.connectError = 'connectTimeout';
+			sub.role = 'main'; // an old main, say, unlinked from the family
+			sub.term = 1;
+
+			engine.start(true);
+			await settle();
+
+			expect(last()).toMatchObject({ status: 'connected', via: 'Laptop' });
+			expect(state.pairing).toMatchObject({ serverId: main.serverId, term: 2 });
+		});
+
+		it('takes the main of the higher term while the family is split', async () => {
+			const { engine, last, main, sub, state } = setup();
+			const tablet = new FakeServer();
+			Object.assign(tablet, { serverId: 'S3', name: 'Tablet', port: 47803, role: 'main', term: 2 });
+			tablet.fingerprint = Array.from({ length: 32 }, () => 'EF').join(':');
+			tablet.devices = main.devices;
+			sub.role = 'main';
+			sub.term = 1;
+			main.role = 'subordinate';
+			main.subordinates = undefined;
+			if (state.pairing) state.pairing.fallbacks = [sub.entry(), tablet.entry()];
+			const route = FakeServer.route(main, sub, tablet);
+			(engine as unknown as { connectTo: typeof route }).connectTo = route;
+
+			engine.start(true);
+			await settle();
+
+			expect(last()).toMatchObject({ status: 'connected', serverName: 'Tablet', via: null });
+			expect(state.pairing).toMatchObject({ serverId: 'S3', term: 2 });
+		});
+
+		it('remembers the term its paired main names', async () => {
+			const { engine, main, state } = setup();
+			main.term = 3;
+
+			engine.start(true);
+			await settle();
+
+			expect(state.pairing?.term).toBe(3);
+		});
+	});
 });

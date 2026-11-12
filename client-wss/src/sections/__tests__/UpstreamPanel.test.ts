@@ -36,6 +36,7 @@ const asMain: UpstreamStatus = {
 	halted: false,
 	apps: [],
 	subordinates: 0,
+	term: 0,
 };
 
 const linked: UpstreamStatus = {
@@ -50,6 +51,7 @@ const linked: UpstreamStatus = {
 	apps: ['notes', 'todo'],
 	devices: 2,
 	subordinates: 0,
+	term: 0,
 };
 
 const text = (): string => document.body.textContent ?? '';
@@ -137,6 +139,107 @@ describe('UpstreamPanel on a main', () => {
 		expect(text()).toContain('Other servers are linked to this one');
 		expect(document.querySelector('textarea')).toBeNull();
 		expect(button('Link')).toBeUndefined();
+	});
+
+	it('names the servers it waits for after it took the role of main over', async () => {
+		upstream.mockResolvedValue({
+			...asMain,
+			subordinates: 2,
+			term: 1,
+			waiting: [{ serverId: 'MainServer01', name: 'Desk' }],
+		});
+		mountPage(Page);
+		await settle();
+		expect(text()).toContain('This server took over as the main.');
+		expect(text()).toContain('Desk');
+		expect(text()).toContain('A server that is gone for good can be removed under Devices.');
+	});
+});
+
+describe('UpstreamPanel making this server the main', () => {
+	const dialog = (): HTMLElement => document.querySelector('[role="dialog"]') as HTMLElement;
+
+	it('asks, then switches while the main is reachable', async () => {
+		upstream.mockResolvedValue(linked);
+		const promote = vi.spyOn(serverApi, 'promote').mockResolvedValue({ followed: true });
+		mountPage(Page);
+		await settle();
+
+		button('Make this server the main').click();
+		await settle();
+		expect(dialog().textContent).toContain('Make this server the main?');
+		expect(dialog().textContent).toContain('Devices follow by themselves, without pairing again.');
+		button('Cancel', dialog()).click();
+		await settle();
+		expect(promote).not.toHaveBeenCalled();
+
+		button('Make this server the main').click();
+		await settle();
+		upstream.mockResolvedValue({ ...asMain, subordinates: 1, term: 1 });
+		button('Make it the main', dialog()).click();
+		await settle();
+		expect(promote).toHaveBeenCalledWith(false);
+		expect(text()).toContain('This server is the main now, and Desk syncs through it.');
+		expect(document.activeElement?.id).toBe('upstream-h');
+	});
+
+	it('asks again, saying what happens next, when the main turns out to be away', async () => {
+		upstream.mockResolvedValue(linked);
+		const promote = vi
+			.spyOn(serverApi, 'promote')
+			.mockRejectedValueOnce(new ApiError('upstream', 'away', 'unreachable'))
+			.mockResolvedValueOnce({ followed: false });
+		mountPage(Page);
+		await settle();
+
+		button('Make this server the main').click();
+		await settle();
+		button('Make it the main', dialog()).click();
+		await settle();
+		expect(dialog().textContent).toContain(
+			'Desk is out of reach. Make this server the main anyway?',
+		);
+		expect(dialog().textContent).toContain('both act as main until they meet');
+		expect(dialog().textContent).toContain('nothing is lost');
+		expect(dialog().textContent).toContain('the old main steps down by itself');
+		button('Make it the main anyway', dialog()).click();
+		await settle();
+		expect(promote.mock.calls).toEqual([[false], [true]]);
+		expect(text()).toContain('The old main steps down when the two meet');
+	});
+
+	it('goes straight to the forced question while the main is out of reach', async () => {
+		upstream.mockResolvedValue({ ...linked, connected: false });
+		const promote = vi.spyOn(serverApi, 'promote').mockResolvedValue({ followed: false });
+		mountPage(Page);
+		await settle();
+
+		button('Make this server the main').click();
+		await settle();
+		expect(dialog().textContent).toContain('Desk is out of reach.');
+		button('Cancel', dialog()).click();
+		await settle();
+		expect(promote).not.toHaveBeenCalled();
+	});
+
+	it('says when the documents are not the same yet', async () => {
+		upstream.mockResolvedValue(linked);
+		vi.spyOn(serverApi, 'promote').mockRejectedValue(new ApiError('notInStep', 'not yet'));
+		mountPage(Page);
+		await settle();
+		button('Make this server the main').click();
+		await settle();
+		button('Make it the main', dialog()).click();
+		await settle();
+		expect(text()).toContain('The documents are not yet the same on this server and the main.');
+	});
+
+	it('says that it looks for the new main when its main stepped down', async () => {
+		upstream.mockResolvedValue({ ...linked, connected: false, reason: 'mainSteppedDown' });
+		mountPage(Page);
+		await settle();
+		expect(text()).toContain('Looking for the new main');
+		expect(text()).toContain('The main handed its role to another server.');
 	});
 });
 

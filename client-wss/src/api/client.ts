@@ -4,8 +4,10 @@ import type {
 	DataDirCheck,
 	DataDirVerdict,
 	DeviceInfo,
+	HandedOver,
 	NewApp,
 	Pairing,
+	Promoted,
 	Refusal,
 	Status,
 	Unlinked,
@@ -104,4 +106,9 @@ export const serverApi = {
 	unlink: () => request<Unlinked>('DELETE', '/api/upstream'),
 	/** A pairing code of the main, which it issues over the link. */
 	invite: () => request<Pairing>('POST', '/api/upstream/invite'),
+	/** Makes this server, a subordinate, the main: planned, or forced while the main is away. */
+	promote: (force: boolean) => request<Promoted>('POST', '/api/upstream/promote', { force }),
+	/** Asks the subordinate serverId to take the role of main over. */
+	handOver: (serverId: string) =>
+		request<HandedOver>('POST', '/api/upstream/hand-over', { serverId }),
 };

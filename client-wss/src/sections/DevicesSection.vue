@@ -57,6 +57,13 @@
 						<FactItem :label="t('lastSeen')">{{ format.time(device.lastSeen) }}</FactItem>
 					</FactList>
 					<template #actions>
+						<VBtn
+							v-if="device.server"
+							:loading="handingOver === device.id"
+							@click="handOver(device)"
+						>
+							{{ t('handOverButton') }}
+						</VBtn>
 						<VBtn @click="removeServer(device)">{{ t('remove') }}</VBtn>
 					</template>
 				</ItemCard>
@@ -106,6 +113,7 @@ import ItemCard from '@/components/ItemCard.vue';
 import StateBadge from '@/components/StateBadge.vue';
 import StatusLine from '@/components/StatusLine.vue';
 import { errorMessage, info, type Message } from '@/composables/messages';
+import { upstreamError } from '@/composables/upstream';
 import { ask } from '@/composables/useConfirm';
 import { useFormat } from '@/composables/useFormat';
 import { usePolling } from '@/composables/usePolling';
@@ -126,6 +134,8 @@ const inviteOpen = ref(false);
 /** The main's name while this server is its subordinate; null on a main. */
 const mainName = ref<string | null>(null);
 const upstreamLoaded = ref(false);
+/** The server-kind device the role is being handed to. */
+const handingOver = ref<string | null>(null);
 
 /** The servers linked to this one: its subordinates. */
 const servers = computed(() => devices.value.filter((device) => device.kind === 'server'));
@@ -154,7 +164,7 @@ onMounted(async () => {
 	}
 });
 
-onMounted(async () => {
+async function loadUpstream(): Promise<void> {
 	try {
 		const upstream = await serverApi.upstream();
 		mainName.value = upstream.linked ? (upstream.name ?? '') : null;
@@ -163,7 +173,9 @@ onMounted(async () => {
 		// their own message.
 	}
 	upstreamLoaded.value = true;
-});
+}
+
+onMounted(loadUpstream);
 
 async function loadDevices(): Promise<void> {
 	try {
@@ -186,6 +198,39 @@ async function removeDevice(device: DeviceInfo): Promise<void> {
 
 async function removeServer(device: DeviceInfo): Promise<void> {
 	await remove(device, device.server?.name ?? device.name, 'removeServerText');
+}
+
+/**
+ * "Make it the main" on a linked server: this server hands the role of main
+ * to it, and then syncs through it.
+ */
+async function handOver(device: DeviceInfo): Promise<void> {
+	const server = device.server;
+	if (!server || handingOver.value !== null) return;
+	const question = {
+		title: 'handOverTitle',
+		name: server.name,
+		text: 'handOverText',
+		ok: 'handOverOk',
+	} as const;
+	if (!(await ask(question))) return;
+	handingOver.value = device.id;
+	message.value = info('handingOver');
+	try {
+		const result = await serverApi.handOver(server.serverId);
+		message.value = {
+			key: result.done ? 'handedOver' : 'handOverPending',
+			values: { name: server.name },
+		};
+	} catch (error) {
+		message.value = upstreamError(error);
+		return;
+	} finally {
+		handingOver.value = null;
+	}
+	await loadUpstream();
+	await loadDevices();
+	await rescueFocus();
 }
 
 async function remove(

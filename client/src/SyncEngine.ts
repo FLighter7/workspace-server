@@ -199,6 +199,39 @@ function fallbacksFrom(
 	});
 }
 
+/**
+ * `pairing` moved over to the main the device reached as a fallback: the
+ * main of the family is the server the device pairs with, so that only its
+ * refusals stop sync and the device follows the family through every switch
+ * of its main. The server it paired with before becomes a fallback. The
+ * device id, the token and `lastEtag` stay: every server of the family
+ * admits the same device, and an etag is the document's hash.
+ */
+function movedTo(pairing: Pairing, main: FallbackServer, welcome: Welcome): Pairing {
+	const before: FallbackServer = {
+		serverId: pairing.serverId,
+		name: pairing.name,
+		password: pairing.password,
+		fingerprint: pairing.fingerprint,
+		port: pairing.port,
+		hosts: [...pairing.hosts],
+	};
+	const next: Pairing = {
+		...pairing,
+		serverId: main.serverId,
+		name: welcome.name,
+		password: main.password,
+		fingerprint: main.fingerprint,
+		port: main.port,
+		hosts: [...welcome.hosts],
+	};
+	if (welcome.term) next.term = welcome.term;
+	else delete next.term;
+	const others = (pairing.fallbacks ?? []).filter((server) => server.serverId !== main.serverId);
+
+	return withFallbacks(next, [before, ...others]);
+}
+
 /** `pairing` with `fallbacks` as given; an empty list leaves the field out, as a record from before had it. */
 function withFallbacks(pairing: Pairing, fallbacks: FallbackServer[]): Pairing {
 	const next = { ...pairing };
@@ -465,8 +498,18 @@ export class SyncEngine<DocCode extends string = never> {
 		this.attach(reached.client);
 		this.ready = true;
 		this.connectingIn = null;
-		this.via = reached.server.serverId === pairing.serverId ? null : reached.welcome.name;
-		this.learn(reached.server.serverId, reached.welcome);
+		const { server, welcome } = reached;
+		if (
+			server.serverId !== pairing.serverId &&
+			welcome.role === 'main' &&
+			(welcome.term ?? 0) >= (pairing.term ?? 0)
+		) {
+			// The family's main moved: the device follows it.
+			this.pairing = movedTo(pairing, server, welcome);
+			this.store.save(this.pairing);
+		}
+		this.via = server.serverId === this.pairing?.serverId ? null : welcome.name;
+		this.learn(server.serverId, welcome);
 		await this.requestSync();
 	}
 
@@ -475,9 +518,10 @@ export class SyncEngine<DocCode extends string = never> {
 	 * hello on each. The paired server answering as a main is taken at once.
 	 * Any other answer waits, until `MAIN_GRACE_MS` after the start or until
 	 * every attempt has ended, and then the best one is taken: a main before
-	 * a subordinate, then the paired server, then the list's order. A welcome
-	 * from a server outside the set is not taken (`serverChanged`). The
-	 * clients not taken are closed.
+	 * a subordinate, the higher term among mains (two mains at once, while a
+	 * family is split), then the paired server, then the list's order. A
+	 * welcome from a server outside the set is not taken (`serverChanged`).
+	 * The clients not taken are closed.
 	 *
 	 * Fails with the paired server's own error when no server answered, and
 	 * at once when the paired server refuses with an error that halts: a
@@ -504,6 +548,12 @@ export class SyncEngine<DocCode extends string = never> {
 		/** Lower is better: a main before a subordinate, then the paired server. */
 		const rank = (welcome: Welcome): number =>
 			(welcome.role === 'subordinate' ? 2 : 0) + (welcome.serverId === pairing.serverId ? 0 : 1);
+		/** Whether `a` is better than `b`: by rank, and between two mains by term first. */
+		const better = (a: Welcome, b: Welcome): boolean => {
+			const mains = a.role !== 'subordinate' && b.role !== 'subordinate';
+			if (mains && (a.term ?? 0) !== (b.term ?? 0)) return (a.term ?? 0) > (b.term ?? 0);
+			return rank(a) < rank(b);
+		};
 
 		return new Promise<Reached>((resolve, reject) => {
 			let settled = false;
@@ -545,7 +595,7 @@ export class SyncEngine<DocCode extends string = never> {
 				if (answered.length > 0 && (graceOver || allDone)) {
 					// reduce keeps the first of equal ranks: the list's order.
 					const best = answered.reduce((a, b) =>
-						rank(b.welcome as Welcome) < rank(a.welcome as Welcome) ? b : a,
+						better(b.welcome as Welcome, a.welcome as Welcome) ? b : a,
 					);
 					finish(best, null);
 					return;
@@ -792,7 +842,11 @@ export class SyncEngine<DocCode extends string = never> {
 		const seen = { hosts: welcome.hosts, name: welcome.name };
 		let next: Pairing =
 			serverId === pairing.serverId
-				? { ...pairing, ...seen }
+				? {
+						...pairing,
+						...seen,
+						...(welcome.role === 'main' && welcome.term ? { term: welcome.term } : {}),
+					}
 				: withFallbacks(
 						pairing,
 						(pairing.fallbacks ?? []).map((server) =>

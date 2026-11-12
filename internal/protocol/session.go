@@ -114,24 +114,27 @@ func (s *Session) HandleText(msg string) {
 		return
 	}
 	var f struct {
-		T      string      `json:"t"`
-		Proto  *int        `json:"proto"`
-		App    string      `json:"app"`
-		Device string      `json:"device"`
-		Token  string      `json:"token"`
-		Secret string      `json:"secret"`
-		Name   string      `json:"name"`
-		Kind   *string     `json:"kind"`
-		IfEtag *string     `json:"ifEtag"`
-		Bytes  *int64      `json:"bytes"`
-		Server *ServerInfo `json:"server"`
+		T       string         `json:"t"`
+		Proto   *int           `json:"proto"`
+		App     string         `json:"app"`
+		Device  string         `json:"device"`
+		Token   string         `json:"token"`
+		Secret  string         `json:"secret"`
+		Name    string         `json:"name"`
+		Kind    *string        `json:"kind"`
+		IfEtag  *string        `json:"ifEtag"`
+		Bytes   *int64         `json:"bytes"`
+		Server  *ServerInfo    `json:"server"`
+		Term    *int           `json:"term"`
+		Devices *[]DeviceEntry `json:"devices"`
+		Removed []Tombstone    `json:"removed"`
 	}
 	if err := json.Unmarshal([]byte(msg), &f); err != nil {
 		s.fail(CodeProtocol, "malformed text frame: "+err.Error())
 		return
 	}
 	switch f.T {
-	case "hello", "pair", "head", "get", "put", "forget", "apps", "announce", "invite":
+	case "hello", "pair", "head", "get", "put", "forget", "apps", "announce", "invite", "term":
 	default:
 		s.fail(CodeProtocol, fmt.Sprintf("unknown frame type %q", f.T))
 		return
@@ -213,7 +216,11 @@ func (s *Session) HandleText(msg string) {
 		default:
 			// The backend answers with PushDevices itself, so that the answer
 			// and the pushes leave in the order the registry changed.
-			if e := s.b.Announce(s, *f.Server); e != nil {
+			var handover *Registry
+			if f.Devices != nil {
+				handover = &Registry{Devices: *f.Devices, Removed: f.Removed}
+			}
+			if e := s.b.Announce(s, *f.Server, handover); e != nil {
 				if e.Code == CodeProtocol {
 					s.fail(e.Code, e.Message)
 				} else {
@@ -230,6 +237,24 @@ func (s *Session) HandleText(msg string) {
 		switch {
 		case e == nil:
 			s.queueFrame(invitedFrame{"invited", code, expires.UTC().Format(time.RFC3339)}, nil)
+		case e.Code == CodeProtocol:
+			s.fail(e.Code, e.Message)
+		default:
+			s.reply(e)
+		}
+	case "term":
+		switch {
+		case app != "":
+			s.fail(CodeProtocol, "only a link session may tell a term")
+			return
+		case f.Term == nil || *f.Term < 0 || f.Server == nil:
+			s.fail(CodeProtocol, "term needs a term of 0 or more and a server")
+			return
+		}
+		a, e := s.b.Term(s, *f.Term, *f.Server, f.Device, f.Token)
+		switch {
+		case e == nil:
+			s.queueFrame(termFrame{"term", a.Term, a.Main}, nil)
 		case e.Code == CodeProtocol:
 			s.fail(e.Code, e.Message)
 		default:
@@ -332,7 +357,7 @@ func (s *Session) authenticate(app, device string, w Welcome, paired *pairedFram
 	if hosts == nil {
 		hosts = []string{}
 	}
-	welcome := welcomeFrame{"welcome", Version, w.Role, w.ServerID, w.Name, w.Etag, hosts, nil}
+	welcome := welcomeFrame{"welcome", Version, w.Role, w.Term, w.ServerID, w.Name, w.Etag, hosts, nil}
 	if w.Subordinates != nil {
 		list := serverList(w.Subordinates)
 		welcome.Subordinates = &list
@@ -404,7 +429,8 @@ func (s *Session) PushApps(list []AppInfo) {
 // announce, and again after every change. It never blocks. On a session
 // that is closed or not authenticated it does nothing: only a link session
 // that announced is told the registry.
-func (s *Session) PushDevices(list []DeviceEntry) {
+func (s *Session) PushDevices(reg Registry) {
+	list := reg.Devices
 	if list == nil {
 		list = []DeviceEntry{}
 	}
@@ -413,7 +439,19 @@ func (s *Session) PushDevices(list []DeviceEntry) {
 	if s.closed || s.closing || !s.authenticated {
 		return
 	}
-	s.queueLocked(outgoing{text: encode(devicesFrame{"devices", list})})
+	s.queueLocked(outgoing{text: encode(devicesFrame{"devices", list, reg.Removed})})
+}
+
+// PushTakeOver asks the client, a subordinate on its link session, to
+// become the main of the family. It never blocks. On a session that is
+// closed or not authenticated it does nothing.
+func (s *Session) PushTakeOver() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.closing || !s.authenticated {
+		return
+	}
+	s.queueLocked(outgoing{text: encode(takeOverFrame{"takeOver"})})
 }
 
 // App returns the app the session authenticated for; empty until then,
@@ -687,6 +725,7 @@ type (
 		T            string        `json:"t"`
 		Proto        int           `json:"proto"`
 		Role         string        `json:"role,omitempty"`
+		Term         int           `json:"term,omitempty"`
 		ServerID     string        `json:"serverId"`
 		Name         string        `json:"name"`
 		Etag         *string       `json:"etag"`
@@ -705,6 +744,16 @@ type (
 	devicesFrame struct {
 		T       string        `json:"t"`
 		Devices []DeviceEntry `json:"devices"`
+		Removed []Tombstone   `json:"removed,omitempty"`
+	}
+	// termFrame answers term: the term and the main the server follows.
+	termFrame struct {
+		T    string `json:"t"`
+		Term int    `json:"term"`
+		Main string `json:"main"`
+	}
+	takeOverFrame struct {
+		T string `json:"t"`
 	}
 	// invitedFrame answers invite: a pairing code of this server and when
 	// it expires, in RFC 3339 UTC.

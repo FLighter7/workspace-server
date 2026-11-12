@@ -14,6 +14,10 @@
 // server, which the main hands out to its devices, and keeps the main's
 // device registry, so that this server admits the main's devices, also
 // while the main is out of reach.
+//
+// The link also switches the main (family.go): it makes this server the
+// main of its family, follows a higher main, and, on a main that took the
+// role over, tells the other servers of the family until they follow.
 package upstream
 
 import (
@@ -107,16 +111,31 @@ func (e *RefusedError) Error() string { return "the upstream server: " + e.Err.E
 func (e *RefusedError) Unwrap() error { return e.Err }
 
 // Writer is what the link writes through: the hub, which stores a document
-// and tells this server's sessions, and tells link sessions of this server
-// when its app list changes.
+// and tells this server's sessions, tells link sessions of this server when
+// its app list changes, and changes this server's own devices and sessions
+// when it becomes the main or steps down.
 type Writer interface {
 	Replace(app string, body []byte, ifEtag *string) (string, error)
 	AppsChanged()
+	// Adopt merges a registry of the family into this server's own devices.
+	Adopt(list []devices.Entry, removed []devices.Tombstone, self devices.Self) (bool, error)
+	// ClearDevices forgets this server's own devices, handed over to its main.
+	ClearDevices() error
+	// MintServer gives a server a server-kind device here, and its token.
+	MintServer(s devices.Server) (device, token string, err error)
+	// Linked reports whether the server of that id has a link session here.
+	Linked(serverID string) bool
+	// CloseServers closes the sessions of server-kind devices but except's.
+	CloseServers(except string)
 }
 
 // Deps are what the link works with.
 type Deps struct {
-	Path     string        // upstream.json
+	Path       string // upstream.json
+	FamilyPath string // family.json: a main's term, and whom it waits for
+	// Devices is this server's device registry, which the link reads when it
+	// switches the main; its changes go through Writer.
+	Devices  *devices.Registry
 	ServerID string        // this server's own, to refuse its own code
 	Name     func() string // this server's name, which the main shows
 	Apps     *apps.Registry
@@ -158,9 +177,16 @@ type Status struct {
 	// Stopped lists the apps the write guard stopped, sorted; they do not
 	// sync until the link starts again.
 	Stopped []string `json:"stopped,omitempty"`
-	// Devices counts the main's devices this server admits: the registry
-	// the main last sent.
+	// Devices counts the main's devices of apps this server admits: the
+	// registry the main last sent, without the other servers.
 	Devices int `json:"devices,omitempty"`
+	// Term is the family's term as this server knows it.
+	Term int `json:"term"`
+	// Waiting lists, on a main that took the role over, the servers of the
+	// family it waits for to follow it.
+	Waiting []Waiting `json:"waiting,omitempty"`
+	// Promoting: this server is becoming the main now.
+	Promoting bool `json:"promoting,omitempty"`
 }
 
 // Link is a server's link to its upstream server. It is safe for concurrent
@@ -169,9 +195,11 @@ type Link struct {
 	d Deps
 
 	mu        sync.Mutex
-	st        *state // nil: not linked
+	st        *state  // nil: not linked
+	fam       *family // a main's family.json; nil on a subordinate, and on a main of term 0
 	pairing   bool
 	unlinking bool
+	promoting bool
 	connected bool
 	halted    bool
 	reason    string
@@ -181,13 +209,18 @@ type Link struct {
 	syncing   []string
 	pushes    map[string][]time.Time // per app, its pushes within the guard's window
 	stopped   map[string]bool        // the apps the write guard stopped
+	up        map[string]*string     // per app, the main's etag as last heard
 	cancel    context.CancelFunc
 	closed    bool
 
-	kick     chan struct{} // reconnect now
-	announce chan struct{} // announce again: how devices reach this server changed
-	invites  chan inviteReq
-	wg       sync.WaitGroup
+	watchCancel context.CancelFunc // the family watcher, on a main that waits for servers
+
+	kick      chan struct{} // reconnect now
+	watchKick chan struct{} // the family watcher: try again now
+	announce  chan struct{} // announce again: how devices reach this server changed
+	invites   chan inviteReq
+	wg        sync.WaitGroup
+	bg        sync.WaitGroup // a switch the main asked for (takeOver)
 
 	// localMu guards local alone, so a device's write never waits for the
 	// link's own work under mu (saving upstream.json, say).
@@ -214,14 +247,21 @@ func Open(d Deps) (*Link, error) {
 	if err != nil {
 		return nil, err
 	}
+	var fam *family
+	if st == nil {
+		if fam, err = loadFamily(d.FamilyPath); err != nil {
+			return nil, err
+		}
+	}
 	if st != nil && d.Admit != nil {
 		// Admitted at once, before the main is reached: that is what lets
 		// its devices sync here while it is away.
 		d.Admit(slices.Clone(st.Devices))
 	}
 	return &Link{
-		d: d, st: st, kick: make(chan struct{}, 1), announce: make(chan struct{}, 1), invites: make(chan inviteReq),
-		pushes: map[string][]time.Time{}, stopped: map[string]bool{}, local: map[string]chan struct{}{},
+		d: d, st: st, fam: fam, kick: make(chan struct{}, 1), watchKick: make(chan struct{}, 1),
+		announce: make(chan struct{}, 1), invites: make(chan inviteReq),
+		pushes: map[string][]time.Time{}, stopped: map[string]bool{}, up: map[string]*string{}, local: map[string]chan struct{}{},
 	}, nil
 }
 
@@ -235,13 +275,15 @@ func (l *Link) Role() string {
 	return RoleMain
 }
 
-// Start runs the link, when there is one, until Close.
+// Start runs the link, when there is one, and the family watcher, on a main
+// that waits for servers to follow it, until Close.
 func (l *Link) Start() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.st != nil {
 		l.startLocked()
 	}
+	l.startWatchLocked()
 }
 
 func (l *Link) startLocked() {
@@ -265,21 +307,23 @@ func (l *Link) startLocked() {
 func (l *Link) Close() {
 	l.mu.Lock()
 	l.closed = true
-	cancel := l.cancel
+	cancel, watch := l.cancel, l.watchCancel
 	l.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+	if watch != nil {
+		watch()
+	}
+	l.bg.Wait()
 	l.wg.Wait()
 }
 
 // NetworkChanged tells the link that this server's addresses changed: it
 // reconnects at once, and stops waiting out a backoff.
 func (l *Link) NetworkChanged() {
-	select {
-	case l.kick <- struct{}{}:
-	default:
-	}
+	poke(l.kick)
+	poke(l.watchKick)
 }
 
 // SelfChanged tells the link that how devices reach this server changed
@@ -327,18 +371,24 @@ func poke(ch chan struct{}) {
 func (l *Link) Status() Status {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	st := Status{Linked: l.st != nil, Apps: []string{}}
+	st := Status{Linked: l.st != nil, Apps: []string{}, Promoting: l.promoting}
+	st.Term, _ = l.keyLocked()
 	for _, id := range l.syncing {
 		if !l.stopped[id] {
 			st.Apps = append(st.Apps, id)
 		}
 	}
 	if l.st == nil {
+		st.Waiting = l.waitingLocked()
 		return st
 	}
 	at := l.st.LinkedAt
 	st.ServerID, st.Name, st.Hosts, st.LinkedAt = l.st.ServerID, l.st.Name, append([]string(nil), l.st.Hosts...), &at
-	st.Devices = len(l.st.Devices)
+	for _, d := range l.st.Devices {
+		if !d.IsServer() {
+			st.Devices++
+		}
+	}
 	st.Connected, st.Halted, st.Reason, st.LastError, st.LastSync = l.connected, l.halted, l.reason, l.lastErr, l.lastSync
 	for id := range l.stopped {
 		st.Stopped = append(st.Stopped, id)
@@ -365,7 +415,7 @@ func (l *Link) Pair(ctx context.Context, code string) error {
 	case l.st != nil:
 		l.mu.Unlock()
 		return ErrLinked
-	case l.pairing || l.unlinking:
+	case l.pairing || l.unlinking || l.promoting:
 		l.mu.Unlock()
 		return ErrBusy
 	}
@@ -384,6 +434,17 @@ func (l *Link) Pair(ctx context.Context, code string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.st, l.lastErr = st, ""
+	if l.watchCancel != nil {
+		l.watchCancel()
+		l.watchCancel = nil
+	}
+	if l.fam != nil {
+		// This server joins another family: what it kept of its own goes.
+		l.fam = nil
+		if err := removeFile(l.d.FamilyPath); err != nil {
+			l.d.Logf("delete %s: %v", l.d.FamilyPath, err)
+		}
+	}
 	l.d.Logf("linked to the main %q (%s) as device %s", st.Name, st.ServerID, st.Device)
 	l.startLocked()
 	return nil
@@ -414,7 +475,7 @@ func (l *Link) pair(ctx context.Context, c wsclient.PairingCode) (*state, error)
 		ServerID: w.ServerID, Name: w.Name,
 		Password: c.Password, Fingerprint: c.Fingerprint, Port: c.Port, Hosts: hosts,
 		Device: p.Device, Token: p.Token, LinkedAt: l.d.Now().UTC(),
-		Apps: map[string]appState{},
+		Apps: map[string]appState{}, Term: w.Term,
 	}
 	if err := st.save(l.d.Path); err != nil {
 		return nil, fmt.Errorf("save %s: %w", l.d.Path, err)
@@ -444,7 +505,7 @@ func (l *Link) Unlink(ctx context.Context) (forgotten bool, err error) {
 	case l.st == nil:
 		l.mu.Unlock()
 		return false, ErrNotLinked
-	case l.pairing || l.unlinking || l.closed:
+	case l.pairing || l.unlinking || l.promoting || l.closed:
 		l.mu.Unlock()
 		return false, ErrBusy
 	}
@@ -478,6 +539,7 @@ func (l *Link) Unlink(ctx context.Context) (forgotten bool, err error) {
 	l.syncing = nil
 	clear(l.stopped)
 	clear(l.pushes)
+	clear(l.up)
 	l.mu.Unlock()
 	if l.d.Admit != nil {
 		l.d.Admit(nil)
@@ -582,10 +644,15 @@ func (l *Link) invite(ctx context.Context, cl *wsclient.Client, mainID string) i
 }
 
 // checkWelcome refuses a welcome from a server other than id, or one that is
-// not a main.
+// not a main. A main that answers as a subordinate now stepped down to
+// another main: ReasonMainSteppedDown, after which the link looks for the
+// new main.
 func checkWelcome(w wsclient.Welcome, id string) error {
 	if w.ServerID != id {
 		return &RefusedError{Reason: ReasonServerChanged, Err: fmt.Errorf("another server (%s) answers at the main's addresses", w.ServerID)}
+	}
+	if w.Role == RoleSubordinate {
+		return &RefusedError{Reason: ReasonMainSteppedDown, Err: fmt.Errorf("the main %q stepped down to another main; looking for it among the servers of the family", w.Name)}
 	}
 	if w.Role != RoleMain {
 		role := w.Role
@@ -637,6 +704,18 @@ func (l *Link) run(ctx context.Context) {
 		if halts(err) {
 			l.halt(err)
 			return
+		}
+		var re *RefusedError
+		if errors.As(err, &re) && re.Reason == ReasonMainSteppedDown {
+			l.failed(err)
+			l.setReason(ReasonMainSteppedDown)
+			if l.findMain(ctx) {
+				l.setReason("")
+				delay = l.d.MinBackoff
+				continue
+			}
+		} else {
+			l.setReason("")
 		}
 		kicked := errors.Is(err, errKicked)
 		if !kicked {
@@ -692,6 +771,16 @@ func (l *Link) halt(err error) {
 	}
 }
 
+// setReason records why the link is not connected while it is not halted:
+// ReasonMainSteppedDown while it looks for the new main, "" otherwise.
+func (l *Link) setReason(reason string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.halted {
+		l.reason = reason
+	}
+}
+
 func (l *Link) failed(err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -719,8 +808,10 @@ func (l *Link) session(ctx context.Context) error {
 	defer cl.Close()
 	lists := make(chan []wsclient.App, 1)
 	cl.OnApps(func(list []wsclient.App) { latest(lists, list) })
-	registries := make(chan []wsclient.Device, 1)
-	cl.OnDevices(func(list []wsclient.Device) { latest(registries, list) })
+	registries := make(chan wsclient.Registry, 1)
+	cl.OnDevices(func(reg wsclient.Registry) { latest(registries, reg) })
+	takeOvers := make(chan struct{}, 1)
+	cl.OnTakeOver(func() { poke(takeOvers) })
 	w, err := cl.Hello(ctx, st.Device, st.Token)
 	if err != nil {
 		return refused(err)
@@ -729,6 +820,7 @@ func (l *Link) session(ctx context.Context) error {
 		return err
 	}
 	l.keepHosts(w.Hosts)
+	l.keepTerm(w.Term)
 	if _, err := cl.Apps(ctx); err != nil {
 		return refused(err)
 	}
@@ -740,8 +832,28 @@ func (l *Link) session(ctx context.Context) error {
 		case <-l.announce:
 		default:
 		}
-		if _, err := cl.Announce(ctx, l.d.Self()); err != nil {
+		// A server that stepped down hands its own registry over, once.
+		var handover *wsclient.Registry
+		if st.Handover && l.d.Devices != nil {
+			handover = l.ownRegistry()
+		}
+		reg, err := cl.Announce(ctx, l.d.Self(), handover)
+		if err != nil {
 			return refused(err)
+		}
+		if handover != nil {
+			l.replicate(reg)
+			if err := l.d.Writer.ClearDevices(); err != nil {
+				l.d.Logf("forget this server's own devices, handed over to the main: %v", err)
+			} else {
+				l.mu.Lock()
+				if l.st != nil {
+					l.st.Handover = false
+					l.saveLocked()
+				}
+				l.mu.Unlock()
+				l.d.Logf("this server's own devices are the main's now (%d devices, %d removed)", len(handover.Devices), len(handover.Removed))
+			}
 		}
 	}
 	l.setConnected(true)
@@ -775,13 +887,25 @@ func (l *Link) session(ctx context.Context) error {
 				}
 			}
 			l.setSyncing(want)
-		case list := <-registries:
-			l.replicate(list)
+		case reg := <-registries:
+			l.replicate(reg)
+		case <-takeOvers:
+			// The main hands its role to this server: a planned switch,
+			// beside the link, which it stops.
+			l.bg.Go(func() {
+				followed, err := l.Promote(context.Background(), false)
+				switch {
+				case err != nil:
+					l.d.Logf("the main asked this server to become the main, which failed: %v", err)
+				case !followed:
+					l.d.Logf("the main asked this server to become the main; the former main had not followed yet")
+				}
+			})
 		case <-l.announce:
 			if !announces {
 				continue
 			}
-			if _, err := cl.Announce(ctx, l.d.Self()); err != nil {
+			if _, err := cl.Announce(ctx, l.d.Self(), nil); err != nil {
 				return refused(err)
 			}
 		case req := <-l.invites:
@@ -817,23 +941,16 @@ func latest[T any](ch chan T, v T) {
 
 // replicate keeps the main's device registry: in upstream.json, so that a
 // restart still admits the main's devices while the main is out of reach,
-// and with Admit. An entry that is not valid is left out.
-func (l *Link) replicate(list []wsclient.Device) {
-	entries := make([]devices.Entry, 0, len(list))
-	for _, d := range list {
-		e := devices.Entry(d)
-		if err := e.Validate(); err != nil {
-			l.d.Logf("the main's device %q is left out: %v", d.ID, err)
-			continue
-		}
-		entries = append(entries, e)
-	}
+// and should this server become the main, and with Admit. An entry that is
+// not valid is left out.
+func (l *Link) replicate(reg wsclient.Registry) {
+	entries, removed := l.toEntries(reg)
 	l.mu.Lock()
-	if slices.Equal(l.st.Devices, entries) {
+	if l.st == nil || (devices.Same(l.st.Devices, entries) && slices.Equal(l.st.Removed, removed)) {
 		l.mu.Unlock()
 		return
 	}
-	l.st.Devices = entries
+	l.st.Devices, l.st.Removed = entries, removed
 	l.saveLocked()
 	l.d.Logf("the main's device registry: %d devices admitted here", len(entries))
 	l.mu.Unlock()
@@ -954,8 +1071,10 @@ func (l *Link) appSession(ctx context.Context, app string) error {
 	case <-local:
 	default:
 	}
+	l.setUp(app, w.Etag)
 	up, err := l.sync(ctx, cl, app, w.Etag)
 	for err == nil {
+		l.setUp(app, up)
 		select {
 		case etag := <-changed:
 			up = &etag
@@ -970,6 +1089,7 @@ func (l *Link) appSession(ctx context.Context, app string) error {
 		case <-ctx.Done():
 			return nil
 		}
+		l.setUp(app, up)
 		up, err = l.sync(ctx, cl, app, up)
 	}
 	return err

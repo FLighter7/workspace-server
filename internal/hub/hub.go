@@ -10,6 +10,13 @@
 // link session a subordinate announces how devices reach it, which a main
 // lists in every welcome, and is told the device registry, again whenever it
 // changes. A subordinate pairs nothing: devices pair with its main.
+//
+// The servers of a family reach one another to settle which of them is the
+// main (docs/architecture.md, "Switching the main"): a link session may tell
+// a term, which the hub hands to Deps.Follow, and a main may ask one of its
+// subordinates to take its role over (TakeOver). A server-kind device of the
+// replica, another subordinate of the same main, is admitted to link
+// sessions for that alone.
 package hub
 
 import (
@@ -65,7 +72,24 @@ type Deps struct {
 	// previous one). A subordinate asks for one over its link session
 	// (invite), for a browser on its own computer.
 	Invite func() (code string, expires time.Time, err error)
+	// Term, if set, is the family's term as this server knows it, read at
+	// every welcome. Unset means 0.
+	Term func() int
+	// Follow, if set, is told a term frame from the link session of the
+	// server-kind device sender: the sender is the main of the family at
+	// term, reached at server, and device and token, when given, are a
+	// credential for this server there. It decides whether this server
+	// follows the sender, must not wait for the network, and returns the
+	// term and main this server follows then. An error is a term this
+	// server cannot act on (a protocol error to the sender).
+	Follow func(sender string, term int, server protocol.ServerInfo, device, token string) (protocol.TermAnswer, error)
 }
+
+// Errors of TakeOver.
+var (
+	ErrNoSuchServer = errors.New("no server of that id is linked to this one")
+	ErrNotConnected = errors.New("that server is not connected to this one now")
+)
 
 // SessionInfo describes one authenticated session. App is empty for a link
 // session.
@@ -75,11 +99,14 @@ type SessionInfo struct{ App, Device, Remote string }
 // registration and never reads it back from the session. app is empty on a
 // link session; server marks a session of a server-kind device; registry
 // marks a link session that announced itself, which is told the device
-// registry on every change.
+// registry on every change; family marks the link session of a server-kind
+// device of the replica (another server of this server's family), which may
+// only tell a term.
 type member struct {
 	app, device string
 	server      bool
 	registry    bool
+	family      bool
 }
 
 // Hub routes the sessions of all apps. It is safe for concurrent use.
@@ -171,10 +198,11 @@ func (h *Hub) admitLink(s *protocol.Session, app, device, token string) *protoco
 	}
 	h.servers.RLock()
 	defer h.servers.RUnlock()
-	if _, ok := h.d.Devices.Authenticate("", device, token); !ok {
+	d, ok := h.d.Devices.Authenticate("", device, token)
+	if !ok {
 		return errBadToken()
 	}
-	h.register(s, member{device: device, server: true})
+	h.register(s, member{device: device, server: true, family: d.Replica})
 	return nil
 }
 
@@ -250,8 +278,10 @@ func (h *Hub) pairServer(s *protocol.Session, ip, secret, name string) (string, 
 	w, e := h.welcome(s, "")
 	if e != nil {
 		h.d.Devices.Remove(d.ID)
+		h.DevicesChanged()
 		return "", "", protocol.Welcome{}, e
 	}
+	h.DevicesChanged()
 	return d.ID, token, w, nil
 }
 
@@ -268,11 +298,19 @@ func (h *Hub) welcome(s *protocol.Session, app string) (protocol.Welcome, *proto
 			return protocol.Welcome{}, e
 		}
 	}
-	w := protocol.Welcome{ServerID: h.d.ServerID, Name: h.d.Name(), Etag: etag, Hosts: h.d.Hosts(), Role: h.role()}
+	w := protocol.Welcome{ServerID: h.d.ServerID, Name: h.d.Name(), Etag: etag, Hosts: h.d.Hosts(), Role: h.role(), Term: h.term()}
 	if w.Role == protocol.RoleMain {
 		w.Subordinates = h.subordinates()
 	}
 	return w, nil
+}
+
+// term is the family's term as this server knows it now.
+func (h *Hub) term() int {
+	if h.d.Term != nil {
+		return h.d.Term()
+	}
+	return 0
 }
 
 // role is the server's role now.
@@ -329,8 +367,8 @@ func (h *Hub) Apps(s *protocol.Session) ([]protocol.AppInfo, *protocol.Error) {
 	h.mu.Lock()
 	m, ok := h.sessions[s]
 	h.mu.Unlock()
-	if !ok || !m.server {
-		return nil, &protocol.Error{Code: protocol.CodeProtocol, Message: "only a server may ask for the app list"}
+	if !ok || !m.server || m.family {
+		return nil, &protocol.Error{Code: protocol.CodeProtocol, Message: "only a server linked to this one may ask for the app list"}
 	}
 	return h.appList(), nil
 }
@@ -341,22 +379,25 @@ func (h *Hub) AppsChanged() {
 	h.appsMu.Lock()
 	defer h.appsMu.Unlock()
 	list := h.appList()
-	for _, s := range h.registered(func(m member) bool { return m.server && m.app == "" }) {
+	for _, s := range h.registered(func(m member) bool { return m.server && m.app == "" && !m.family }) {
 		s.PushApps(list)
 	}
 }
 
 // Announce keeps how devices reach the subordinate whose link session s is,
 // and answers with the device registry, which s is told again on every
-// change from now on. Only a link session of a server-kind device may
-// announce; a server that is not valid, or this server's own id, is a
-// protocol error, which closes the session.
-func (h *Hub) Announce(s *protocol.Session, server protocol.ServerInfo) *protocol.Error {
+// change from now on. handover, when not nil, is the subordinate's own
+// registry: it was a main and stepped down to this one, and this server
+// takes its devices and removals over (devices.Registry.Merge). Only a link
+// session of a server-kind device may announce; a server that is not valid,
+// or this server's own id, is a protocol error, which closes the session,
+// and so is a handover to a subordinate.
+func (h *Hub) Announce(s *protocol.Session, server protocol.ServerInfo, handover *protocol.Registry) *protocol.Error {
 	h.mu.Lock()
 	m, ok := h.sessions[s]
 	h.mu.Unlock()
-	if !ok || !m.server || m.app != "" {
-		return &protocol.Error{Code: protocol.CodeProtocol, Message: "only a server's link session may announce"}
+	if !ok || !m.server || m.app != "" || m.family {
+		return &protocol.Error{Code: protocol.CodeProtocol, Message: "only the link session of a server linked to this one may announce"}
 	}
 	if server.ServerID == h.d.ServerID {
 		return &protocol.Error{Code: protocol.CodeProtocol, Message: "a server cannot be its own subordinate"}
@@ -364,6 +405,9 @@ func (h *Hub) Announce(s *protocol.Session, server protocol.ServerInfo) *protoco
 	si := devices.Server(server)
 	if err := si.Validate(); err != nil {
 		return &protocol.Error{Code: protocol.CodeProtocol, Message: "announce: " + err.Error()}
+	}
+	if handover != nil && h.role() != protocol.RoleMain {
+		return &protocol.Error{Code: protocol.CodeProtocol, Message: "only a main takes a registry over"}
 	}
 	// Under servers, which the removal of a server-kind device holds: a
 	// device removed meanwhile is not written back.
@@ -376,9 +420,20 @@ func (h *Hub) Announce(s *protocol.Session, server protocol.ServerInfo) *protoco
 	if changed {
 		h.d.Logf("the subordinate %q (%s) is reached at port %d, hosts %v", si.Name, si.ServerID, si.Port, si.Hosts)
 	}
+	if handover != nil {
+		list, removed, err := fromWire(*handover)
+		if err != nil {
+			return &protocol.Error{Code: protocol.CodeProtocol, Message: "announce: " + err.Error()}
+		}
+		merged, err := h.Adopt(list, removed, devices.Self{ServerID: h.d.ServerID})
+		if err != nil {
+			return h.errInternal(err)
+		}
+		h.d.Logf("the subordinate %q (%s) was a main: its registry (%d devices, %d removed) is merged into this one's", si.Name, si.ServerID, len(list), len(removed))
+		changed = changed || merged
+	}
 
 	h.devicesMu.Lock()
-	defer h.devicesMu.Unlock()
 	h.mu.Lock()
 	m, ok = h.sessions[s]
 	if ok {
@@ -386,10 +441,92 @@ func (h *Hub) Announce(s *protocol.Session, server protocol.ServerInfo) *protoco
 		h.sessions[s] = m
 	}
 	h.mu.Unlock()
-	if ok { // a session closed meanwhile is told nothing
+	h.devicesMu.Unlock()
+	switch {
+	case changed:
+		// Every subordinate keeps the others' connection data: the answer
+		// goes to s with the push to all.
+		h.DevicesChanged()
+	case ok: // a session closed meanwhile is told nothing
+		h.devicesMu.Lock()
 		s.PushDevices(h.registry())
+		h.devicesMu.Unlock()
 	}
 	return nil
+}
+
+// fromWire reads a registry as it travels.
+func fromWire(reg protocol.Registry) ([]devices.Entry, []devices.Tombstone, error) {
+	list := make([]devices.Entry, 0, len(reg.Devices))
+	for _, d := range reg.Devices {
+		e := devices.Entry{ID: d.ID, App: d.App, Kind: d.Kind, Name: d.Name, TokenHash: d.TokenHash}
+		if d.PairedAt != "" {
+			at, err := time.Parse(time.RFC3339, d.PairedAt)
+			if err != nil {
+				return nil, nil, fmt.Errorf("device %q: pairedAt: %v", d.ID, err)
+			}
+			e.PairedAt = at
+		}
+		if d.Server != nil {
+			si := devices.Server(*d.Server)
+			e.Server = &si
+		}
+		list = append(list, e)
+	}
+	removed := make([]devices.Tombstone, 0, len(reg.Removed))
+	for _, t := range reg.Removed {
+		at, err := time.Parse(time.RFC3339, t.At)
+		if err != nil {
+			return nil, nil, fmt.Errorf("removed %q: at: %v", t.ID, err)
+		}
+		removed = append(removed, devices.Tombstone{ID: t.ID, At: at})
+	}
+	return list, removed, nil
+}
+
+// ToWire is a registry as it travels.
+func ToWire(list []devices.Entry, removed []devices.Tombstone) protocol.Registry {
+	out := protocol.Registry{Devices: make([]protocol.DeviceEntry, 0, len(list))}
+	for _, e := range list {
+		d := protocol.DeviceEntry{ID: e.ID, App: e.App, Kind: e.Kind, Name: e.Name, TokenHash: e.TokenHash}
+		if !e.PairedAt.IsZero() {
+			d.PairedAt = e.PairedAt.UTC().Format(time.RFC3339)
+		}
+		if e.Server != nil {
+			si := protocol.ServerInfo(*e.Server)
+			d.Server = &si
+		}
+		out.Devices = append(out.Devices, d)
+	}
+	for _, t := range removed {
+		out.Removed = append(out.Removed, protocol.Tombstone{ID: t.ID, At: t.At.UTC().Format(time.RFC3339)})
+	}
+	return out
+}
+
+// Term hands a term frame from the link session s to Deps.Follow: the
+// sender says it is the main of the family. Only a link session of a
+// server-kind device may tell one: this server's subordinate, or another
+// server of its family; any other session gets a protocol error, which
+// closes it.
+func (h *Hub) Term(s *protocol.Session, term int, server protocol.ServerInfo, device, token string) (protocol.TermAnswer, *protocol.Error) {
+	h.mu.Lock()
+	m, ok := h.sessions[s]
+	h.mu.Unlock()
+	if !ok || !m.server || m.app != "" {
+		return protocol.TermAnswer{}, &protocol.Error{Code: protocol.CodeProtocol, Message: "only a server's link session may tell a term"}
+	}
+	if err := devices.Server(server).Validate(); err != nil || server.ServerID == h.d.ServerID {
+		return protocol.TermAnswer{}, &protocol.Error{Code: protocol.CodeProtocol, Message: "term: the server is not valid, or is this one"}
+	}
+	if h.d.Follow == nil {
+		return protocol.TermAnswer{Term: h.term(), Main: h.d.ServerID}, nil
+	}
+	a, err := h.d.Follow(m.device, term, server, device, token)
+	if err != nil {
+		return protocol.TermAnswer{}, &protocol.Error{Code: protocol.CodeProtocol, Message: "term: " + err.Error()}
+	}
+	return a, nil
 }
 
 // Invite issues a pairing code of this server for the subordinate whose link
@@ -403,8 +540,8 @@ func (h *Hub) Invite(s *protocol.Session) (string, time.Time, *protocol.Error) {
 	h.mu.Lock()
 	m, ok := h.sessions[s]
 	h.mu.Unlock()
-	if !ok || !m.server || m.app != "" {
-		return "", time.Time{}, &protocol.Error{Code: protocol.CodeProtocol, Message: "only a server's link session may ask for a pairing code"}
+	if !ok || !m.server || m.app != "" || m.family {
+		return "", time.Time{}, &protocol.Error{Code: protocol.CodeProtocol, Message: "only the link session of a server linked to this one may ask for a pairing code"}
 	}
 	if h.role() == protocol.RoleSubordinate {
 		return "", time.Time{}, errNotMain()
@@ -449,30 +586,125 @@ func (h *Hub) Replicate(list []devices.Entry) {
 	h.servers.Lock()
 	before := h.d.Devices.Replica()
 	h.d.Devices.SetReplica(list)
-	kept := map[devices.Entry]bool{}
+	kept := map[[4]string]bool{}
 	for _, e := range h.d.Devices.Replica() {
-		kept[e] = true
+		kept[admission(e)] = true
 	}
 	gone := map[string]bool{}
 	for _, e := range before {
-		if d, ok := h.d.Devices.Get(e.ID); !kept[e] && (!ok || d.Replica) {
+		if d, ok := h.d.Devices.Get(e.ID); !kept[admission(e)] && (!ok || d.Replica) {
 			gone[e.ID] = true // an own device with that id keeps its sessions
 		}
 	}
-	targets := h.registered(func(m member) bool { return !m.server && gone[m.device] })
+	targets := h.registered(func(m member) bool { return (!m.server || m.family) && gone[m.device] })
 	h.servers.Unlock()
 	closeAll(targets)
 }
 
-// registry is the device registry a main tells its subordinates: its own
-// devices of apps, with their token hashes.
-func (h *Hub) registry() []protocol.DeviceEntry {
-	list := h.d.Devices.Entries()
-	out := make([]protocol.DeviceEntry, 0, len(list))
-	for _, e := range list {
-		out = append(out, protocol.DeviceEntry(e))
+func admission(e devices.Entry) [4]string { return [4]string{e.ID, e.App, e.Kind, e.TokenHash} }
+
+// Adopt merges list and removed, a registry of the family, into this
+// server's own devices (devices.Registry.Merge), closes the sessions of the
+// devices it drops, and tells the link sessions the new registry. A
+// subordinate becoming the main adopts its main's registry so; a main takes
+// over the registry of a main that stepped down to it. It reports whether
+// the registry changed.
+func (h *Hub) Adopt(list []devices.Entry, removed []devices.Tombstone, self devices.Self) (bool, error) {
+	h.servers.Lock()
+	before := len(h.d.Devices.Entries()) + len(h.d.Devices.Removed())
+	dropped, err := h.d.Devices.Merge(list, removed, self)
+	after := len(h.d.Devices.Entries()) + len(h.d.Devices.Removed())
+	gone := map[string]bool{}
+	for _, d := range dropped {
+		gone[d.ID] = true
 	}
-	return out
+	targets := h.registered(func(m member) bool { return gone[m.device] })
+	h.servers.Unlock()
+	closeAll(targets)
+	if err != nil {
+		return false, err
+	}
+	changed := before != after || len(dropped) > 0
+	if changed {
+		h.DevicesChanged()
+	}
+	return changed, nil
+}
+
+// ClearDevices forgets this server's own devices once it has handed them
+// over to the main it now follows (devices.Registry.Clear), and closes the
+// sessions of those this server no longer admits on the main's word either.
+func (h *Hub) ClearDevices() error {
+	h.servers.Lock()
+	err := h.d.Devices.Clear()
+	targets := h.registered(func(m member) bool {
+		_, ok := h.d.Devices.Get(m.device)
+		return !ok
+	})
+	h.servers.Unlock()
+	closeAll(targets)
+	return err
+}
+
+// MintServer gives the server s a server-kind device here and returns the
+// device's id and its new token (devices.Registry.MintServer), and tells the
+// link sessions the new registry.
+func (h *Hub) MintServer(s devices.Server) (string, string, error) {
+	h.servers.RLock()
+	d, token, err := h.d.Devices.MintServer(s)
+	h.servers.RUnlock()
+	if err != nil {
+		return "", "", err
+	}
+	h.DevicesChanged()
+	return d.ID, token, nil
+}
+
+// Linked reports whether the server serverID is linked to this one now: a
+// server-kind device of this server's own with that id has a link session.
+func (h *Hub) Linked(serverID string) bool {
+	id := h.serverDevice(serverID)
+	if id == "" {
+		return false
+	}
+	return len(h.registered(func(m member) bool { return m.device == id && m.server && m.app == "" && !m.family })) > 0
+}
+
+// serverDevice is the id of this server's own server-kind device for the
+// server serverID, "" when there is none.
+func (h *Hub) serverDevice(serverID string) string {
+	for _, d := range h.d.Devices.List() {
+		if d.IsServer() && d.Server != nil && d.Server.ServerID == serverID {
+			return d.ID
+		}
+	}
+	return ""
+}
+
+// TakeOver asks the server serverID, a subordinate linked to this one, over
+// its link session, to become the main of the family (takeOver). It is
+// ErrNoSuchServer when no server-kind device here has that id, and
+// ErrNotConnected when it has no link session now.
+func (h *Hub) TakeOver(serverID string) error {
+	id := h.serverDevice(serverID)
+	if id == "" {
+		return ErrNoSuchServer
+	}
+	sessions := h.registered(func(m member) bool { return m.device == id && m.server && m.app == "" && !m.family })
+	if len(sessions) == 0 {
+		return ErrNotConnected
+	}
+	for _, s := range sessions {
+		s.PushTakeOver()
+	}
+	return nil
+}
+
+// registry is the device registry a main tells its subordinates: its own
+// devices, server-kind devices included, with their token hashes, and the
+// devices removed.
+func (h *Hub) registry() protocol.Registry {
+	return ToWire(h.d.Devices.Entries(), h.d.Devices.Removed())
 }
 
 // appList is the listed apps, sorted by id.
@@ -612,6 +844,9 @@ func (h *Hub) RemoveDevice(id string) bool {
 		targets := h.registered(func(m member) bool { return m.device == id })
 		h.servers.Unlock()
 		closeAll(targets)
+		if removed {
+			h.DevicesChanged()
+		}
 		return removed
 	}
 	l := h.appLock(d.App)
@@ -824,10 +1059,12 @@ func (l *limiter) pruneLocked(now time.Time) {
 	}
 }
 
-// CloseServers closes every session of a server-kind device. The server
-// calls it when it becomes a subordinate itself: its subordinates reconnect,
-// read the new role in the welcome, and stop, since only a main may be an
-// upstream.
-func (h *Hub) CloseServers() {
-	closeAll(h.registered(func(m member) bool { return m.server }))
+// CloseServers closes every session of a server-kind device but those of
+// the device except. The server calls it when it becomes a subordinate
+// itself: its subordinates reconnect, read the new role in the welcome, and
+// look for the main (or stop, when this server was linked by hand), since
+// only a main may be an upstream. except is the server that told this one
+// to step down, whose answer must still leave.
+func (h *Hub) CloseServers(except string) {
+	closeAll(h.registered(func(m member) bool { return m.server && m.device != except }))
 }

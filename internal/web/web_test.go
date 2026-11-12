@@ -76,6 +76,13 @@ type fakeBackend struct {
 	forgotten bool
 	invites   int
 	inviteErr error
+
+	promotes    []bool // force, per call
+	promoteErr  error
+	followed    bool
+	handOvers   []string
+	handOverErr error
+	handedOver  bool
 }
 
 func (f *fakeBackend) record(call string) {
@@ -101,6 +108,22 @@ func (f *fakeBackend) UnlinkUpstream(ctx context.Context) (bool, error) {
 		return false, errors.New("no deadline")
 	}
 	return f.forgotten, f.unlinkErr
+}
+
+func (f *fakeBackend) PromoteUpstream(ctx context.Context, force bool) (bool, error) {
+	f.promotes = append(f.promotes, force)
+	if _, ok := ctx.Deadline(); !ok {
+		return false, errors.New("no deadline")
+	}
+	return f.followed, f.promoteErr
+}
+
+func (f *fakeBackend) HandOver(ctx context.Context, serverID string) (bool, error) {
+	f.handOvers = append(f.handOvers, serverID)
+	if _, ok := ctx.Deadline(); !ok {
+		return false, errors.New("no deadline")
+	}
+	return f.handedOver, f.handOverErr
 }
 
 func (f *fakeBackend) InviteUpstream(ctx context.Context) (string, time.Time, error) {
@@ -911,8 +934,8 @@ func TestJSONShape(t *testing.T) {
 	}
 
 	for path, want := range map[string][]string{
-		"/api/status":   {"addresses", "dataDir", "httpPort", "lastError", "listening", "mainServer", "mdnsName", "mdnsRunning", "name", "program", "role", "serverDir", "serverId", "udpPort"},
-		"/api/upstream": {"apps", "connected", "halted", "linked", "subordinates"},
+		"/api/status":   {"addresses", "dataDir", "httpPort", "lastError", "listening", "mainServer", "mdnsName", "mdnsRunning", "name", "program", "role", "serverDir", "serverId", "term", "udpPort"},
+		"/api/upstream": {"apps", "connected", "halted", "linked", "subordinates", "term"},
 	} {
 		if got := keysOf(t, getObject(path)); !reflect.DeepEqual(got, want) {
 			t.Errorf("GET %s keys = %v, want %v", path, got, want)
@@ -1188,7 +1211,7 @@ func TestLinkUpstream(t *testing.T) {
 
 	w := serve(h, request(http.MethodGet, "/api/upstream", ""))
 	wantStatus(t, w, http.StatusOK)
-	if got := strings.TrimSpace(w.Body.String()); got != `{"linked":false,"connected":false,"halted":false,"apps":[],"subordinates":0}` {
+	if got := strings.TrimSpace(w.Body.String()); got != `{"linked":false,"connected":false,"halted":false,"apps":[],"term":0,"subordinates":0}` {
 		t.Errorf("GET /api/upstream before a link = %s", got)
 	}
 
@@ -1280,6 +1303,63 @@ func TestUnlinkAndInvite(t *testing.T) {
 	var body struct{ Reason string }
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body.Reason != "unreachable" {
 		t.Errorf("refusal %s, want reason unreachable", w.Body.String())
+	}
+}
+
+// Switching the main from the page: "Make this server the main", planned or
+// forced, and "Hand the role to…" on a main.
+func TestPromoteAndHandOver(t *testing.T) {
+	f := newFake()
+	h := newTestHandler(f)
+
+	f.followed = true
+	w := serve(h, request(http.MethodPost, "/api/upstream/promote", `{}`))
+	wantStatus(t, w, http.StatusOK)
+	if got := strings.TrimSpace(w.Body.String()); got != `{"followed":true}` {
+		t.Errorf("POST /api/upstream/promote = %s", got)
+	}
+	f.followed = false
+	w = serve(h, request(http.MethodPost, "/api/upstream/promote", `{"force":true}`))
+	wantStatus(t, w, http.StatusOK)
+	if got := strings.TrimSpace(w.Body.String()); got != `{"followed":false}` {
+		t.Errorf("POST /api/upstream/promote (forced) = %s", got)
+	}
+	if !slices.Equal(f.promotes, []bool{false, true}) {
+		t.Errorf("promotes %v, want planned then forced", f.promotes)
+	}
+	for _, tc := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{upstream.ErrNotLinked, http.StatusConflict, "notLinked"},
+		{upstream.ErrBusy, http.StatusConflict, "busy"},
+		{upstream.ErrNotInStep, http.StatusConflict, "notInStep"},
+		{&upstream.RefusedError{Reason: upstream.ReasonUnreachable, Err: errors.New("away")}, http.StatusBadGateway, "upstream"},
+		{errors.New("disk"), http.StatusInternalServerError, "internal"},
+	} {
+		f.promoteErr = tc.err
+		wantError(t, serve(h, request(http.MethodPost, "/api/upstream/promote", `{}`)), tc.status, tc.code)
+	}
+
+	f.handedOver = true
+	w = serve(h, request(http.MethodPost, "/api/upstream/hand-over", `{"serverId":"Lp7tOp0123ab"}`))
+	wantStatus(t, w, http.StatusOK)
+	if got := strings.TrimSpace(w.Body.String()); got != `{"done":true}` || !slices.Equal(f.handOvers, []string{"Lp7tOp0123ab"}) {
+		t.Errorf("POST /api/upstream/hand-over = %s, calls %v", got, f.handOvers)
+	}
+	for _, tc := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{ErrNotMain, http.StatusConflict, "notMain"},
+		{ErrNoSuchServer, http.StatusNotFound, "notFound"},
+		{ErrNotConnected, http.StatusConflict, "notConnected"},
+		{errors.New("disk"), http.StatusInternalServerError, "internal"},
+	} {
+		f.handOverErr = tc.err
+		wantError(t, serve(h, request(http.MethodPost, "/api/upstream/hand-over", `{"serverId":"Lp7tOp0123ab"}`)), tc.status, tc.code)
 	}
 }
 

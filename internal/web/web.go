@@ -41,6 +41,7 @@ type Status struct {
 	MainServer  bool     `json:"mainServer"` // the default server folder: owns autostart and the program file
 	LastError   string   `json:"lastError"`  // why the last reset or data move failed; "" when none did
 	Role        string   `json:"role"`       // "main", or "subordinate" while linked to an upstream server
+	Term        int      `json:"term"`       // the family's term (see docs/architecture.md, "Switching the main")
 }
 
 // DataDirCheck is what changing the data folder to Path would do. Verdict is
@@ -76,6 +77,11 @@ var (
 	// ErrHasSubordinates: other servers are linked to this one, so it does
 	// not link to another main.
 	ErrHasSubordinates = errors.New("other servers are linked to this one; remove them before linking it to another main")
+	// ErrNoSuchServer: no server of that id is linked to this one.
+	ErrNoSuchServer = errors.New("no server of that id is linked to this one")
+	// ErrNotConnected: the server is linked to this one but not connected
+	// now.
+	ErrNotConnected = errors.New("that server is not connected to this one now")
 )
 
 // AppInfo is a served app and the state of its data.
@@ -186,6 +192,18 @@ type Backend interface {
 	// upstream.ErrNotLinked, or are an *upstream.RefusedError, or are
 	// internal.
 	InviteUpstream(ctx context.Context) (code string, expires time.Time, err error)
+	// PromoteUpstream makes this server, a subordinate, the main of its
+	// family. planned (force false) needs the main reachable and the
+	// documents the same on both, and reports whether the former main
+	// followed; forced changes this server alone. Its errors wrap
+	// upstream.ErrNotLinked, ErrBusy or ErrNotInStep, or are an
+	// *upstream.RefusedError, or are internal.
+	PromoteUpstream(ctx context.Context, force bool) (followed bool, err error)
+	// HandOver asks the subordinate serverID to take the role of main over,
+	// and reports whether this server stepped down to it in time. Its
+	// errors wrap ErrNotMain, ErrNoSuchServer or ErrNotConnected, or are
+	// internal.
+	HandOver(ctx context.Context, serverID string) (done bool, err error)
 }
 
 //go:embed all:ui
@@ -235,6 +253,8 @@ func newHandler(b Backend, port func() int, now func() time.Time, ui fs.FS) http
 	mux.HandleFunc("POST /api/upstream", a.linkUpstream)
 	mux.HandleFunc("DELETE /api/upstream", a.unlinkUpstream)
 	mux.HandleFunc("POST /api/upstream/invite", a.inviteUpstream)
+	mux.HandleFunc("POST /api/upstream/promote", a.promoteUpstream)
+	mux.HandleFunc("POST /api/upstream/hand-over", a.handOver)
 	return guard(port, jsonErrors(mux))
 }
 

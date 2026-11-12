@@ -21,6 +21,12 @@ export interface Welcome {
 	 */
 	role?: string;
 	/**
+	 * The family's term: it goes up by one every time a subordinate becomes
+	 * the main, and the higher term wins. Absent from a server whose family
+	 * never switched its main, and from a server from before terms: 0.
+	 */
+	term?: number;
+	/**
 	 * A main's subordinates, which serve its devices too: absent from a
 	 * subordinate and from a server from before subordinates, `[]` from a
 	 * main without any. An entry this client cannot read is left out.
@@ -73,6 +79,9 @@ function readWelcome(frame: Frame): Welcome {
 
 	const welcome: Welcome = { serverId, name, etag, hosts: [...hosts] as string[] };
 	if (typeof frame.role === 'string') welcome.role = frame.role;
+	if (typeof frame.term === 'number' && Number.isSafeInteger(frame.term) && frame.term >= 0) {
+		welcome.term = frame.term;
+	}
 	if (Array.isArray(frame.subordinates)) {
 		welcome.subordinates = frame.subordinates
 			.map(readFallbackServer)

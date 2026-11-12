@@ -42,6 +42,7 @@ const asMain: UpstreamStatus = {
 	halted: false,
 	apps: [],
 	subordinates: 1,
+	term: 0,
 };
 
 const text = (): string => document.body.textContent ?? '';
@@ -109,12 +110,39 @@ describe('DevicesSection on a main', () => {
 		expect(remove).toHaveBeenCalledWith('Server0000000001');
 	});
 
+	it('hands the role of main to a linked server, after a question', async () => {
+		const handOver = vi.spyOn(serverApi, 'handOver').mockResolvedValue({ done: true });
+		mountPage(Page);
+		await settle();
+		button('Make it the main').click();
+		await settle();
+		const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+		expect(dialog.textContent).toContain('Make Laptop the main?');
+		expect(dialog.textContent).toContain('Devices follow by themselves, without pairing again.');
+		button('Make it the main', dialog).click();
+		await settle();
+		expect(handOver).toHaveBeenCalledWith('Lp7tOp0123ab');
+		expect(text()).toContain('Laptop is the main now; this server syncs through it.');
+	});
+
+	it('says when the server to hand the role to is not connected', async () => {
+		vi.spyOn(serverApi, 'handOver').mockRejectedValue(new ApiError('notConnected', 'away'));
+		mountPage(Page);
+		await settle();
+		button('Make it the main').click();
+		await settle();
+		button('Make it the main', document.querySelector('[role="dialog"]') as HTMLElement).click();
+		await settle();
+		expect(text()).toContain('That server is not connected now.');
+	});
+
 	it('shows a server that has not announced itself by its pairing name', async () => {
 		vi.spyOn(serverApi, 'devices').mockResolvedValue([{ ...laptop, server: undefined }]);
 		mountPage(Page);
 		await settle();
 		expect(headings('h3')).toEqual(['Laptop pairing name']);
 		expect(text()).toContain('Not connected yet');
+		expect(button('Make it the main')).toBeUndefined();
 	});
 });
 
@@ -128,6 +156,7 @@ describe('DevicesSection on a subordinate', () => {
 			halted: false,
 			apps: ['todo'],
 			subordinates: 0,
+			term: 0,
 		});
 		vi.spyOn(serverApi, 'devices').mockResolvedValue([]);
 	});

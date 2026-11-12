@@ -255,7 +255,7 @@ func TestCloseServers(t *testing.T) {
 	phone, phoneToken := e.device(t, "todo")
 	_, srvFc := e.login(t, "192.168.1.9:5000", "todo", srv, srvToken)
 	_, phoneFc := e.login(t, "192.168.1.10:5000", "todo", phone, phoneToken)
-	e.hub.CloseServers()
+	e.hub.CloseServers("")
 	waitFor(t, "the server's session to close", srvFc.isClosed)
 	if phoneFc.isClosed() {
 		t.Error("the phone's session closed too")

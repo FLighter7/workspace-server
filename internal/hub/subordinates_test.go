@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -58,7 +59,19 @@ func entryOf(e *env, t *testing.T, id string) obj {
 	if !ok {
 		t.Fatalf("no device %s", id)
 	}
-	return obj{"id": d.ID, "app": d.App, "tokenHash": d.TokenHash}
+	return obj{"id": d.ID, "app": d.App, "name": d.Name, "tokenHash": d.TokenHash, "pairedAt": d.PairedAt.UTC().Format(time.RFC3339)}
+}
+
+// appDevices is a devices frame's entries of apps: the registry without its
+// server-kind devices.
+func appDevices(f obj) []any {
+	out := []any{}
+	for _, d := range f["devices"].([]any) {
+		if d.(obj)["kind"] != "server" {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func hashOf(token string) string {
@@ -114,7 +127,7 @@ func TestAnnounceAndTheSubordinatesList(t *testing.T) {
 	link, linkFc := e.linkSession(t, "192.168.1.9:5000", srv, srvToken)
 	link.HandleText(announceFrame(laptopInfo()))
 	got := waitFrames(t, linkFc, "devices", 1)[0]
-	if want := []any{entryOf(e, t, phone)}; !reflect.DeepEqual(got["devices"], want) {
+	if want := []any{entryOf(e, t, phone)}; !reflect.DeepEqual(appDevices(got), want) {
 		t.Errorf("the answer %v, want the phone", got)
 	}
 	d, _ := e.devices.Get(srv)
@@ -263,15 +276,17 @@ func TestInvite(t *testing.T) {
 }
 
 // Every link session that announced hears the registry after each change:
-// a pairing, its undoing, a removal and an app's removal. One that did not
-// announce hears none. Server-kind devices are never in it.
+// a pairing, its undoing, a removal and an app's removal, each removal with
+// the ids removed. One that did not announce hears none. Server-kind
+// devices are in it too, with what they announced: the other servers of the
+// family reach one another by it.
 func TestRegistryPushes(t *testing.T) {
 	e := newEnv(t)
 	e.addApp(t, apps.App{ID: "notes"})
 	srv, srvToken := e.serverDevice(t)
 	link, linkFc := e.linkSession(t, "192.168.1.9:5000", srv, srvToken)
 	link.HandleText(announceFrame(laptopInfo()))
-	if f := waitFrames(t, linkFc, "devices", 1)[0]; !reflect.DeepEqual(f["devices"], []any{}) {
+	if f := waitFrames(t, linkFc, "devices", 1)[0]; !reflect.DeepEqual(appDevices(f), []any{}) {
 		t.Errorf("the first registry %v, want empty", f)
 	}
 	quiet, quietFc := e.linkSession(t, "192.168.1.9:5001", srv, srvToken)
@@ -283,27 +298,27 @@ func TestRegistryPushes(t *testing.T) {
 	phone := paired["device"].(string)
 	waitFrames(t, linkFc, "devices", 2)
 	s.HandleText(`{"t":"head"}`) // confirms
-	if f := framesOf(linkFc, "devices")[1]; !reflect.DeepEqual(f["devices"], []any{entryOf(e, t, phone)}) {
+	if f := framesOf(linkFc, "devices")[1]; !reflect.DeepEqual(appDevices(f), []any{entryOf(e, t, phone)}) {
 		t.Errorf("after the pairing %v, want the phone", f)
 	}
 
 	notes, _ := e.device(t, "notes")
 	e.hub.DevicesChanged() // a change the hub did not make itself
 	waitFrames(t, linkFc, "devices", 3)
-	if f := framesOf(linkFc, "devices")[2]; !reflect.DeepEqual(f["devices"], []any{entryOf(e, t, notes), entryOf(e, t, phone)}) {
+	if f := framesOf(linkFc, "devices")[2]; !reflect.DeepEqual(appDevices(f), []any{entryOf(e, t, notes), entryOf(e, t, phone)}) {
 		t.Errorf("registry %v, want notes first, sorted by app", f)
 	}
 
 	if !e.hub.RemoveDevice(phone) {
 		t.Fatal("RemoveDevice = false")
 	}
-	if f := waitFrames(t, linkFc, "devices", 4)[3]; !reflect.DeepEqual(f["devices"], []any{entryOf(e, t, notes)}) {
+	if f := waitFrames(t, linkFc, "devices", 4)[3]; !reflect.DeepEqual(appDevices(f), []any{entryOf(e, t, notes)}) {
 		t.Errorf("after the removal %v, want notes only", f)
 	}
 	if err := e.hub.RemoveApp("notes"); err != nil {
 		t.Fatal(err)
 	}
-	if f := waitFrames(t, linkFc, "devices", 5)[4]; !reflect.DeepEqual(f["devices"], []any{}) {
+	if f := waitFrames(t, linkFc, "devices", 5)[4]; !reflect.DeepEqual(appDevices(f), []any{}) {
 		t.Errorf("after the app's removal %v, want none", f)
 	}
 
@@ -314,7 +329,7 @@ func TestRegistryPushes(t *testing.T) {
 	waitFrames(t, fc, "welcome", 1)
 	waitFrames(t, linkFc, "devices", 6)
 	s.Close()
-	if f := waitFrames(t, linkFc, "devices", 7)[6]; !reflect.DeepEqual(f["devices"], []any{}) {
+	if f := waitFrames(t, linkFc, "devices", 7)[6]; !reflect.DeepEqual(appDevices(f), []any{}) {
 		t.Errorf("after the pairing was undone %v, want none", f)
 	}
 
@@ -323,11 +338,15 @@ func TestRegistryPushes(t *testing.T) {
 		t.Errorf("a link session that did not announce got %d registries", n)
 	}
 	for _, f := range framesOf(linkFc, "devices") {
-		for _, d := range f["devices"].([]any) {
-			if d.(obj)["id"] == srv {
-				t.Errorf("the registry %v holds the server-kind device", f)
-			}
+		if !slices.ContainsFunc(f["devices"].([]any), func(d any) bool {
+			e := d.(obj)
+			return e["id"] == srv && e["kind"] == "server" && e["app"] == "" && reflect.DeepEqual(e["server"], laptopInfo())
+		}) {
+			t.Errorf("the registry %v lacks the server-kind device and what it announced", f)
 		}
+	}
+	if f := framesOf(linkFc, "devices")[6]; len(f["removed"].([]any)) != 3 {
+		t.Errorf("the last registry %v, want the three devices removed", f)
 	}
 }
 

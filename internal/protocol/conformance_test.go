@@ -83,26 +83,31 @@ type exchange struct {
 	Session string                     `json:"session"`
 	Backend map[string]json.RawMessage `json:"backend"`
 	Call    *struct {
-		Method string      `json:"method"`
-		Kind   string      `json:"kind"`
-		App    string      `json:"app"`
-		Device string      `json:"device"`
-		Token  string      `json:"token"`
-		Secret string      `json:"secret"`
-		Name   string      `json:"name"`
-		IfEtag *string     `json:"ifEtag"`
-		Body   string      `json:"body"`
-		Server *ServerInfo `json:"server"`
+		Method  string         `json:"method"`
+		Kind    string         `json:"kind"`
+		App     string         `json:"app"`
+		Device  string         `json:"device"`
+		Token   string         `json:"token"`
+		Secret  string         `json:"secret"`
+		Name    string         `json:"name"`
+		IfEtag  *string        `json:"ifEtag"`
+		Body    string         `json:"body"`
+		Server  *ServerInfo    `json:"server"`
+		Term    *int           `json:"term"`
+		Devices *[]DeviceEntry `json:"devices"`
+		Removed []Tombstone    `json:"removed"`
 	} `json:"call"`
-	Client      obj           `json:"client"`
-	ClientBody  *string       `json:"clientBody"`
-	Push        *string       `json:"push"`
-	PushApps    []AppInfo     `json:"pushApps"`
-	PushDevices []DeviceEntry `json:"pushDevices"`
-	Server      []obj         `json:"server"`
-	ServerBody  *string       `json:"serverBody"`
-	Closes      bool          `json:"closes"`
-	Error       string        `json:"error"`
+	Client       obj           `json:"client"`
+	ClientBody   *string       `json:"clientBody"`
+	Push         *string       `json:"push"`
+	PushApps     []AppInfo     `json:"pushApps"`
+	PushDevices  []DeviceEntry `json:"pushDevices"`
+	PushRemoved  []Tombstone   `json:"pushRemoved"`
+	PushTakeOver bool          `json:"pushTakeOver"`
+	Server       []obj         `json:"server"`
+	ServerBody   *string       `json:"serverBody"`
+	Closes       bool          `json:"closes"`
+	Error        string        `json:"error"`
 }
 
 type frameVectors struct {
@@ -142,10 +147,11 @@ func configure(t *testing.T, b *fakeBackend, state map[string]json.RawMessage) {
 				Etag         *string      `json:"etag"`
 				Hosts        []string     `json:"hosts"`
 				Role         string       `json:"role"`
+				Term         int          `json:"term"`
 				Subordinates []ServerInfo `json:"subordinates"`
 			}
 			decode(raw, &w)
-			b.welcome = Welcome{ServerID: w.ServerID, Name: w.Name, Etag: w.Etag, Hosts: w.Hosts, Role: w.Role, Subordinates: w.Subordinates}
+			b.welcome = Welcome{ServerID: w.ServerID, Name: w.Name, Etag: w.Etag, Hosts: w.Hosts, Role: w.Role, Term: w.Term, Subordinates: w.Subordinates}
 		case "helloError":
 			b.helloErr = refusal(raw)
 		case "paired":
@@ -183,6 +189,12 @@ func configure(t *testing.T, b *fakeBackend, state map[string]json.RawMessage) {
 			b.appsErr = refusal(raw)
 		case "devices":
 			decode(raw, &b.devices)
+		case "removed":
+			decode(raw, &b.removed)
+		case "term":
+			decode(raw, &b.termAnswer)
+		case "termError":
+			b.termErr = refusal(raw)
 		case "announceError":
 			b.announceErr = refusal(raw)
 		case "invite":
@@ -299,7 +311,9 @@ func TestConformanceExchanges(t *testing.T) {
 			case ex.PushApps != nil:
 				s.PushApps(ex.PushApps)
 			case ex.PushDevices != nil:
-				s.PushDevices(ex.PushDevices)
+				s.PushDevices(Registry{Devices: ex.PushDevices, Removed: ex.PushRemoved})
+			case ex.PushTakeOver:
+				s.PushTakeOver()
 			default:
 				frame, err := json.Marshal(ex.Client)
 				if err != nil {
@@ -366,6 +380,29 @@ func TestConformanceExchanges(t *testing.T) {
 				b.mu.Unlock()
 				if len(announces) != 1 || !reflect.DeepEqual(announces[0], *c.Server) {
 					t.Errorf("backend Announce got %+v, want %+v", announces, *c.Server)
+				}
+				b.mu.Lock()
+				handover := b.handovers[0]
+				b.mu.Unlock()
+				switch {
+				case c.Devices == nil && handover != nil:
+					t.Errorf("backend Announce got a handover %+v, want none", *handover)
+				case c.Devices != nil && (handover == nil || !reflect.DeepEqual(handover.Devices, *c.Devices) || !reflect.DeepEqual(handover.Removed, c.Removed)):
+					t.Errorf("backend Announce got handover %+v, want devices %+v removed %+v", handover, *c.Devices, c.Removed)
+				}
+			case "term":
+				b.mu.Lock()
+				terms := slices.Clone(b.terms)
+				b.mu.Unlock()
+				if ex.Session != "link" || c.Server == nil {
+					if len(terms) != 0 {
+						t.Errorf("backend Term got %+v for a refused frame", terms)
+					}
+					return
+				}
+				want := termCall{*c.Term, *c.Server, c.Device, c.Token}
+				if len(terms) != 1 || !reflect.DeepEqual(terms[0], want) {
+					t.Errorf("backend Term got %+v, want %+v", terms, want)
 				}
 			case "invite":
 				if want := 1; ex.Error == "" && b.count("invite") != want {

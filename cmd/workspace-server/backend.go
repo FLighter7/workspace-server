@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/FLighter7/workspace-server/internal/apps"
+	"github.com/FLighter7/workspace-server/internal/hub"
 	"github.com/FLighter7/workspace-server/internal/pairing"
 	"github.com/FLighter7/workspace-server/internal/rtc"
 	"github.com/FLighter7/workspace-server/internal/upstream"
@@ -36,6 +37,7 @@ func (s *server) Status() web.Status {
 		MainServer:  isMainServer(s.serverDir),
 		LastError:   s.lastErr,
 		Role:        s.link.Role(),
+		Term:        s.link.Term(),
 	}
 }
 
@@ -212,8 +214,48 @@ func (s *server) LinkUpstream(ctx context.Context, code string) error {
 	if err := s.link.Pair(ctx, code); err != nil {
 		return err
 	}
-	s.hub.CloseServers()
+	s.hub.CloseServers("")
 	return nil
+}
+
+// PromoteUpstream makes this server, a subordinate, the main of its family:
+// planned (force false) when the main is reachable, which then steps down
+// and links here, or forced when it is not.
+func (s *server) PromoteUpstream(ctx context.Context, force bool) (bool, error) {
+	return s.link.Promote(ctx, force)
+}
+
+// handOverWait bounds how long handing the role over waits for the
+// subordinate to take it and this server to step down.
+const handOverWait = 30 * time.Second
+
+// HandOver asks the subordinate serverID to take the role of main over
+// (takeOver), and reports whether this server stepped down to it in time.
+// The subordinate syncs the documents first, takes the role, and tells this
+// server, which then links to it.
+func (s *server) HandOver(ctx context.Context, serverID string) (bool, error) {
+	if s.link.Role() != upstream.RoleMain {
+		return false, web.ErrNotMain
+	}
+	switch err := s.hub.TakeOver(serverID); {
+	case errors.Is(err, hub.ErrNoSuchServer):
+		return false, web.ErrNoSuchServer
+	case errors.Is(err, hub.ErrNotConnected):
+		return false, web.ErrNotConnected
+	case err != nil:
+		return false, err
+	}
+	s.logf("asked the subordinate %s to take the role of main over", serverID)
+	ctx, cancel := context.WithTimeout(ctx, handOverWait)
+	defer cancel()
+	for s.link.Role() != upstream.RoleSubordinate {
+		select {
+		case <-ctx.Done():
+			return false, nil
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return true, nil
 }
 
 // UnlinkUpstream ends the link: this server is a main again, and its data

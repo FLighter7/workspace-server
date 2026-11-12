@@ -20,6 +20,7 @@ import (
 	"github.com/FLighter7/workspace-server/internal/hub"
 	"github.com/FLighter7/workspace-server/internal/identity"
 	"github.com/FLighter7/workspace-server/internal/pairing"
+	"github.com/FLighter7/workspace-server/internal/protocol"
 	"github.com/FLighter7/workspace-server/internal/rtc"
 	"github.com/FLighter7/workspace-server/internal/store"
 	"github.com/FLighter7/workspace-server/internal/wsclient"
@@ -78,6 +79,26 @@ type node struct {
 	// selfName and selfPort, when set, are what n announces instead of its
 	// own name and port.
 	selfName, selfPort atomic.Value
+
+	cutMu sync.Mutex
+	cut   map[int]bool // UDP ports n's link cannot reach: a split
+}
+
+// cutOff makes n unable to reach other (or able again), as a split of the
+// network would.
+func (n *node) cutOff(other *node, on bool) {
+	n.cutMu.Lock()
+	defer n.cutMu.Unlock()
+	if n.cut == nil {
+		n.cut = map[int]bool{}
+	}
+	n.cut[other.cfg.Port] = on
+}
+
+func (n *node) isCut(port int) bool {
+	n.cutMu.Lock()
+	defer n.cutMu.Unlock()
+	return n.cut[port]
 }
 
 func startNode(t *testing.T, name string) *node {
@@ -142,16 +163,26 @@ func (n *node) open() {
 			secret, expires := n.secrets.Issue()
 			return n.codeWith(secret), expires, nil
 		},
+		Term: func() int { return n.cur.Load().Term() },
+		Follow: func(sender string, term int, si protocol.ServerInfo, device, token string) (protocol.TermAnswer, error) {
+			t, main, err := n.cur.Load().Follow(sender, term, wsclient.Server(si), device, token)
+			return protocol.TermAnswer{Term: t, Main: main}, err
+		},
 	})
 	n.cfg.Backend = n.hub
 	n.linkDeps = Deps{
-		Path:     filepath.Join(n.dir, "upstream.json"),
-		ServerID: n.id.ServerID,
-		Name:     func() string { return name },
-		Apps:     n.apps,
-		Store:    n.store,
-		Writer:   n.hub,
+		Path:       filepath.Join(n.dir, "upstream.json"),
+		FamilyPath: filepath.Join(n.dir, "family.json"),
+		Devices:    n.devices,
+		ServerID:   n.id.ServerID,
+		Name:       func() string { return name },
+		Apps:       n.apps,
+		Store:      n.store,
+		Writer:     n.hub,
 		Dial: func(ctx context.Context, t wsclient.Target, app string) (*wsclient.Client, error) {
+			if n.isCut(t.Port) {
+				return nil, &wsclient.Error{Code: wsclient.CodeConnectTimeout, Message: "cut off by the test"}
+			}
 			return wsclient.Dial(ctx, t, app, wsclient.DialOptions{})
 		},
 		Self:       n.self,

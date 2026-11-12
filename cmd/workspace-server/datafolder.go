@@ -414,6 +414,7 @@ func resetServerDir(serverDir, dataDir string) error {
 		filepath.Join(serverDir, appsFile),
 		filepath.Join(serverDir, devicesFile),
 		filepath.Join(serverDir, upstreamFile),
+		filepath.Join(serverDir, familyFile),
 	} {
 		if err := os.RemoveAll(path); err != nil && first == nil {
 			first = err

@@ -20,6 +20,7 @@ const status: Status = {
 	mainServer: true,
 	lastError: '',
 	role: 'main',
+	term: 0,
 };
 
 beforeEach(() => {
@@ -30,6 +31,7 @@ beforeEach(() => {
 		halted: false,
 		apps: [],
 		subordinates: 0,
+		term: 0,
 	});
 });
 

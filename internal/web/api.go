@@ -40,12 +40,20 @@ const (
 	codeNotLinked = "notLinked"
 	// codeHasSubordinates: a main with subordinates does not link.
 	codeHasSubordinates = "hasSubordinates"
+	// codeNotInStep: a planned switch found the documents not yet the same
+	// on this server and its main.
+	codeNotInStep = "notInStep"
+	// codeNotConnected: the server to hand the role to is not connected.
+	codeNotConnected = "notConnected"
 )
 
 const (
 	// linkTimeout bounds linking to an upstream server: reaching it and
 	// pairing.
 	linkTimeout = 30 * time.Second
+	// switchTimeout bounds switching the main: the documents in step, the
+	// role taken, and the former main told.
+	switchTimeout = 45 * time.Second
 )
 
 const (
@@ -469,6 +477,70 @@ func (a *api) inviteUpstream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, codeNotLinked, err.Error())
 	case errors.As(err, &refused):
 		writeJSON(w, http.StatusBadGateway, refusedBody{Error: codeUpstream, Message: err.Error(), Reason: refused.Reason})
+	default:
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+	}
+}
+
+// promoteRequest is the body of POST /api/upstream/promote: force for a
+// switch while the main is out of reach.
+type promoteRequest struct {
+	Force bool `json:"force"`
+}
+
+// promoteUpstream makes this server the main of its family, and answers
+// whether the former main followed (always false for a forced switch, which
+// tells it once the two meet): {"followed": bool}.
+func (a *api) promoteUpstream(w http.ResponseWriter, r *http.Request) {
+	var req promoteRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), switchTimeout)
+	defer cancel()
+	followed, err := a.b.PromoteUpstream(ctx, req.Force)
+	var refused *upstream.RefusedError
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]bool{"followed": followed})
+	case errors.Is(err, upstream.ErrNotLinked):
+		writeError(w, http.StatusConflict, codeNotLinked, err.Error())
+	case errors.Is(err, upstream.ErrBusy):
+		writeError(w, http.StatusConflict, codeBusy, err.Error())
+	case errors.Is(err, upstream.ErrNotInStep):
+		writeError(w, http.StatusConflict, codeNotInStep, err.Error())
+	case errors.As(err, &refused):
+		writeJSON(w, http.StatusBadGateway, refusedBody{Error: codeUpstream, Message: err.Error(), Reason: refused.Reason})
+	default:
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+	}
+}
+
+// handOverRequest is the body of POST /api/upstream/hand-over: the server
+// id of the subordinate to take the role of main.
+type handOverRequest struct {
+	ServerID string `json:"serverId"`
+}
+
+// handOver asks a subordinate to take the role of main over and answers
+// whether this server stepped down to it in time: {"done": bool}.
+func (a *api) handOver(w http.ResponseWriter, r *http.Request) {
+	var req handOverRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), switchTimeout)
+	defer cancel()
+	done, err := a.b.HandOver(ctx, req.ServerID)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]bool{"done": done})
+	case errors.Is(err, ErrNotMain):
+		writeError(w, http.StatusConflict, codeNotMain, err.Error())
+	case errors.Is(err, ErrNoSuchServer):
+		notFound(w, "server")
+	case errors.Is(err, ErrNotConnected):
+		writeError(w, http.StatusConflict, codeNotConnected, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 	}

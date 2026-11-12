@@ -62,7 +62,8 @@ func (d Device) IsServer() bool { return d.Kind == KindServer }
 var tokenHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type file struct {
-	Devices []Device `json:"devices"`
+	Devices []Device    `json:"devices"`
+	Removed []Tombstone `json:"removed,omitempty"`
 }
 
 // Registry is the set of paired devices. It is safe for concurrent use.
@@ -72,7 +73,8 @@ type Registry struct {
 
 	mu      sync.Mutex
 	devices []Device
-	replica []Device // the main's devices, on a subordinate; see SetReplica
+	removed []Tombstone // the devices removed here or on the family's main; see Merge
+	replica []Device    // the main's devices, on a subordinate; see SetReplica
 	// touched records when Touch last wrote the file for a device. Writes made
 	// by other operations are not recorded here.
 	touched map[string]time.Time
@@ -83,8 +85,8 @@ type Registry struct {
 // error and is left untouched: an entry with an empty or repeated id, an
 // unknown kind, an invalid app id (a server-kind entry has none), a
 // tokenHash that is not 64 lowercase hex digits, or a server that is not
-// valid or not a server-kind device's. Times
-// are read into UTC. now supplies the clock for PairedAt, LastSeen and write
+// valid or not a server-kind device's, or a removed entry with an id that is
+// not valid. Times are read into UTC. now supplies the clock for PairedAt, LastSeen and write
 // throttling.
 func Open(path string, now func() time.Time) (*Registry, error) {
 	r := &Registry{path: path, now: now, touched: map[string]time.Time{}}
@@ -123,7 +125,14 @@ func Open(path string, now func() time.Time) (*Registry, error) {
 		seen[d.ID] = true
 		d.PairedAt, d.LastSeen = d.PairedAt.UTC(), d.LastSeen.UTC()
 	}
-	r.devices = f.Devices
+	for i := range f.Removed {
+		t := &f.Removed[i]
+		if !deviceIDPattern.MatchString(t.ID) {
+			return nil, fmt.Errorf("%s: removed[%d]: id %q is not valid", path, i, t.ID)
+		}
+		t.At = t.At.UTC()
+	}
+	r.devices, r.removed = f.Devices, f.Removed
 
 	return r, nil
 }
@@ -173,15 +182,17 @@ func (r *Registry) pair(kind, app, name string) (Device, string, error) {
 // server-kind device matches any app, and app "" too: it is admitted to
 // every app. A device of the replica (SetReplica) is checked the same way,
 // against the hash its main sent: the token is 32 random bytes, so its
-// SHA-256 alone proves it, with no salt. It does not update LastSeen; call
-// Touch for that.
+// SHA-256 alone proves it, with no salt. A server-kind device of the replica
+// (another server of the family) matches app "" only: it may reach this
+// server's link sessions, to tell it of a new main, and nothing else. It
+// does not update LastSeen; call Touch for that.
 func (r *Registry) Authenticate(app, id, token string) (Device, bool) {
 	got := hashToken(token)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	d, ok := r.getLocked(id)
-	if !ok || (d.App != app && !d.IsServer()) {
+	if !ok || (d.App != app && !d.IsServer()) || (d.Replica && d.IsServer() && app != "") {
 		return Device{}, false
 	}
 	if subtle.ConstantTimeCompare([]byte(d.TokenHash), []byte(got)) != 1 {
@@ -215,9 +226,10 @@ func (r *Registry) Touch(id string) {
 }
 
 // Remove deletes device id and reports whether it existed. The device's token
-// stops working at once even if the file cannot be written. A device of the
-// replica is not this server's to remove: it goes when the main's registry
-// drops it.
+// stops working at once even if the file cannot be written. The id is kept
+// as removed (see Merge), so that a registry merged in later does not bring
+// the device back. A device of the replica is not this server's to remove:
+// it goes when the main's registry drops it.
 func (r *Registry) Remove(id string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -226,6 +238,7 @@ func (r *Registry) Remove(id string) bool {
 		return false
 	}
 	r.devices = append(r.devices[:i:i], r.devices[i+1:]...)
+	r.buryLocked(id)
 	delete(r.touched, id)
 	if err := r.write(); err != nil {
 		log.Printf("devices: write %s after removing a device: %v", r.path, err)
@@ -243,6 +256,7 @@ func (r *Registry) RemoveApp(app string) []Device {
 	for _, d := range r.devices {
 		if d.App == app {
 			removed = append(removed, d)
+			r.buryLocked(d.ID)
 			delete(r.touched, d.ID)
 		} else {
 			kept = append(kept, d)
@@ -321,7 +335,7 @@ func (r *Registry) write() error {
 	if list == nil {
 		list = []Device{}
 	}
-	data, err := json.MarshalIndent(file{Devices: list}, "", "  ")
+	data, err := json.MarshalIndent(file{Devices: list, Removed: r.removed}, "", "  ")
 	if err != nil {
 		return err
 	}

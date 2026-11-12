@@ -225,7 +225,13 @@ type fakeBackend struct {
 	appsErr *Error
 
 	devices     []DeviceEntry
+	removed     []Tombstone
 	announceErr *Error
+	handovers   []*Registry
+
+	termAnswer TermAnswer
+	termErr    *Error
+	terms      []termCall
 
 	inviteCode    string
 	inviteExpires time.Time
@@ -331,17 +337,33 @@ func (b *fakeBackend) Apps(s *Session) ([]AppInfo, *Error) {
 
 // Announce records the server and, unless told to refuse, answers with the
 // registry the test set, as the hub does.
-func (b *fakeBackend) Announce(s *Session, server ServerInfo) *Error {
+func (b *fakeBackend) Announce(s *Session, server ServerInfo, handover *Registry) *Error {
 	b.mu.Lock()
 	b.calls = append(b.calls, "announce")
 	b.announces = append(b.announces, server)
-	list, err := b.devices, b.announceErr
+	b.handovers = append(b.handovers, handover)
+	list, removed, err := b.devices, b.removed, b.announceErr
 	b.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	s.PushDevices(list)
+	s.PushDevices(Registry{Devices: list, Removed: removed})
 	return nil
+}
+
+// termCall is one call of Term.
+type termCall struct {
+	term          int
+	server        ServerInfo
+	device, token string
+}
+
+func (b *fakeBackend) Term(s *Session, term int, server ServerInfo, device, token string) (TermAnswer, *Error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = append(b.calls, "term")
+	b.terms = append(b.terms, termCall{term, server, device, token})
+	return b.termAnswer, b.termErr
 }
 
 func (b *fakeBackend) Invite(s *Session) (string, time.Time, *Error) {

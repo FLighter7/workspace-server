@@ -32,6 +32,7 @@ import (
 	"github.com/FLighter7/workspace-server/internal/netaddr"
 	"github.com/FLighter7/workspace-server/internal/pairing"
 	"github.com/FLighter7/workspace-server/internal/program"
+	"github.com/FLighter7/workspace-server/internal/protocol"
 	"github.com/FLighter7/workspace-server/internal/rtc"
 	"github.com/FLighter7/workspace-server/internal/store"
 	"github.com/FLighter7/workspace-server/internal/upstream"
@@ -47,6 +48,7 @@ const (
 	appsFile     = "apps.json"
 	devicesFile  = "devices.json"
 	upstreamFile = "upstream.json"
+	familyFile   = "family.json"
 	storeDir     = "apps"
 	logName      = "server.log"
 	lockFile     = "server.lock"
@@ -581,15 +583,24 @@ func newServer(opts serverOptions, logger *log.Logger) (*server, error) {
 		// A subordinate's page asks for a code for a browser on its
 		// computer: the one this server's page would issue.
 		Invite: s.IssuePairing,
+		// Switching the main: the family's term in every welcome, and a
+		// term another server of the family tells.
+		Term: func() int { return s.link.Term() },
+		Follow: func(sender string, term int, si protocol.ServerInfo, device, token string) (protocol.TermAnswer, error) {
+			t, main, err := s.link.Follow(sender, term, wsclient.Server(si), device, token)
+			return protocol.TermAnswer{Term: t, Main: main}, err
+		},
 	})
 	s.link, err = upstream.Open(upstream.Deps{
-		Path:     filepath.Join(dir, upstreamFile),
-		ServerID: id.ServerID,
-		Name:     s.name,
-		Apps:     s.apps,
-		Store:    s.store,
-		Writer:   s.hub,
-		Dial:     s.dialUpstream,
+		Path:       filepath.Join(dir, upstreamFile),
+		FamilyPath: filepath.Join(dir, familyFile),
+		Devices:    s.devices,
+		ServerID:   id.ServerID,
+		Name:       s.name,
+		Apps:       s.apps,
+		Store:      s.store,
+		Writer:     s.hub,
+		Dial:       s.dialUpstream,
 		// What the link announces to the main, which hands it out to its
 		// devices, and the main's devices, which this server then admits.
 		Self:  s.self,

@@ -20,6 +20,8 @@ export interface Status {
 	lastError: string;
 	/** A subordinate while linked to an upstream server, else a main. */
 	role: Role;
+	/** The family's term: it goes up by one every time a subordinate becomes the main. */
+	term: number;
 }
 
 export type Role = 'main' | 'subordinate';
@@ -136,6 +138,24 @@ export interface UpstreamStatus {
 	devices?: number;
 	/** The servers linked to this one: a main with any does not link. */
 	subordinates: number;
+	/** The family's term as this server knows it. */
+	term: number;
+	/** On a main that took the role over: the servers it waits for to follow it. */
+	waiting?: { serverId: string; name: string }[];
+	/** This server is becoming the main now. */
+	promoting?: boolean;
+}
+
+/** POST /api/upstream/promote. */
+export interface Promoted {
+	/** The former main follows this server already; false after a forced switch. */
+	followed: boolean;
+}
+
+/** POST /api/upstream/hand-over. */
+export interface HandedOver {
+	/** This server follows the new main already. */
+	done: boolean;
 }
 
 /** DELETE /api/upstream. */

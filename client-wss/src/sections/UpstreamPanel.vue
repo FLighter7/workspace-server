@@ -66,6 +66,7 @@
 			<p v-if="upstream.halted" :class="[$style.note, $style.error]">
 				{{ t(haltedKey(upstream.reason)) }}
 			</p>
+			<p v-else-if="lookingForMain" :class="$style.note">{{ t('mainSteppedDownText') }}</p>
 			<p v-else-if="!upstream.connected" :class="$style.note">{{ t('connectingText') }}</p>
 
 			<div :class="[s.actions, 'mt-4']">
@@ -73,11 +74,21 @@
 				<VBtn v-if="!upstream.halted" color="primary" variant="flat" @click="inviteOpen = true">
 					{{ t('inviteButton') }}
 				</VBtn>
+				<VBtn :loading="promoting" @click="promote">{{ t('promoteButton') }}</VBtn>
 				<VBtn @click="unlink">{{ t('unlinkButton') }}</VBtn>
 			</div>
 		</template>
 
 		<template v-else-if="upstream">
+			<template v-if="waiting.length">
+				<p>{{ t('waitingText') }}</p>
+				<ul :class="[$style.apps, 'mt-2']">
+					<li v-for="server in waiting" :key="server.serverId">
+						<bdi>{{ server.name }}</bdi>
+					</li>
+				</ul>
+				<p :class="[$style.note, 'mb-3']">{{ t('waitingRemoveText') }}</p>
+			</template>
 			<p>{{ t('upstreamMainIntro') }}</p>
 			<p v-if="upstream.subordinates > 0" :class="$style.note">
 				{{ t('upstreamHasSubordinates') }}
@@ -123,7 +134,7 @@
 <script setup lang="ts">
 import { computed, ref, useTemplateRef } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { serverApi } from '@/api/client';
+import { ApiError, serverApi } from '@/api/client';
 import type { UpstreamStatus } from '@/api/types';
 import CodeScanner from '@/components/CodeScanner.vue';
 import FactItem from '@/components/FactItem.vue';
@@ -144,8 +155,9 @@ import InviteDialog from './InviteDialog.vue';
 /**
  * The link to an upstream server: this server's main, when it is a
  * subordinate. On a main, linking it by the main's pairing code, pasted or
- * scanned; on a subordinate, the link's state, pairing this computer's
- * browser through the main, and unlinking.
+ * scanned, and the servers it waits for after it took the role of main
+ * over; on a subordinate, the link's state, pairing this computer's browser
+ * through the main, making this server the main, and unlinking.
  */
 const { t } = useI18n();
 const format = useFormat();
@@ -155,14 +167,21 @@ const message = ref<Message | null>(null);
 const pasted = ref('');
 const scanning = ref(false);
 const linking = ref(false);
+const promoting = ref(false);
 const inviteOpen = ref(false);
 const heading = useTemplateRef<HTMLElement>('heading');
 
 const stopped = computed(() => upstream.value?.stopped ?? []);
+const waiting = computed(() => upstream.value?.waiting ?? []);
+/** The main stepped down to another one, which this server looks for. */
+const lookingForMain = computed(
+	() => !upstream.value?.connected && upstream.value?.reason === 'mainSteppedDown',
+);
 
 const state = computed((): { key: MessageKey; tone: 'on' | 'off' | 'error' } => {
 	if (upstream.value?.halted) return { key: 'stateHalted', tone: 'error' };
 	if (upstream.value?.connected) return { key: 'stateConnected', tone: 'on' };
+	if (lookingForMain.value) return { key: 'stateLookingForMain', tone: 'off' };
 	return { key: 'stateConnecting', tone: 'off' };
 });
 
@@ -200,6 +219,62 @@ async function link(code: string): Promise<void> {
 /** A code the camera saw: linked at once, and the camera stops. */
 function scanned(code: string): void {
 	if (!linking.value) void link(code);
+}
+
+/**
+ * "Make this server the main": a planned switch while the main is
+ * reachable, confirmed; when it is not, or turns out not to be, a forced
+ * switch behind a confirmation that says what happens next.
+ */
+async function promote(): Promise<void> {
+	const name = upstream.value?.name ?? '';
+	const reachable = upstream.value?.connected === true && !upstream.value.halted;
+	if (reachable) {
+		if (!(await ask({ title: 'promoteTitle', text: 'promoteText', ok: 'promoteOk' }))) return;
+		const outcome = await switchTo(false);
+		if (outcome !== 'unreachable') return;
+	}
+	if (
+		!(await ask({
+			title: 'promoteForceTitle',
+			name,
+			text: 'promoteForceText',
+			ok: 'promoteForceOk',
+		}))
+	) {
+		return;
+	}
+	await switchTo(true);
+}
+
+/** Asks the server to become the main, and says how it went. */
+async function switchTo(force: boolean): Promise<'done' | 'unreachable' | 'failed'> {
+	const name = upstream.value?.name ?? '';
+	promoting.value = true;
+	message.value = info('promoting');
+	try {
+		const result = await serverApi.promote(force);
+		if (force) message.value = info('promotedForced');
+		else
+			message.value = {
+				key: result.followed ? 'promoted' : 'promotedNotFollowed',
+				values: { name },
+			};
+	} catch (error) {
+		if (!force && error instanceof ApiError && error.reason === 'unreachable') {
+			message.value = null;
+			return 'unreachable';
+		}
+		message.value = upstreamError(error);
+		return 'failed';
+	} finally {
+		promoting.value = false;
+	}
+	// A code of the old main means nothing here any more.
+	invitedCode.drop();
+	await load();
+	await rescueFocus(heading.value);
+	return 'done';
 }
 
 async function unlink(): Promise<void> {

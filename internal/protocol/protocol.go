@@ -56,15 +56,17 @@ type Error struct {
 // Welcome is what a welcome frame tells an authenticated client. Etag is nil
 // when the app has no document, and always on a link session. Role is
 // RoleMain or RoleSubordinate; an empty Role is left out of the frame.
-// Subordinates is what a main lists: nil leaves the field out of the frame
-// (a subordinate), and an empty, non-nil list sends [] (a main without
-// any).
+// Term is the family's term as this server knows it (see docs/protocol.md,
+// "Switching the main"); 0 is left out of the frame. Subordinates is what a
+// main lists: nil leaves the field out of the frame (a subordinate), and an
+// empty, non-nil list sends [] (a main without any).
 type Welcome struct {
 	ServerID     string
 	Name         string
 	Etag         *string
 	Hosts        []string
 	Role         string
+	Term         int
 	Subordinates []ServerInfo
 }
 
@@ -86,12 +88,42 @@ type ServerInfo struct {
 	Hosts       []string `json:"hosts"`
 }
 
-// DeviceEntry is one device of an app in the registry a main sends its
-// subordinates: never a token, only the token's SHA-256 in lowercase hex.
+// DeviceEntry is one device in the registry a main sends its subordinates:
+// never a token, only the token's SHA-256 in lowercase hex. A server-kind
+// device (another server of the family) has no app, Kind "server", and
+// Server once it announced itself. Name and PairedAt (RFC 3339 UTC) label
+// the device for a server that adopts the registry.
 type DeviceEntry struct {
-	ID        string `json:"id"`
-	App       string `json:"app"`
-	TokenHash string `json:"tokenHash"`
+	ID        string      `json:"id"`
+	App       string      `json:"app"`
+	Kind      string      `json:"kind,omitempty"`
+	Name      string      `json:"name,omitempty"`
+	TokenHash string      `json:"tokenHash"`
+	PairedAt  string      `json:"pairedAt,omitempty"`
+	Server    *ServerInfo `json:"server,omitempty"`
+}
+
+// Tombstone is a device removed from the family, by id, and when (RFC 3339
+// UTC).
+type Tombstone struct {
+	ID string `json:"id"`
+	At string `json:"at"`
+}
+
+// Registry is a device registry as it travels: the devices and the ids
+// removed. A main sends its own to its subordinates; a main that steps down
+// hands its own to the main it then follows, in its first announce.
+type Registry struct {
+	Devices []DeviceEntry
+	Removed []Tombstone
+}
+
+// TermAnswer answers a term frame: the term and the main the receiving
+// server follows once it handled it. Main is the sender's server id when
+// the receiver now follows the sender.
+type TermAnswer struct {
+	Term int    `json:"term"`
+	Main string `json:"main"`
 }
 
 // Channel is the data channel a Session speaks over. *webrtc.DataChannel
@@ -125,10 +157,20 @@ type Backend interface {
 	Apps(s *Session) ([]AppInfo, *Error)
 	// Announce takes a subordinate's connection data from its link session
 	// and answers with the device registry, which it sends with
-	// s.PushDevices, as it does again whenever the registry changes. The
+	// s.PushDevices, as it does again whenever the registry changes.
+	// handover, when not nil, is the subordinate's own registry, which it
+	// hands over because it was a main and has stepped down to this one. The
 	// session calls it only for a link session; an error with CodeProtocol
 	// closes the session.
-	Announce(s *Session, server ServerInfo) *Error
+	Announce(s *Session, server ServerInfo, handover *Registry) *Error
+	// Term tells this server that the sender is the main of its family at
+	// term, reached at server; device and token, when given, are a
+	// server-kind credential for this server there. The backend follows the
+	// sender when (term, server's id) is higher than its own main's, and
+	// answers with the term and main it follows then. The session calls it
+	// only for a link session; an error with CodeProtocol closes the
+	// session.
+	Term(s *Session, term int, server ServerInfo, device, token string) (TermAnswer, *Error)
 	// Invite issues a pairing code of this server for a subordinate, which
 	// shows it for a browser on its own computer: the code this server's own
 	// page issues, with a new secret. The session calls it only for a link

@@ -29,6 +29,8 @@ export class FakeServer {
 	port = 47801;
 	/** The welcome's role; left out, as an older server does, when `undefined`. */
 	role: string | undefined = undefined;
+	/** The welcome's term; left out, as a family that never switched its main does, when `undefined`. */
+	term: number | undefined = undefined;
 	/** The welcome's list of subordinates; left out when `undefined`, as a subordinate does. */
 	subordinates: FallbackServer[] | undefined = undefined;
 	etag: string | null = null;
@@ -227,6 +229,7 @@ export class FakeClient implements SyncClient {
 			hosts: [...this.server.hosts],
 		};
 		if (this.server.role !== undefined) welcome.role = this.server.role;
+		if (this.server.term !== undefined) welcome.term = this.server.term;
 		if (this.server.subordinates) {
 			welcome.subordinates = this.server.subordinates.map((s) => ({ ...s, hosts: [...s.hosts] }));
 		}

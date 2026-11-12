@@ -136,7 +136,7 @@ If a device asks for an app the server does not serve yet, the page offers to ad
 
 ## A laptop as a second server
 
-**Not available yet:** making the laptop the main server (the third part of the diagram) is still being built, and devices sync through the laptop's server only once their app has an update that is not released yet. Linking the laptop, pairing its browser and unlinking, described below, work now.
+**Not available yet:** devices sync through the laptop's server, and follow a new main by themselves, only once their app has an update that is not released yet. Everything the servers do, described below, works now: linking the laptop, pairing its browser, unlinking, and making the laptop the main.
 
 ![How the PC's main server, the laptop's server and the devices connect: at home, away, and when the laptop becomes the main](images/connections.svg)
 
@@ -167,6 +167,18 @@ Devices pair only with the main, the laptop's own browser too. On the laptop's p
 - The laptop's **Upstream server** shows the main, whether it is connected, when it was linked, the last sync and the apps synced. If an app writes to the main too often within a minute, it stops syncing with the main, to protect the saved versions on both servers; the section lists it, its devices still sync with the laptop, and a restart of the laptop's server resumes it.
 - The main's **Devices** lists the laptop's server under **Linked servers**, with its addresses. **Remove** there stops it syncing with the main; its data stays on the laptop.
 - **Unlink** on the laptop's page makes it a main again. Nothing is deleted on either side, and the main's devices no longer sync through the laptop. If the main cannot be reached at that moment, the page says so: remove the laptop on the main's page later.
+
+### Making the laptop the main
+
+The laptop's server can take the main's role over: when the laptop becomes the computer you rely on, or when the PC breaks. Devices then pair with the laptop, and the PC's server, if it is still there, syncs through the laptop as the laptop used to through the PC. No device pairs again, and nothing is deleted.
+
+- **While the PC is reachable:** on the laptop's page, open **Server** → **Upstream server** and press **Make this server the main**, or on the PC's page, open **Devices** → **Linked servers** and press **Make it the main** on the laptop's card. Confirm. The two servers first make their data the same, then the PC's server hands its role over and links to the laptop's; any other server linked to the PC follows by itself.
+- **While the PC cannot be reached** (switched off, away, broken): press **Make this server the main** on the laptop's page. The page asks again and says what happens next:
+  - the laptop's server becomes the main at once;
+  - if the PC's server still runs, both act as the main until they meet again; devices sync with whichever one they reach, and nothing is lost;
+  - when the two meet, the one made the main later wins: the PC's server steps down by itself and syncs through the laptop's, its own changes merged in by the devices.
+- **If the PC is gone for good,** the laptop's page lists it among the servers it waits for. Once you know it will not come back, remove it under **Devices** on the laptop's page.
+- **Devices** keep working throughout: a device paired with the PC finds the laptop's server as the main and from then on treats it as the server it is paired with.
 
 ## Updating
 

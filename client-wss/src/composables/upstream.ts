@@ -24,6 +24,8 @@ const CODE_KEYS: Record<string, MessageKey> = {
 	busy: 'linkBusy',
 	notLinked: 'linkNotLinked',
 	hasSubordinates: 'linkHasSubordinates',
+	notInStep: 'promoteNotInStep',
+	notConnected: 'handOverNotConnected',
 };
 
 /**
