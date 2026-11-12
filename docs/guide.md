@@ -217,6 +217,8 @@ config.json            name, ports and the data folder
 identity.json          the server's identity; if it is lost, every device pairs again
 apps.json              the apps this server serves
 devices.json           paired devices
+upstream.json          the link to the main server, on a server linked to one
+family.json            on a server that took the main's role over
 server.log             the log; it never grows past 1 MiB
 server.lock            keeps a second server off this folder
 ```
@@ -286,6 +288,10 @@ To run a second, separate server, or one on other ports for one run:
   - iPhone Safari and Chrome, and Mac Chrome, as clients.
 - **Linux: never tested.** The Linux files are built from the same code, but nobody has run the server on a Linux machine, and there is none to test it on. It may work; nothing here promises that it does.
 - **Not yet tried:** Mac Safari and Android as clients.
+- **A laptop as a second server** has so far been tried only with both servers on one Windows computer. Not yet tried: a PC and a laptop as two computers, a Mac as the laptop, its page in Safari, scanning a code with a real camera, and phones syncing through the laptop's server.
+- **Away from home,** two things may keep a device from the laptop's server, and neither has been tried yet:
+  - with no network at all (Wi-Fi off), the laptop's own browser may not reach the server on the same laptop; the app keeps working on its own and syncs once a network is back;
+  - on a hotel or café Wi-Fi that keeps devices apart, and possibly on your phone's hotspot, the phone may not find the laptop.
 - **Docker:** a Docker image for a NAS is a later step.
 
 ## Building from source
