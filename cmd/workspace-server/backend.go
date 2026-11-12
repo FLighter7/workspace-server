@@ -131,6 +131,11 @@ func (s *server) SetConfig(name *string, udpPort, httpPort *int) error {
 		}
 		s.logf("the web page moved to http://localhost:%d/", eff.HTTPPort)
 	}
+	if eff.Name != old.Name || eff.UDPPort != old.UDPPort {
+		// On a subordinate: the main hands the new name and port out to its
+		// devices.
+		s.link.SelfChanged()
+	}
 	return nil
 }
 

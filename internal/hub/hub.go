@@ -6,7 +6,10 @@
 //
 // A server-kind device (a subordinate server linked to this one) is admitted
 // to every listed app, and also to a link session, which has no app: it is
-// told the app list on request and again whenever the list changes.
+// told the app list on request and again whenever the list changes. Over its
+// link session a subordinate announces how devices reach it, which a main
+// lists in every welcome, and is told the device registry, again whenever it
+// changes. A subordinate pairs nothing: devices pair with its main.
 package hub
 
 import (
@@ -65,10 +68,13 @@ type SessionInfo struct{ App, Device, Remote string }
 
 // member is what the hub knows of a registered session. The hub records it at
 // registration and never reads it back from the session. app is empty on a
-// link session; server marks a session of a server-kind device.
+// link session; server marks a session of a server-kind device; registry
+// marks a link session that announced itself, which is told the device
+// registry on every change.
 type member struct {
 	app, device string
 	server      bool
+	registry    bool
 }
 
 // Hub routes the sessions of all apps. It is safe for concurrent use.
@@ -89,8 +95,9 @@ type Hub struct {
 	locksMu sync.Mutex
 	locks   map[string]*sync.Mutex // per app id; only ids that were listed
 
-	servers sync.RWMutex
-	appsMu  sync.Mutex // orders the app lists pushed to link sessions
+	servers   sync.RWMutex
+	appsMu    sync.Mutex // orders the app lists pushed to link sessions
+	devicesMu sync.Mutex // orders the registries pushed to link sessions
 
 	mu       sync.Mutex
 	sessions map[*protocol.Session]member
@@ -176,6 +183,10 @@ func (h *Hub) Pair(s *protocol.Session, kind, app, secret, name string) (string,
 	if h.limit.blocked(ip, h.d.Now()) {
 		return "", "", protocol.Welcome{}, errBlocked()
 	}
+	if h.role() == protocol.RoleSubordinate {
+		// Nothing is checked or used: the secret, if any, stays good.
+		return "", "", protocol.Welcome{}, errNotMain()
+	}
 	if !h.d.Secrets.Check(secret) {
 		h.limit.fail(ip, h.d.Now())
 		return "", "", protocol.Welcome{}, errBadSecret()
@@ -207,8 +218,10 @@ func (h *Hub) Pair(s *protocol.Session, kind, app, secret, name string) (string,
 	if e != nil {
 		// The client never gets the token, so the entry could never be used.
 		h.d.Devices.Remove(d.ID)
+		h.DevicesChanged()
 		return "", "", protocol.Welcome{}, e
 	}
+	h.DevicesChanged()
 	return d.ID, token, w, nil
 }
 
@@ -250,11 +263,32 @@ func (h *Hub) welcome(s *protocol.Session, app string) (protocol.Welcome, *proto
 			return protocol.Welcome{}, e
 		}
 	}
-	role := protocol.RoleMain
-	if h.d.Role != nil {
-		role = h.d.Role()
+	w := protocol.Welcome{ServerID: h.d.ServerID, Name: h.d.Name(), Etag: etag, Hosts: h.d.Hosts(), Role: h.role()}
+	if w.Role == protocol.RoleMain {
+		w.Subordinates = h.subordinates()
 	}
-	return protocol.Welcome{ServerID: h.d.ServerID, Name: h.d.Name(), Etag: etag, Hosts: h.d.Hosts(), Role: role}, nil
+	return w, nil
+}
+
+// role is the server's role now.
+func (h *Hub) role() string {
+	if h.d.Role != nil {
+		return h.d.Role()
+	}
+	return protocol.RoleMain
+}
+
+// subordinates lists what this server's subordinates announced, never nil:
+// a main always sends the list, [] included, so that a device drops the
+// subordinates it no longer has, and a subordinate knows that its main
+// takes announce.
+func (h *Hub) subordinates() []protocol.ServerInfo {
+	list := h.d.Devices.Subordinates()
+	out := make([]protocol.ServerInfo, 0, len(list))
+	for _, si := range list {
+		out = append(out, protocol.ServerInfo(si))
+	}
+	return out
 }
 
 // Head returns the etag of app's document, nil when there is none.
@@ -305,6 +339,100 @@ func (h *Hub) AppsChanged() {
 	for _, s := range h.registered(func(m member) bool { return m.server && m.app == "" }) {
 		s.PushApps(list)
 	}
+}
+
+// Announce keeps how devices reach the subordinate whose link session s is,
+// and answers with the device registry, which s is told again on every
+// change from now on. Only a link session of a server-kind device may
+// announce; a server that is not valid, or this server's own id, is a
+// protocol error, which closes the session.
+func (h *Hub) Announce(s *protocol.Session, server protocol.ServerInfo) *protocol.Error {
+	h.mu.Lock()
+	m, ok := h.sessions[s]
+	h.mu.Unlock()
+	if !ok || !m.server || m.app != "" {
+		return &protocol.Error{Code: protocol.CodeProtocol, Message: "only a server's link session may announce"}
+	}
+	if server.ServerID == h.d.ServerID {
+		return &protocol.Error{Code: protocol.CodeProtocol, Message: "a server cannot be its own subordinate"}
+	}
+	si := devices.Server(server)
+	if err := si.Validate(); err != nil {
+		return &protocol.Error{Code: protocol.CodeProtocol, Message: "announce: " + err.Error()}
+	}
+	// Under servers, which the removal of a server-kind device holds: a
+	// device removed meanwhile is not written back.
+	h.servers.RLock()
+	changed, err := h.d.Devices.SetServer(m.device, si)
+	h.servers.RUnlock()
+	if err != nil {
+		return h.errInternal(err)
+	}
+	if changed {
+		h.d.Logf("the subordinate %q (%s) is reached at port %d, hosts %v", si.Name, si.ServerID, si.Port, si.Hosts)
+	}
+
+	h.devicesMu.Lock()
+	defer h.devicesMu.Unlock()
+	h.mu.Lock()
+	m, ok = h.sessions[s]
+	if ok {
+		m.registry = true
+		h.sessions[s] = m
+	}
+	h.mu.Unlock()
+	if ok { // a session closed meanwhile is told nothing
+		s.PushDevices(h.registry())
+	}
+	return nil
+}
+
+// DevicesChanged tells every link session that announced itself the device
+// registry as it is now. The hub calls it after every change it makes to
+// the registry.
+func (h *Hub) DevicesChanged() {
+	h.devicesMu.Lock()
+	defer h.devicesMu.Unlock()
+	list := h.registry()
+	for _, s := range h.registered(func(m member) bool { return m.registry }) {
+		s.PushDevices(list)
+	}
+}
+
+// Replicate makes list the devices this server admits on its main's word
+// (devices.SetReplica), and closes the sessions of the devices it no longer
+// holds: a device removed on the main is refused here from the moment the
+// main's registry says so. The link calls it with every registry it gets.
+func (h *Hub) Replicate(list []devices.Entry) {
+	// Under servers, which every admission and write read-locks: none slips
+	// between the new list and the sessions closed for it.
+	h.servers.Lock()
+	before := h.d.Devices.Replica()
+	h.d.Devices.SetReplica(list)
+	kept := map[devices.Entry]bool{}
+	for _, e := range h.d.Devices.Replica() {
+		kept[e] = true
+	}
+	gone := map[string]bool{}
+	for _, e := range before {
+		if d, ok := h.d.Devices.Get(e.ID); !kept[e] && (!ok || d.Replica) {
+			gone[e.ID] = true // an own device with that id keeps its sessions
+		}
+	}
+	targets := h.registered(func(m member) bool { return !m.server && gone[m.device] })
+	h.servers.Unlock()
+	closeAll(targets)
+}
+
+// registry is the device registry a main tells its subordinates: its own
+// devices of apps, with their token hashes.
+func (h *Hub) registry() []protocol.DeviceEntry {
+	list := h.d.Devices.Entries()
+	out := make([]protocol.DeviceEntry, 0, len(list))
+	for _, e := range list {
+		out = append(out, protocol.DeviceEntry(e))
+	}
+	return out
 }
 
 // appList is the listed apps, sorted by id.
@@ -429,7 +557,8 @@ func (h *Hub) Sessions() []SessionInfo {
 }
 
 // RemoveDevice deletes device id, closes its sessions, and reports whether it
-// existed.
+// existed. A device of the replica (its main's, on a subordinate) is not
+// this server's to delete: only its sessions close.
 func (h *Hub) RemoveDevice(id string) bool {
 	d, ok := h.d.Devices.Get(id)
 	if !ok {
@@ -451,6 +580,9 @@ func (h *Hub) RemoveDevice(id string) bool {
 	targets := h.registered(func(m member) bool { return m.device == id })
 	l.Unlock()
 	closeAll(targets)
+	if removed {
+		h.DevicesChanged()
+	}
 	return removed
 }
 
@@ -464,7 +596,7 @@ func (h *Hub) RemoveApp(id string) error {
 	if !ok {
 		return fmt.Errorf("%w: %q", apps.ErrNotFound, id)
 	}
-	h.d.Devices.RemoveApp(id)
+	removed := h.d.Devices.RemoveApp(id)
 	err := h.d.Store.DeleteApp(id)
 	if err == nil {
 		err = h.d.Apps.Remove(id)
@@ -472,6 +604,9 @@ func (h *Hub) RemoveApp(id string) error {
 	targets := h.registered(func(m member) bool { return m.app == id })
 	unlock()
 	closeAll(targets) // the devices are gone even if a later step failed
+	if len(removed) > 0 {
+		h.DevicesChanged()
+	}
 	return err
 }
 
@@ -568,6 +703,10 @@ func errBadToken() *protocol.Error {
 
 func errBadSecret() *protocol.Error {
 	return &protocol.Error{Code: protocol.CodeBadSecret, Message: "the pairing secret is wrong, used or expired; get a new pairing code"}
+}
+
+func errNotMain() *protocol.Error {
+	return &protocol.Error{Code: protocol.CodeNotMain, Message: "this server is a subordinate; pair with its main, which hands this server out to its devices"}
 }
 
 func errBlocked() *protocol.Error {

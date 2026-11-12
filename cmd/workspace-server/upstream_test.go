@@ -13,6 +13,7 @@ import (
 
 	"github.com/FLighter7/workspace-server/internal/pairing"
 	"github.com/FLighter7/workspace-server/internal/protocol"
+	"github.com/FLighter7/workspace-server/internal/upstream"
 	"github.com/FLighter7/workspace-server/internal/wsclient"
 )
 
@@ -20,9 +21,11 @@ import (
 const linkWait = 20 * time.Second
 
 // Two whole servers in this process: the subordinate links to the main
-// through its page's API and pulls the main's document; a device's write on
-// the subordinate is pushed to the main; the roles show in the status; a
-// second link is refused; a reset forgets the link.
+// through its page's API and pulls the main's document; it announces itself,
+// and a device paired with the main learns it from the welcome; the
+// subordinate refuses to pair the device itself, admits it on the main's
+// word, and pushes the device's write on to the main; the roles show in the
+// status; a second link is refused; a reset forgets the link.
 func TestTwoServersLinkPullAndPush(t *testing.T) {
 	mainDir, subDir := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(mainDir, "apps.json"), `{"apps":[{"id":"todo","name":"Todo"},{"id":"notes","name":"Notes"}]}`)
@@ -79,29 +82,48 @@ func TestTwoServersLinkPullAndPush(t *testing.T) {
 		t.Errorf("upstream.json: %v", err)
 	}
 
-	// A device paired with the subordinate writes there, and the write goes
-	// on to the main: the hub's hook reaches the link.
-	sc := sub.pairingCode(t)
-	sc.H = []string{"127.0.0.1"}
-	pc, err := wsclient.ParseCode(pairing.EncodeCode(sc))
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), linkWait)
 	defer cancel()
-	phone, err := wsclient.Dial(ctx, pc.Target, "todo", wsclient.DialOptions{})
+	// The subordinate pairs nothing.
+	sc := sub.pairingCode(t)
+	sc.H = []string{"127.0.0.1"}
+	if _, _, err := pairWith(ctx, sc); !wsclient.HasCode(err, "notMain") {
+		t.Errorf("pair with the subordinate: %v, want notMain", err)
+	}
+
+	// A device pairs with the main, whose welcome lists the subordinate as
+	// it announced itself (connected means announced).
+	waitUntil(t, "the link", func() bool { return sub.upstream(t).Connected })
+	mc := main.pairingCode(t)
+	mc.H = []string{"127.0.0.1"}
+	paired, w, err := pairWith(ctx, mc)
+	if err != nil {
+		t.Fatalf("pair with the main: %v", err)
+	}
+	subStatus := sub.status(t)
+	if len(w.Subordinates) != 1 {
+		t.Fatalf("the main's welcome lists %+v, want the subordinate", w.Subordinates)
+	}
+	si := w.Subordinates[0]
+	if si.ServerID != subStatus.ServerID || si.Name != subStatus.Name || si.Port != su || si.Hosts[0] != subStatus.MDNSName {
+		t.Errorf("the subordinate is listed as %+v; its status is %+v", si, subStatus)
+	}
+
+	// The subordinate admits it on the main's word; its write there goes
+	// on to the main: the hub's hook reaches the link. The announced
+	// password and fingerprint are what the connection is built from; only
+	// the hosts are 127.0.0.1, so the test does not depend on the LAN.
+	waitUntil(t, "the subordinate to admit the device", func() bool { return sub.upstream(t).Devices == 1 })
+	phone, err := wsclient.Dial(ctx, wsclient.Target{Password: si.Password, Fingerprint: si.Fingerprint, Port: si.Port, Hosts: []string{"127.0.0.1"}}, "todo", wsclient.DialOptions{})
 	if err != nil {
 		t.Fatalf("dial the subordinate: %v", err)
 	}
 	defer phone.Close()
-	if _, _, err := phone.Pair(ctx, "", pc.Secret, "Phone"); err != nil {
-		t.Fatalf("pair with the subordinate: %v", err)
+	sw, err := phone.Hello(ctx, paired.Device, paired.Token)
+	if err != nil || sw.Role != "subordinate" || sw.ServerID != si.ServerID {
+		t.Fatalf("hello on the subordinate: %+v, %v", sw, err)
 	}
-	etag, err := phone.Head(ctx) // confirms the pairing
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored, _, err := phone.Put(ctx, etag, []byte(`{"v":2}`)); err != nil || !stored {
+	if stored, _, err := phone.Put(ctx, sw.Etag, []byte(`{"v":2}`)); err != nil || !stored {
 		t.Fatalf("put on the subordinate: stored %v, %v", stored, err)
 	}
 	waitUntil(t, "the push to the main", func() bool {
@@ -114,11 +136,12 @@ func TestTwoServersLinkPullAndPush(t *testing.T) {
 		t.Errorf("a second link = %d %s, want 409", code, resp)
 	}
 
-	// The main knows the subordinate as a device with no app.
+	// The main knows the subordinate as a device with no app, beside the
+	// phone.
 	_, devs := main.send(t, http.MethodGet, "/api/devices", "")
 	var list []struct{ App, Name string }
-	if err := json.Unmarshal([]byte(devs), &list); err != nil || len(list) != 1 || list[0].App != "" {
-		t.Errorf("the main's devices %s, want one server-kind device", devs)
+	if err := json.Unmarshal([]byte(devs), &list); err != nil || len(list) != 2 || list[0].App != "" || list[1].App != "todo" {
+		t.Errorf("the main's devices %s, want one server-kind device and the phone", devs)
 	}
 
 	if code, resp := sub.send(t, http.MethodDelete, "/api/data", ""); code != http.StatusAccepted {
@@ -132,6 +155,37 @@ func TestTwoServersLinkPullAndPush(t *testing.T) {
 		code, resp, err := sub.request(http.MethodGet, "/api/status", "")
 		return err == nil && code == http.StatusOK && json.Valid(resp) && sub.status(t).Role == "main"
 	})
+}
+
+// pairWith pairs a device of todo with the server whose code c is, and
+// confirms the pairing.
+func pairWith(ctx context.Context, c pairing.Code) (wsclient.Paired, wsclient.Welcome, error) {
+	pc, err := wsclient.ParseCode(pairing.EncodeCode(c))
+	if err != nil {
+		return wsclient.Paired{}, wsclient.Welcome{}, err
+	}
+	cl, err := wsclient.Dial(ctx, pc.Target, "todo", wsclient.DialOptions{})
+	if err != nil {
+		return wsclient.Paired{}, wsclient.Welcome{}, err
+	}
+	defer cl.Close()
+	p, w, err := cl.Pair(ctx, "", pc.Secret, "Phone")
+	if err != nil {
+		return p, w, err
+	}
+	_, err = cl.Head(ctx) // confirms the pairing
+	return p, w, err
+}
+
+// upstream reads the link's status from the page's API.
+func (ts *testServer) upstream(t *testing.T) upstream.Status {
+	t.Helper()
+	code, body := ts.send(t, http.MethodGet, "/api/upstream", "")
+	var st upstream.Status
+	if code != http.StatusOK || json.Unmarshal([]byte(body), &st) != nil {
+		t.Fatalf("GET /api/upstream = %d %s", code, body)
+	}
+	return st
 }
 
 func waitUntil(t *testing.T, what string, cond func() bool) {

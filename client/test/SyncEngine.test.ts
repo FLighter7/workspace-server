@@ -590,7 +590,13 @@ describe('SyncEngine', () => {
 		expect(server.log).toContain('forget#1');
 		expect(server.devices.size).toBe(0);
 		expect(state.pairing).toBeNull();
-		expect(last()).toEqual({ status: 'unpaired', serverName: null, lastSyncAt: null, error: null });
+		expect(last()).toEqual({
+			status: 'unpaired',
+			serverName: null,
+			via: null,
+			lastSyncAt: null,
+			error: null,
+		});
 	});
 
 	it('disconnect while unreachable clears the pairing without forget', async () => {

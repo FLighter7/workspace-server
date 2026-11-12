@@ -1,9 +1,8 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { createSocket } from 'node:dgram';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { createServer } from 'node:net';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { expect, test, type Browser, type Page } from '@playwright/test';
+import './harness.js';
+import { SCRATCH, Server, buildServer } from './servers.js';
 
 /**
  * The built package against a real workspace-server, in a real browser. The
@@ -11,96 +10,16 @@ import { expect, test, type Browser, type Page } from '@playwright/test';
  * one already built) and keeps its data under the repository's tmp/.
  */
 
-interface Device {
-	state: { notes: string[]; status: string; error: string | null };
-	pair(code: string): Promise<string>;
-	add(note: string): void;
-}
-
-declare global {
-	interface Window {
-		harness: {
-			createDevice(notes: string[]): Device;
-			pairAs(app: string, code: string): Promise<string>;
-		};
-		device: Device;
-	}
-}
-
-const REPO = resolve(import.meta.dirname, '..', '..');
-
-let server: ChildProcess | null = null;
+let server: Server | null = null;
 let tmp = '';
-let httpPort = 0;
 
 test.describe.configure({ mode: 'serial' });
 
-function freeTcpPort(): Promise<number> {
-	return new Promise((resolvePort, reject) => {
-		const probe = createServer();
-		probe.once('error', reject);
-		probe.listen(0, '127.0.0.1', () => {
-			const address = probe.address();
-			probe.close(() => resolvePort(typeof address === 'object' && address ? address.port : 0));
-		});
-	});
-}
-
-function freeUdpPort(): Promise<number> {
-	return new Promise((resolvePort, reject) => {
-		const probe = createSocket('udp4');
-		probe.once('error', reject);
-		probe.bind(0, () => {
-			const { port } = probe.address();
-			probe.close(() => resolvePort(port));
-		});
-	});
-}
-
-function buildServer(): string {
-	if (process.env.WORKSPACE_SERVER_BIN) return resolve(process.env.WORKSPACE_SERVER_BIN);
-
-	const binary = join(
-		tmp,
-		process.platform === 'win32' ? 'workspace-server.exe' : 'workspace-server',
-	);
-	const build = spawnSync('go', ['build', '-o', binary, './cmd/workspace-server'], {
-		cwd: REPO,
-		encoding: 'utf8',
-	});
-	if (build.status !== 0) {
-		throw new Error(`go build failed: ${build.error?.message ?? ''}${build.stderr ?? ''}`);
-	}
-
-	return binary;
-}
-
-async function waitForServer(): Promise<void> {
-	const deadline = Date.now() + 30_000;
-	while (Date.now() < deadline) {
-		if (server?.exitCode !== null) throw new Error('workspace-server exited at start');
-		try {
-			const response = await fetch(`http://127.0.0.1:${httpPort}/api/status`);
-			if (response.ok) return;
-		} catch {
-			// Not listening yet.
-		}
-		await new Promise((done) => setTimeout(done, 200));
-	}
-
-	throw new Error('workspace-server did not start within 30 s');
-}
-
 /** A fresh one-time pairing code, as the server's page would show it. */
-async function pairingCode(): Promise<string> {
-	const response = await fetch(`http://127.0.0.1:${httpPort}/api/pairing`, {
-		method: 'POST',
-		headers: { 'X-Workspace-Server': '1' },
-	});
-	expect(response.ok).toBe(true);
-	const { code } = (await response.json()) as { code: string };
+function pairingCode(): Promise<string> {
+	if (!server) throw new Error('no server');
 
-	return code;
+	return server.pairingCode();
 }
 
 async function openPage(browser: Browser): Promise<Page> {
@@ -126,36 +45,13 @@ const notesOf = (page: Page): Promise<string[]> => page.evaluate(() => window.de
 test.beforeAll(async () => {
 	// Building the server with Go takes a while on a cold cache.
 	test.setTimeout(180_000);
-	const scratch = join(REPO, 'tmp');
-	mkdirSync(scratch, { recursive: true });
-	tmp = mkdtempSync(join(scratch, 'client-e2e-'));
-	const binary = buildServer();
-	httpPort = await freeTcpPort();
-	const udpPort = await freeUdpPort();
-
-	server = spawn(
-		binary,
-		[
-			'run',
-			'-dir',
-			join(tmp, 'server'),
-			'-udp-port',
-			String(udpPort),
-			'-http-port',
-			String(httpPort),
-		],
-		{ stdio: 'ignore' },
-	);
-	await waitForServer();
+	mkdirSync(SCRATCH, { recursive: true });
+	tmp = mkdtempSync(join(SCRATCH, 'client-e2e-'));
+	server = await Server.start(buildServer(tmp), join(tmp, 'server'));
 });
 
 test.afterAll(async () => {
-	if (server && server.exitCode === null) {
-		// Windows releases the server's files only once the process is gone.
-		const exited = new Promise((done) => server?.once('exit', done));
-		server.kill();
-		await exited;
-	}
+	await server?.stop();
 	server = null;
 	rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 });

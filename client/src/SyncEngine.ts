@@ -1,8 +1,8 @@
 import { browserDeviceName } from './deviceName.js';
 import { openServerChannel } from './openServerChannel.js';
-import type { PairingCode, ServerTarget } from './PairingCode.js';
+import type { FallbackServer, PairingCode, ServerTarget } from './PairingCode.js';
 import type { Pairing, PairingStore } from './PairingStore.js';
-import { ServerClient } from './ServerClient.js';
+import { ServerClient, type Welcome } from './ServerClient.js';
 import { DocumentError, WorkspaceError, type WorkspaceErrorCode } from './WorkspaceError.js';
 
 export type SyncStatus =
@@ -11,7 +11,14 @@ export type SyncStatus =
 /** What an app shows about sync. `DocCode` is the app's own `DocumentError` codes. */
 export interface SyncState<DocCode extends string = never> {
 	status: SyncStatus;
+	/** The name of the server this device paired with. */
 	serverName: string | null;
+	/**
+	 * The name of the server the open connection goes to when it is not the
+	 * paired one but one of its fallbacks (a subordinate standing in for its
+	 * main); `null` otherwise.
+	 */
+	via: string | null;
 	lastSyncAt: string | null;
 	error: WorkspaceError<WorkspaceErrorCode | DocCode> | null;
 }
@@ -101,6 +108,13 @@ export const CHANGE_DEBOUNCE_MS = 3000;
 export const MAX_WRITES_PER_MINUTE = 10;
 /** How many times one sync re-reads and re-merges after another device wrote first. */
 export const MAX_CONFLICT_RETRIES = 3;
+/**
+ * How long, from the start of a connection, a pairing with fallback servers
+ * waits for its main once another server has answered. A connection opens in
+ * well under a second; a server that is away holds an attempt until it times
+ * out, which is why no attempt waits for another.
+ */
+export const MAIN_GRACE_MS = 2000;
 
 const WRITE_WINDOW_MS = 60_000;
 
@@ -155,6 +169,45 @@ const browserTimers: SyncTimers = {
 	clear: (handle) => clearTimeout(handle as number),
 };
 
+/** A server that answered `hello`: its client, its welcome, and which one it is. */
+interface Reached {
+	client: SyncClient;
+	welcome: Welcome;
+	server: FallbackServer;
+}
+
+/**
+ * The fallbacks a welcome teaches: the subordinates a main lists, without
+ * the paired server, and keeping the answering server itself when it is
+ * not the paired one (a main a device reached as a fallback lists its
+ * subordinates, not itself).
+ */
+function fallbacksFrom(
+	pairing: Pairing,
+	answering: string,
+	subordinates: FallbackServer[],
+): FallbackServer[] {
+	const own = (pairing.fallbacks ?? []).filter(
+		(server) => server.serverId === answering && answering !== pairing.serverId,
+	);
+	const seen = new Set<string>([pairing.serverId]);
+
+	return [...own, ...subordinates].filter((server) => {
+		if (seen.has(server.serverId)) return false;
+		seen.add(server.serverId);
+		return true;
+	});
+}
+
+/** `pairing` with `fallbacks` as given; an empty list leaves the field out, as a record from before had it. */
+function withFallbacks(pairing: Pairing, fallbacks: FallbackServer[]): Pairing {
+	const next = { ...pairing };
+	if (fallbacks.length > 0) next.fallbacks = fallbacks;
+	else delete next.fallbacks;
+
+	return next;
+}
+
 /**
  * Runs server sync for one app run: when to connect, when to sync, when to
  * write, and what to do when something fails. Stateful, so not a singleton:
@@ -179,6 +232,10 @@ export class SyncEngine<DocCode extends string = never> {
 
 	private pairing: Pairing | null = null;
 	private client: SyncClient | null = null;
+	/** The name of the fallback server the client goes to; `null` for the paired one. */
+	private via: string | null = null;
+	/** Ends a connection to several servers that is under way, when the client is dropped. */
+	private abortReach: (() => void) | null = null;
 	/** Whether the client has authenticated (`welcome` received) and may sync. */
 	private ready = false;
 	private unsubscribers: (() => void)[] = [];
@@ -201,6 +258,7 @@ export class SyncEngine<DocCode extends string = never> {
 	private state: SyncState<string> = {
 		status: 'unpaired',
 		serverName: null,
+		via: null,
 		lastSyncAt: null,
 		error: null,
 	};
@@ -281,7 +339,7 @@ export class SyncEngine<DocCode extends string = never> {
 		}
 
 		const { welcome } = paired;
-		this.pairing = {
+		const pairing: Pairing = {
 			serverId: welcome.serverId,
 			name: welcome.name,
 			device: paired.device,
@@ -293,6 +351,10 @@ export class SyncEngine<DocCode extends string = never> {
 			lastEtag: null,
 			lastSyncAt: null,
 		};
+		this.pairing = withFallbacks(
+			pairing,
+			fallbacksFrom(pairing, welcome.serverId, welcome.subordinates ?? []),
+		);
 		this.store.save(this.pairing);
 		this.halted = null;
 		this.syncedCount = null;
@@ -350,6 +412,11 @@ export class SyncEngine<DocCode extends string = never> {
 		this.connectingIn = generation;
 		this.setState({ status: 'connecting', error: null });
 
+		if (pairing.fallbacks?.length) {
+			await this.connectToAny(pairing, generation);
+			return;
+		}
+
 		try {
 			const client = await this.connectTo(pairing);
 			if (generation !== this.generation) {
@@ -366,7 +433,7 @@ export class SyncEngine<DocCode extends string = never> {
 
 			this.ready = true;
 			this.connectingIn = null;
-			this.savePairing({ hosts: welcome.hosts, name: welcome.name });
+			this.learn(pairing.serverId, welcome);
 		} catch (error) {
 			if (generation !== this.generation) return;
 			// The server closes the channel after refusing a hello; drop it
@@ -377,6 +444,158 @@ export class SyncEngine<DocCode extends string = never> {
 		}
 
 		await this.requestSync();
+	}
+
+	/** `connect` for a pairing with fallback servers: the best of them that answers. */
+	private async connectToAny(pairing: Pairing, generation: number): Promise<void> {
+		let reached: Reached;
+		try {
+			reached = await this.reachAny(pairing, generation);
+		} catch (error) {
+			if (generation !== this.generation) return;
+			this.dropClient();
+			this.fail(asWorkspaceError(error));
+			return;
+		}
+		if (generation !== this.generation) {
+			reached.client.close();
+			return;
+		}
+
+		this.attach(reached.client);
+		this.ready = true;
+		this.connectingIn = null;
+		this.via = reached.server.serverId === pairing.serverId ? null : reached.welcome.name;
+		this.learn(reached.server.serverId, reached.welcome);
+		await this.requestSync();
+	}
+
+	/**
+	 * Connects to the paired server and every fallback at once, and says
+	 * hello on each. The paired server answering as a main is taken at once.
+	 * Any other answer waits, until `MAIN_GRACE_MS` after the start or until
+	 * every attempt has ended, and then the best one is taken: a main before
+	 * a subordinate, then the paired server, then the list's order. A welcome
+	 * from a server outside the set is not taken (`serverChanged`). The
+	 * clients not taken are closed.
+	 *
+	 * Fails with the paired server's own error when no server answered, and
+	 * at once when the paired server refuses with an error that halts: a
+	 * fallback's refusal never does, since a subordinate learns of a new
+	 * device only at its next link.
+	 */
+	private reachAny(pairing: Pairing, generation: number): Promise<Reached> {
+		const servers: FallbackServer[] = [pairing, ...(pairing.fallbacks ?? [])];
+		const known = new Map(servers.map((server) => [server.serverId, server]));
+		interface Attempt {
+			client: SyncClient | null;
+			welcome: Welcome | null;
+			error: WorkspaceError<string> | null;
+			done: boolean;
+			unsubscribe?: () => void;
+		}
+		const attempts: Attempt[] = servers.map(() => ({
+			client: null,
+			welcome: null,
+			error: null,
+			done: false,
+		}));
+		const paired = attempts[0];
+		/** Lower is better: a main before a subordinate, then the paired server. */
+		const rank = (welcome: Welcome): number =>
+			(welcome.role === 'subordinate' ? 2 : 0) + (welcome.serverId === pairing.serverId ? 0 : 1);
+
+		return new Promise<Reached>((resolve, reject) => {
+			let settled = false;
+			let graceOver = false;
+			let grace: unknown = null;
+
+			const finish = (winner: Attempt | null, error: WorkspaceError<string> | null): void => {
+				settled = true;
+				if (grace !== null) this.timers.clear(grace);
+				if (this.abortReach === abort) this.abortReach = null;
+				for (const attempt of attempts) {
+					attempt.unsubscribe?.();
+					if (attempt !== winner) attempt.client?.close();
+				}
+				const server = winner?.welcome ? known.get(winner.welcome.serverId) : undefined;
+				if (winner?.client && winner.welcome && server) {
+					resolve({ client: winner.client, welcome: winner.welcome, server });
+				} else {
+					reject(error ?? new WorkspaceError('No server answered', 'connectTimeout'));
+				}
+			};
+
+			const decide = (): void => {
+				if (settled) return;
+				if (generation !== this.generation) {
+					finish(null, new WorkspaceError('The connection was closed', 'closed'));
+					return;
+				}
+				if (paired.welcome && rank(paired.welcome) === 0) {
+					finish(paired, null);
+					return;
+				}
+				if (paired.error && HALTING.has(paired.error.code)) {
+					finish(null, paired.error);
+					return;
+				}
+				const answered = attempts.filter((attempt) => attempt.welcome !== null);
+				const allDone = attempts.every((attempt) => attempt.done);
+				if (answered.length > 0 && (graceOver || allDone)) {
+					// reduce keeps the first of equal ranks: the list's order.
+					const best = answered.reduce((a, b) =>
+						rank(b.welcome as Welcome) < rank(a.welcome as Welcome) ? b : a,
+					);
+					finish(best, null);
+					return;
+				}
+				if (allDone) finish(null, paired.error);
+			};
+
+			const abort = (): void => decide();
+			this.abortReach = abort;
+			grace = this.timers.set(() => {
+				grace = null;
+				graceOver = true;
+				decide();
+			}, MAIN_GRACE_MS);
+
+			servers.forEach((server, i) => {
+				const attempt = attempts[i];
+				void (async () => {
+					try {
+						const client = await this.connectTo(server);
+						attempt.client = client;
+						if (settled) {
+							client.close();
+							return;
+						}
+						// A server that answered and then went away while the
+						// grace runs is no longer one to take.
+						attempt.unsubscribe = client.onClosed((error) => {
+							attempt.welcome = null;
+							attempt.error = error;
+							decide();
+						});
+						const welcome = await client.hello(pairing.device, pairing.token);
+						if (!known.has(welcome.serverId)) {
+							throw new WorkspaceError(
+								'A different server answered at this address',
+								'serverChanged',
+							);
+						}
+						attempt.welcome = welcome;
+					} catch (error) {
+						attempt.error = asWorkspaceError(error);
+						attempt.client?.close();
+					} finally {
+						attempt.done = true;
+						decide();
+					}
+				})();
+			});
+		});
 	}
 
 	private attach(client: SyncClient): void {
@@ -399,6 +618,11 @@ export class SyncEngine<DocCode extends string = never> {
 		if (close) this.client?.close();
 		this.client = null;
 		this.ready = false;
+		this.via = null;
+		// A connection to several servers under way ends now, closing them.
+		const abort = this.abortReach;
+		this.abortReach = null;
+		abort?.();
 	}
 
 	/** Runs a sync, or once more after the one running now. */
@@ -556,11 +780,39 @@ export class SyncEngine<DocCode extends string = never> {
 		this.setState({});
 	}
 
+	/**
+	 * Keeps what a welcome says about the server that sent it (its hosts and
+	 * name: the paired server's, or that fallback's), and the fallbacks a
+	 * main lists. A welcome without a list (a subordinate's, or an older
+	 * server's) leaves the fallbacks as they are.
+	 */
+	private learn(serverId: string, welcome: Welcome): void {
+		const pairing = this.pairing;
+		if (!pairing) return;
+		const seen = { hosts: welcome.hosts, name: welcome.name };
+		let next: Pairing =
+			serverId === pairing.serverId
+				? { ...pairing, ...seen }
+				: withFallbacks(
+						pairing,
+						(pairing.fallbacks ?? []).map((server) =>
+							server.serverId === serverId ? { ...server, ...seen } : server,
+						),
+					);
+		if (welcome.subordinates) {
+			next = withFallbacks(next, fallbacksFrom(next, serverId, welcome.subordinates));
+		}
+		this.pairing = next;
+		this.store.save(next);
+		this.setState({});
+	}
+
 	private setState(patch: Partial<SyncState<string>>): void {
 		this.state = {
 			...this.state,
 			...patch,
 			serverName: this.pairing?.name ?? null,
+			via: this.via,
 			lastSyncAt: this.pairing?.lastSyncAt ?? null,
 		};
 		this.onState({ ...this.state } as SyncState<DocCode>);

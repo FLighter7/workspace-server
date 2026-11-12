@@ -9,13 +9,14 @@ import (
 	"time"
 
 	"github.com/FLighter7/workspace-server/internal/apps"
+	"github.com/FLighter7/workspace-server/internal/devices"
 	"github.com/FLighter7/workspace-server/internal/fsutil"
 	"github.com/FLighter7/workspace-server/internal/wsclient"
 )
 
 // state is upstream.json: the main this server is linked to, the
-// server-kind device it is there, and per app the etag both sides last
-// agreed on.
+// server-kind device it is there, per app the etag both sides last agreed
+// on, and the main's device registry as it last came.
 type state struct {
 	ServerID    string    `json:"serverId"`
 	Name        string    `json:"name"`
@@ -30,6 +31,9 @@ type state struct {
 	// the main last agreed. An app missing here has never been agreed on;
 	// one with a null base was agreed to have no document.
 	Apps map[string]appState `json:"apps"`
+	// Devices is the main's device registry, which this server admits by
+	// (hashes only, as the main sent them).
+	Devices []devices.Entry `json:"devices,omitempty"`
 }
 
 type appState struct {
@@ -54,6 +58,7 @@ func (s *state) clone() *state {
 	for id, a := range s.Apps {
 		c.Apps[id] = a
 	}
+	c.Devices = append([]devices.Entry(nil), s.Devices...)
 	return &c
 }
 
@@ -103,6 +108,11 @@ func (s *state) validate() error {
 		}
 		if a.Base != nil && !etagPattern.MatchString(*a.Base) {
 			return fmt.Errorf("apps: %q: base must be 64 lowercase hex digits or null", id)
+		}
+	}
+	for i, d := range s.Devices {
+		if err := d.Validate(); err != nil {
+			return fmt.Errorf("devices[%d]: %w", i, err)
 		}
 	}
 	return nil

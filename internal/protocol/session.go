@@ -114,23 +114,24 @@ func (s *Session) HandleText(msg string) {
 		return
 	}
 	var f struct {
-		T      string  `json:"t"`
-		Proto  *int    `json:"proto"`
-		App    string  `json:"app"`
-		Device string  `json:"device"`
-		Token  string  `json:"token"`
-		Secret string  `json:"secret"`
-		Name   string  `json:"name"`
-		Kind   *string `json:"kind"`
-		IfEtag *string `json:"ifEtag"`
-		Bytes  *int64  `json:"bytes"`
+		T      string      `json:"t"`
+		Proto  *int        `json:"proto"`
+		App    string      `json:"app"`
+		Device string      `json:"device"`
+		Token  string      `json:"token"`
+		Secret string      `json:"secret"`
+		Name   string      `json:"name"`
+		Kind   *string     `json:"kind"`
+		IfEtag *string     `json:"ifEtag"`
+		Bytes  *int64      `json:"bytes"`
+		Server *ServerInfo `json:"server"`
 	}
 	if err := json.Unmarshal([]byte(msg), &f); err != nil {
 		s.fail(CodeProtocol, "malformed text frame: "+err.Error())
 		return
 	}
 	switch f.T {
-	case "hello", "pair", "head", "get", "put", "forget", "apps":
+	case "hello", "pair", "head", "get", "put", "forget", "apps", "announce":
 	default:
 		s.fail(CodeProtocol, fmt.Sprintf("unknown frame type %q", f.T))
 		return
@@ -202,6 +203,23 @@ func (s *Session) HandleText(msg string) {
 			s.fail(e.Code, e.Message)
 		default:
 			s.reply(e)
+		}
+	case "announce":
+		switch {
+		case app != "":
+			s.fail(CodeProtocol, "only a link session may announce a server")
+		case f.Server == nil:
+			s.fail(CodeProtocol, "announce needs a server")
+		default:
+			// The backend answers with PushDevices itself, so that the answer
+			// and the pushes leave in the order the registry changed.
+			if e := s.b.Announce(s, *f.Server); e != nil {
+				if e.Code == CodeProtocol {
+					s.fail(e.Code, e.Message)
+				} else {
+					s.reply(e)
+				}
+			}
 		}
 	}
 }
@@ -300,7 +318,11 @@ func (s *Session) authenticate(app, device string, w Welcome, paired *pairedFram
 	if hosts == nil {
 		hosts = []string{}
 	}
-	welcome := welcomeFrame{"welcome", Version, w.Role, w.ServerID, w.Name, w.Etag, hosts}
+	welcome := welcomeFrame{"welcome", Version, w.Role, w.ServerID, w.Name, w.Etag, hosts, nil}
+	if w.Subordinates != nil {
+		list := serverList(w.Subordinates)
+		welcome.Subordinates = &list
+	}
 
 	s.mu.Lock()
 	if s.closed || s.closing {
@@ -362,6 +384,22 @@ func (s *Session) PushApps(list []AppInfo) {
 	default:
 		s.queueLocked(outgoing{text: encode(appsFrame{"apps", list})})
 	}
+}
+
+// PushDevices tells the client the device registry: the answer to its
+// announce, and again after every change. It never blocks. On a session
+// that is closed or not authenticated it does nothing: only a link session
+// that announced is told the registry.
+func (s *Session) PushDevices(list []DeviceEntry) {
+	if list == nil {
+		list = []DeviceEntry{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.closing || !s.authenticated {
+		return
+	}
+	s.queueLocked(outgoing{text: encode(devicesFrame{"devices", list})})
 }
 
 // App returns the app the session authenticated for; empty until then,
@@ -632,13 +670,14 @@ type (
 		Token  string `json:"token"`
 	}
 	welcomeFrame struct {
-		T        string   `json:"t"`
-		Proto    int      `json:"proto"`
-		Role     string   `json:"role,omitempty"`
-		ServerID string   `json:"serverId"`
-		Name     string   `json:"name"`
-		Etag     *string  `json:"etag"`
-		Hosts    []string `json:"hosts"`
+		T            string        `json:"t"`
+		Proto        int           `json:"proto"`
+		Role         string        `json:"role,omitempty"`
+		ServerID     string        `json:"serverId"`
+		Name         string        `json:"name"`
+		Etag         *string       `json:"etag"`
+		Hosts        []string      `json:"hosts"`
+		Subordinates *[]ServerInfo `json:"subordinates,omitempty"`
 	}
 	errorFrame struct {
 		T       string `json:"t"`
@@ -649,7 +688,24 @@ type (
 		T    string    `json:"t"`
 		Apps []AppInfo `json:"apps"`
 	}
+	devicesFrame struct {
+		T       string        `json:"t"`
+		Devices []DeviceEntry `json:"devices"`
+	}
 )
+
+// serverList is list with every entry's hosts never nil, so that the frame
+// always carries arrays.
+func serverList(list []ServerInfo) []ServerInfo {
+	out := make([]ServerInfo, len(list))
+	for i, si := range list {
+		if si.Hosts == nil {
+			si.Hosts = []string{}
+		}
+		out[i] = si
+	}
+	return out
+}
 
 // appList is list, never nil, so that an empty list is [] on the wire.
 func appList(list []AppInfo) []AppInfo {

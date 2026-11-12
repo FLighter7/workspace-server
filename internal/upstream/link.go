@@ -9,6 +9,11 @@
 // pushes when only this server's did, and when both did, the main's copy
 // wins here and this server's goes to history. Neither side ever merges:
 // the devices do, as they always have, and write the result back.
+//
+// Over the link session the link also announces how devices reach this
+// server, which the main hands out to its devices, and keeps the main's
+// device registry, so that this server admits the main's devices, also
+// while the main is out of reach.
 package upstream
 
 import (
@@ -20,6 +25,7 @@ import (
 	"time"
 
 	"github.com/FLighter7/workspace-server/internal/apps"
+	"github.com/FLighter7/workspace-server/internal/devices"
 	"github.com/FLighter7/workspace-server/internal/store"
 	"github.com/FLighter7/workspace-server/internal/wsclient"
 )
@@ -109,8 +115,15 @@ type Deps struct {
 	Writer   Writer
 	// Dial opens a session to the main for app ("" for the link session).
 	Dial func(ctx context.Context, t wsclient.Target, app string) (*wsclient.Client, error)
-	Now  func() time.Time
-	Logf func(format string, args ...any)
+	// Self, if set, is how devices reach this server, read at every
+	// announce: the link announces it to a main that takes announce.
+	Self func() wsclient.Server
+	// Admit, if set, is given the main's device registry whenever it
+	// changes, and the one upstream.json kept when the link opens: the
+	// devices this server admits on the main's word (devices.SetReplica).
+	Admit func(list []devices.Entry)
+	Now   func() time.Time
+	Logf  func(format string, args ...any)
 	// MinBackoff and MaxBackoff bound the wait before reconnecting; 0 means
 	// 1 s and 30 s.
 	MinBackoff, MaxBackoff time.Duration
@@ -136,6 +149,9 @@ type Status struct {
 	// Stopped lists the apps the write guard stopped, sorted; they do not
 	// sync until the link starts again.
 	Stopped []string `json:"stopped,omitempty"`
+	// Devices counts the main's devices this server admits: the registry
+	// the main last sent.
+	Devices int `json:"devices,omitempty"`
 }
 
 // Link is a server's link to its upstream server. It is safe for concurrent
@@ -158,8 +174,9 @@ type Link struct {
 	cancel    context.CancelFunc
 	closed    bool
 
-	kick chan struct{} // reconnect now
-	wg   sync.WaitGroup
+	kick     chan struct{} // reconnect now
+	announce chan struct{} // announce again: how devices reach this server changed
+	wg       sync.WaitGroup
 
 	// localMu guards local alone, so a device's write never waits for the
 	// link's own work under mu (saving upstream.json, say).
@@ -186,8 +203,13 @@ func Open(d Deps) (*Link, error) {
 	if err != nil {
 		return nil, err
 	}
+	if st != nil && d.Admit != nil {
+		// Admitted at once, before the main is reached: that is what lets
+		// its devices sync here while it is away.
+		d.Admit(slices.Clone(st.Devices))
+	}
 	return &Link{
-		d: d, st: st, kick: make(chan struct{}, 1),
+		d: d, st: st, kick: make(chan struct{}, 1), announce: make(chan struct{}, 1),
 		pushes: map[string][]time.Time{}, stopped: map[string]bool{}, local: map[string]chan struct{}{},
 	}, nil
 }
@@ -249,6 +271,12 @@ func (l *Link) NetworkChanged() {
 	}
 }
 
+// SelfChanged tells the link that how devices reach this server changed
+// (its name or its UDP port): it announces itself again to the main over
+// the link session it holds. An address change needs no call: the link
+// reconnects then, and every link session announces. It never blocks.
+func (l *Link) SelfChanged() { poke(l.announce) }
+
 // LocalWrite tells the link that a device stored a document of app on this
 // server, so that the app's worker syncs it with the main at once (a push,
 // usually). The hub calls it after every device's write and never after the
@@ -299,6 +327,7 @@ func (l *Link) Status() Status {
 	}
 	at := l.st.LinkedAt
 	st.ServerID, st.Name, st.Hosts, st.LinkedAt = l.st.ServerID, l.st.Name, append([]string(nil), l.st.Hosts...), &at
+	st.Devices = len(l.st.Devices)
 	st.Connected, st.Halted, st.Reason, st.LastError, st.LastSync = l.connected, l.halted, l.reason, l.lastErr, l.lastSync
 	for id := range l.stopped {
 		st.Stopped = append(st.Stopped, id)
@@ -483,9 +512,20 @@ func (l *Link) halt(err error) {
 	var re *RefusedError
 	errors.As(err, &re)
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.halted, l.reason, l.lastErr = true, re.Reason, err.Error()
 	l.d.Logf("the link to the main stopped: %v", err)
+	// badToken: the main removed this server, so its registry is no longer
+	// this server's to admit by.
+	forget := re.Reason == "badToken" && len(l.st.Devices) > 0
+	if forget {
+		l.st.Devices = nil
+		l.saveLocked()
+		l.d.Logf("the main's devices are no longer admitted here")
+	}
+	l.mu.Unlock()
+	if forget && l.d.Admit != nil {
+		l.d.Admit(nil)
+	}
 }
 
 func (l *Link) failed(err error) {
@@ -515,6 +555,8 @@ func (l *Link) session(ctx context.Context) error {
 	defer cl.Close()
 	lists := make(chan []wsclient.App, 1)
 	cl.OnApps(func(list []wsclient.App) { latest(lists, list) })
+	registries := make(chan []wsclient.Device, 1)
+	cl.OnDevices(func(list []wsclient.Device) { latest(registries, list) })
 	w, err := cl.Hello(ctx, st.Device, st.Token)
 	if err != nil {
 		return refused(err)
@@ -525,6 +567,18 @@ func (l *Link) session(ctx context.Context) error {
 	l.keepHosts(w.Hosts)
 	if _, err := cl.Apps(ctx); err != nil {
 		return refused(err)
+	}
+	// A main that lists subordinates takes announce; one from before does
+	// not, and this server then stays unknown to its devices.
+	announces := w.Subordinates != nil && l.d.Self != nil
+	if announces {
+		select { // this announce carries the change
+		case <-l.announce:
+		default:
+		}
+		if _, err := cl.Announce(ctx, l.d.Self()); err != nil {
+			return refused(err)
+		}
 	}
 	l.setConnected(true)
 	defer l.setConnected(false)
@@ -557,6 +611,15 @@ func (l *Link) session(ctx context.Context) error {
 				}
 			}
 			l.setSyncing(want)
+		case list := <-registries:
+			l.replicate(list)
+		case <-l.announce:
+			if !announces {
+				continue
+			}
+			if _, err := cl.Announce(ctx, l.d.Self()); err != nil {
+				return refused(err)
+			}
 		case err := <-fatal:
 			return err
 		case <-cl.Done():
@@ -581,6 +644,33 @@ func latest[T any](ch chan T, v T) {
 		case <-ch:
 		default:
 		}
+	}
+}
+
+// replicate keeps the main's device registry: in upstream.json, so that a
+// restart still admits the main's devices while the main is out of reach,
+// and with Admit. An entry that is not valid is left out.
+func (l *Link) replicate(list []wsclient.Device) {
+	entries := make([]devices.Entry, 0, len(list))
+	for _, d := range list {
+		e := devices.Entry(d)
+		if err := e.Validate(); err != nil {
+			l.d.Logf("the main's device %q is left out: %v", d.ID, err)
+			continue
+		}
+		entries = append(entries, e)
+	}
+	l.mu.Lock()
+	if slices.Equal(l.st.Devices, entries) {
+		l.mu.Unlock()
+		return
+	}
+	l.st.Devices = entries
+	l.saveLocked()
+	l.d.Logf("the main's device registry: %d devices admitted here", len(entries))
+	l.mu.Unlock()
+	if l.d.Admit != nil {
+		l.d.Admit(slices.Clone(entries))
 	}
 }
 

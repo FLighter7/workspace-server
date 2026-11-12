@@ -1,9 +1,9 @@
 {
 	"about": [
-		"Exchanges. A session is new, authenticated as device \"d1\" of app \"todo\", or a link session (authenticated as the server-kind device \"s1\", with no app). With the backend in the state given, a client call sends the client frame (and clientBody, if any); the server answers with the server frames (and serverBody); the call resolves with result or fails with the error code. push is a changed frame the server sends unasked; pushApps is an apps frame the server sends unasked.",
+		"Exchanges. A session is new, authenticated as device \"d1\" of app \"todo\", or a link session (authenticated as the server-kind device \"s1\", with no app). With the backend in the state given, a client call sends the client frame (and clientBody, if any); the server answers with the server frames (and serverBody); the call resolves with result or fails with the error code. push is a changed frame the server sends unasked; pushApps is an apps frame and pushDevices a devices frame the server sends unasked.",
 		"closes: the server closes the channel after its frames. An error frame also carries a message, English text for a developer whose wording is the server's; it is not compared.",
-		"Bodies are UTF-8 text. backend keys: welcome, helloError, paired, pairError, head, doc, put ({stored} or {conflict}), putError, apps, appsError.",
-		"exchanges are spoken by every client. serverKind holds the exchanges of a server-kind device: a subordinate server linking to its main. The client package does not speak them; the server's Session and its Go client play them. A welcome result there includes role.",
+		"Bodies are UTF-8 text. backend keys: welcome, helloError, paired, pairError, head, doc, put ({stored} or {conflict}), putError, apps, appsError, devices, announceError. A welcome result holds role and subordinates when the frame carries them.",
+		"exchanges are spoken by every client. serverKind holds the exchanges of a server-kind device: a subordinate server linking to its main. The client package does not speak them; the server's Session and its Go client play them.",
 		"tolerated: frames one side accepts although the other side never sends them."
 	],
 	"exchanges": [
@@ -56,7 +56,8 @@
 				"hosts": [
 					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 					"192.168.1.20"
-				]
+				],
+				"role": "main"
 			}
 		},
 		{
@@ -108,7 +109,156 @@
 				"hosts": [
 					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 					"192.168.1.20"
+				],
+				"role": "main"
+			}
+		},
+		{
+			"name": "hello to a main that lists its subordinates",
+			"session": "new",
+			"backend": {
+				"welcome": {
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": "e1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					],
+					"role": "main",
+					"subordinates": [
+						{
+							"serverId": "Lp7tOp0123ab",
+							"name": "Laptop",
+							"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+							"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+							"port": 47801,
+							"hosts": [
+								"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+								"192.168.1.30"
+							]
+						}
+					]
+				}
+			},
+			"call": {
+				"method": "hello",
+				"app": "todo",
+				"device": "Dev0123456789ab",
+				"token": "tok-hello"
+			},
+			"client": {
+				"t": "hello",
+				"proto": 1,
+				"app": "todo",
+				"device": "Dev0123456789ab",
+				"token": "tok-hello"
+			},
+			"server": [
+				{
+					"t": "welcome",
+					"proto": 1,
+					"role": "main",
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": "e1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					],
+					"subordinates": [
+						{
+							"serverId": "Lp7tOp0123ab",
+							"name": "Laptop",
+							"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+							"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+							"port": 47801,
+							"hosts": [
+								"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+								"192.168.1.30"
+							]
+						}
+					]
+				}
+			],
+			"result": {
+				"serverId": "Ab3dEf6hIj9k",
+				"name": "Desk",
+				"etag": "e1",
+				"hosts": [
+					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+					"192.168.1.20"
+				],
+				"role": "main",
+				"subordinates": [
+					{
+						"serverId": "Lp7tOp0123ab",
+						"name": "Laptop",
+						"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+						"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+						"port": 47801,
+						"hosts": [
+							"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+							"192.168.1.30"
+						]
+					}
 				]
+			}
+		},
+		{
+			"name": "hello to a main without subordinates",
+			"session": "new",
+			"backend": {
+				"welcome": {
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": "e1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					],
+					"role": "main",
+					"subordinates": []
+				}
+			},
+			"call": {
+				"method": "hello",
+				"app": "todo",
+				"device": "Dev0123456789ab",
+				"token": "tok-hello"
+			},
+			"client": {
+				"t": "hello",
+				"proto": 1,
+				"app": "todo",
+				"device": "Dev0123456789ab",
+				"token": "tok-hello"
+			},
+			"server": [
+				{
+					"t": "welcome",
+					"proto": 1,
+					"role": "main",
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": "e1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					],
+					"subordinates": []
+				}
+			],
+			"result": {
+				"serverId": "Ab3dEf6hIj9k",
+				"name": "Desk",
+				"etag": "e1",
+				"hosts": [
+					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+					"192.168.1.20"
+				],
+				"role": "main",
+				"subordinates": []
 			}
 		},
 		{
@@ -200,7 +350,8 @@
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
-					]
+					],
+					"role": "main"
 				}
 			}
 		},
@@ -259,6 +410,34 @@
 			],
 			"closes": true,
 			"error": "badSecret"
+		},
+		{
+			"name": "pair with a subordinate, which leaves pairing to its main",
+			"session": "new",
+			"backend": {
+				"pairError": "notMain"
+			},
+			"call": {
+				"method": "pair",
+				"app": "todo",
+				"secret": "q83vEjRWeJCrze8SNFZ4kA",
+				"name": "Windows Edge"
+			},
+			"client": {
+				"t": "pair",
+				"proto": 1,
+				"app": "todo",
+				"secret": "q83vEjRWeJCrze8SNFZ4kA",
+				"name": "Windows Edge"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "notMain"
+				}
+			],
+			"closes": true,
+			"error": "notMain"
 		},
 		{
 			"name": "head",
@@ -854,6 +1033,321 @@
 			]
 		},
 		{
+			"name": "announce, which a main answers with its device registry",
+			"session": "link",
+			"backend": {
+				"devices": [
+					{
+						"id": "Dev0123456789ab",
+						"app": "todo",
+						"tokenHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+					},
+					{
+						"id": "Dev9876543210zy",
+						"app": "notes",
+						"tokenHash": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
+					}
+				]
+			},
+			"call": {
+				"method": "announce",
+				"server": {
+					"serverId": "Lp7tOp0123ab",
+					"name": "Laptop",
+					"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+					"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+					"port": 47801,
+					"hosts": [
+						"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+						"192.168.1.30"
+					]
+				}
+			},
+			"client": {
+				"t": "announce",
+				"server": {
+					"serverId": "Lp7tOp0123ab",
+					"name": "Laptop",
+					"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+					"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+					"port": 47801,
+					"hosts": [
+						"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+						"192.168.1.30"
+					]
+				}
+			},
+			"server": [
+				{
+					"t": "devices",
+					"devices": [
+						{
+							"id": "Dev0123456789ab",
+							"app": "todo",
+							"tokenHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+						},
+						{
+							"id": "Dev9876543210zy",
+							"app": "notes",
+							"tokenHash": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
+						}
+					]
+				}
+			],
+			"result": [
+				{
+					"id": "Dev0123456789ab",
+					"app": "todo",
+					"tokenHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+				},
+				{
+					"id": "Dev9876543210zy",
+					"app": "notes",
+					"tokenHash": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
+				}
+			]
+		},
+		{
+			"name": "announce when the main has no devices",
+			"session": "link",
+			"backend": {
+				"devices": []
+			},
+			"call": {
+				"method": "announce",
+				"server": {
+					"serverId": "Lp7tOp0123ab",
+					"name": "Laptop",
+					"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+					"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+					"port": 47801,
+					"hosts": [
+						"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+						"192.168.1.30"
+					]
+				}
+			},
+			"client": {
+				"t": "announce",
+				"server": {
+					"serverId": "Lp7tOp0123ab",
+					"name": "Laptop",
+					"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+					"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+					"port": 47801,
+					"hosts": [
+						"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+						"192.168.1.30"
+					]
+				}
+			},
+			"server": [
+				{
+					"t": "devices",
+					"devices": []
+				}
+			],
+			"result": []
+		},
+		{
+			"name": "devices pushed when the registry changes",
+			"session": "link",
+			"backend": {},
+			"pushDevices": [
+				{
+					"id": "Dev0123456789ab",
+					"app": "todo",
+					"tokenHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+				},
+				{
+					"id": "Dev9876543210zy",
+					"app": "notes",
+					"tokenHash": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
+				}
+			],
+			"server": [
+				{
+					"t": "devices",
+					"devices": [
+						{
+							"id": "Dev0123456789ab",
+							"app": "todo",
+							"tokenHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+						},
+						{
+							"id": "Dev9876543210zy",
+							"app": "notes",
+							"tokenHash": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
+						}
+					]
+				}
+			],
+			"result": [
+				{
+					"id": "Dev0123456789ab",
+					"app": "todo",
+					"tokenHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+				},
+				{
+					"id": "Dev9876543210zy",
+					"app": "notes",
+					"tokenHash": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"
+				}
+			]
+		},
+		{
+			"name": "announce that the main refuses",
+			"session": "link",
+			"backend": {
+				"announceError": "protocol"
+			},
+			"call": {
+				"method": "announce",
+				"server": {
+					"serverId": "Lp7tOp0123ab",
+					"name": "Laptop",
+					"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+					"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+					"port": 47801,
+					"hosts": [
+						"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+						"192.168.1.30"
+					]
+				}
+			},
+			"client": {
+				"t": "announce",
+				"server": {
+					"serverId": "Lp7tOp0123ab",
+					"name": "Laptop",
+					"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+					"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+					"port": 47801,
+					"hosts": [
+						"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+						"192.168.1.30"
+					]
+				}
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "protocol"
+				}
+			],
+			"closes": true,
+			"error": "protocol"
+		},
+		{
+			"name": "announce on an app session",
+			"session": "authenticated",
+			"backend": {},
+			"call": {
+				"method": "announce",
+				"server": {
+					"serverId": "Lp7tOp0123ab",
+					"name": "Laptop",
+					"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+					"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+					"port": 47801,
+					"hosts": [
+						"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+						"192.168.1.30"
+					]
+				}
+			},
+			"client": {
+				"t": "announce",
+				"server": {
+					"serverId": "Lp7tOp0123ab",
+					"name": "Laptop",
+					"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+					"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+					"port": 47801,
+					"hosts": [
+						"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+						"192.168.1.30"
+					]
+				}
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "protocol"
+				}
+			],
+			"closes": true,
+			"error": "protocol"
+		},
+		{
+			"name": "announce before hello",
+			"session": "new",
+			"backend": {},
+			"call": {
+				"method": "announce",
+				"server": {
+					"serverId": "Lp7tOp0123ab",
+					"name": "Laptop",
+					"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+					"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+					"port": 47801,
+					"hosts": [
+						"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+						"192.168.1.30"
+					]
+				}
+			},
+			"client": {
+				"t": "announce",
+				"server": {
+					"serverId": "Lp7tOp0123ab",
+					"name": "Laptop",
+					"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+					"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+					"port": 47801,
+					"hosts": [
+						"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+						"192.168.1.30"
+					]
+				}
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "notAuthenticated"
+				}
+			],
+			"error": "notAuthenticated"
+		},
+		{
+			"name": "pair as a server with a subordinate",
+			"session": "new",
+			"backend": {
+				"pairError": "notMain"
+			},
+			"call": {
+				"method": "pair",
+				"kind": "server",
+				"secret": "q83vEjRWeJCrze8SNFZ4kA",
+				"name": "Tablet"
+			},
+			"client": {
+				"t": "pair",
+				"proto": 1,
+				"kind": "server",
+				"secret": "q83vEjRWeJCrze8SNFZ4kA",
+				"name": "Tablet"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "notMain"
+				}
+			],
+			"closes": true,
+			"error": "notMain"
+		},
+		{
 			"name": "apps asked by a device that is not a server",
 			"session": "authenticated",
 			"backend": {
@@ -976,6 +1470,76 @@
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
+					]
+				}
+			},
+			{
+				"name": "a subordinate the client cannot read is left out",
+				"call": {
+					"method": "hello",
+					"app": "todo",
+					"device": "Dev0123456789ab",
+					"token": "tok-hello"
+				},
+				"frames": [
+					{
+						"t": "welcome",
+						"proto": 1,
+						"role": "main",
+						"serverId": "Ab3dEf6hIj9k",
+						"name": "Desk",
+						"etag": "e1",
+						"hosts": [
+							"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+							"192.168.1.20"
+						],
+						"subordinates": [
+							{
+								"serverId": "Tb1tOp0123ab",
+								"name": "Tablet",
+								"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+								"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+								"port": 0,
+								"hosts": [
+									"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+									"192.168.1.30"
+								]
+							},
+							{
+								"serverId": "Lp7tOp0123ab",
+								"name": "Laptop",
+								"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+								"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+								"port": 47801,
+								"hosts": [
+									"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+									"192.168.1.30"
+								]
+							}
+						]
+					}
+				],
+				"result": {
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"etag": "e1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					],
+					"role": "main",
+					"subordinates": [
+						{
+							"serverId": "Lp7tOp0123ab",
+							"name": "Laptop",
+							"password": "Zx9yW8vU7tS6rQ5pO4nM3lK2",
+							"fingerprint": "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F",
+							"port": 47801,
+							"hosts": [
+								"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
+								"192.168.1.30"
+							]
+						}
 					]
 				}
 			},

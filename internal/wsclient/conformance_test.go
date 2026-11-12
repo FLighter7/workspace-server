@@ -287,20 +287,22 @@ type call struct {
 	Name   string  `json:"name"`
 	IfEtag *string `json:"ifEtag"`
 	Body   string  `json:"body"`
+	Server *Server `json:"server"`
 }
 
 type exchange struct {
-	Name       string           `json:"name"`
-	Call       *call            `json:"call"`
-	Client     map[string]any   `json:"client"`
-	ClientBody string           `json:"clientBody"`
-	Push       *string          `json:"push"`
-	PushApps   []App            `json:"pushApps"`
-	Server     []map[string]any `json:"server"`
-	ServerBody string           `json:"serverBody"`
-	Closes     bool             `json:"closes"`
-	Result     json.RawMessage  `json:"result"`
-	Error      string           `json:"error"`
+	Name        string           `json:"name"`
+	Call        *call            `json:"call"`
+	Client      map[string]any   `json:"client"`
+	ClientBody  string           `json:"clientBody"`
+	Push        *string          `json:"push"`
+	PushApps    []App            `json:"pushApps"`
+	PushDevices []Device         `json:"pushDevices"`
+	Server      []map[string]any `json:"server"`
+	ServerBody  string           `json:"serverBody"`
+	Closes      bool             `json:"closes"`
+	Result      json.RawMessage  `json:"result"`
+	Error       string           `json:"error"`
 }
 
 // start makes the call on cl and returns its result as the vectors write
@@ -309,10 +311,11 @@ func start(cl *Client, c *call) (any, error) {
 	ctx := context.Background()
 	switch c.Method {
 	case "hello":
-		return cl.Hello(ctx, c.Device, c.Token)
+		w, err := cl.Hello(ctx, c.Device, c.Token)
+		return welcomeResult(w), err
 	case "pair":
 		p, w, err := cl.Pair(ctx, c.Kind, c.Secret, c.Name)
-		return map[string]any{"device": p.Device, "token": p.Token, "welcome": w}, err
+		return map[string]any{"device": p.Device, "token": p.Token, "welcome": welcomeResult(w)}, err
 	case "head":
 		return cl.Head(ctx)
 	case "get":
@@ -325,8 +328,23 @@ func start(cl *Client, c *call) (any, error) {
 		return nil, cl.Forget(ctx)
 	case "apps":
 		return cl.Apps(ctx)
+	case "announce":
+		return cl.Announce(ctx, *c.Server)
 	}
 	panic("unknown method " + c.Method)
+}
+
+// welcomeResult is w as the vectors write a welcome: role and subordinates
+// only when the frame carried them, an empty list included.
+func welcomeResult(w Welcome) map[string]any {
+	r := map[string]any{"serverId": w.ServerID, "name": w.Name, "etag": w.Etag, "hosts": w.Hosts}
+	if w.Role != "" {
+		r["role"] = w.Role
+	}
+	if w.Subordinates != nil {
+		r["subordinates"] = w.Subordinates
+	}
+	return r
 }
 
 // play sends the server's frames into the client, a body after the frame
@@ -346,25 +364,6 @@ func play(cl *Client, frames []map[string]any, body string) {
 	}
 }
 
-// withoutRole drops the welcome's role from got where want has none: the
-// exchanges every client speaks expect only what the client package reads.
-func withoutRole(got, want any) any {
-	g, ok1 := got.(map[string]any)
-	w, ok2 := want.(map[string]any)
-	if !ok1 || !ok2 {
-		return got
-	}
-	if _, ok := w["role"]; !ok {
-		if _, isWelcome := g["serverId"]; isWelcome {
-			delete(g, "role")
-		}
-	}
-	for k, v := range g {
-		g[k] = withoutRole(v, w[k])
-	}
-	return g
-}
-
 func playExchange(t *testing.T, ex exchange) {
 	fc := &fakeChannel{}
 	app := ""
@@ -373,10 +372,11 @@ func playExchange(t *testing.T, ex exchange) {
 	}
 	cl := NewClient(fc, app)
 
-	if ex.Push != nil || ex.PushApps != nil {
+	if ex.Push != nil || ex.PushApps != nil || ex.PushDevices != nil {
 		var heard []any
 		cl.OnChanged(func(etag string) { heard = append(heard, etag) })
 		cl.OnApps(func(list []App) { heard = append(heard, list) })
+		cl.OnDevices(func(list []Device) { heard = append(heard, list) })
 		play(cl, ex.Server, "")
 		var want any
 		if err := json.Unmarshal(ex.Result, &want); err != nil {
@@ -432,7 +432,7 @@ func playExchange(t *testing.T, ex exchange) {
 	if err := json.Unmarshal(ex.Result, &want); err != nil {
 		t.Fatal(err)
 	}
-	if got := withoutRole(normal(t, o.result), want); !reflect.DeepEqual(got, want) {
+	if got := normal(t, o.result); !reflect.DeepEqual(got, want) {
 		t.Errorf("result %v, want %v", got, want)
 	}
 }
@@ -480,7 +480,7 @@ func TestConformanceExchanges(t *testing.T) {
 			}
 			var want any
 			_ = json.Unmarshal(ex.Result, &want)
-			if got := withoutRole(normal(t, result), want); err != nil || !reflect.DeepEqual(got, want) {
+			if got := normal(t, result); err != nil || !reflect.DeepEqual(got, want) {
 				t.Errorf("result %v, %v; want %v", got, err, want)
 			}
 		})

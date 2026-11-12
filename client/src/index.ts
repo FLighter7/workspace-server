@@ -21,6 +21,8 @@ export { CONNECT_TIMEOUT_MS, openServerChannel } from './openServerChannel.js';
 export {
 	PAIRING_CODE_VERSION,
 	parsePairingCode,
+	readFallbackServer,
+	type FallbackServer,
 	type PairingCode,
 	type ServerTarget,
 } from './PairingCode.js';
@@ -43,6 +45,7 @@ export { startInPage, type Page, type PageAware } from './startInPage.js';
 export {
 	BLOCKED_RETRY_MS,
 	CHANGE_DEBOUNCE_MS,
+	MAIN_GRACE_MS,
 	MAX_CONFLICT_RETRIES,
 	MAX_WRITES_PER_MINUTE,
 	RETRY_DELAYS_MS,

@@ -16,7 +16,13 @@ const same = (a, b) => a.length === b.length && a.every((note, i) => note === b[
 
 /** A device holding `notes`, with a sync engine for the app `todo`. */
 export function createDevice(notes) {
-	const state = { notes: [...notes].sort(), changeCount: 0, status: 'unpaired', error: null };
+	const state = {
+		notes: [...notes].sort(),
+		changeCount: 0,
+		status: 'unpaired',
+		via: null,
+		error: null,
+	};
 	const engine = new SyncEngine({
 		app: 'todo',
 		pairingStore: createPairingStore({ key: 'e2e.server' }),
@@ -38,6 +44,7 @@ export function createDevice(notes) {
 		},
 		onState: (next) => {
 			state.status = next.status;
+			state.via = next.via;
 			state.error = next.error?.code ?? null;
 		},
 	});
@@ -57,6 +64,11 @@ export function createDevice(notes) {
 			state.notes = [...state.notes, note].sort();
 			state.changeCount++;
 			engine.localChanged();
+		},
+		/** The app hidden and shown again: the engine reconnects. */
+		reconnect() {
+			engine.setVisible(false);
+			engine.setVisible(true);
 		},
 	};
 }

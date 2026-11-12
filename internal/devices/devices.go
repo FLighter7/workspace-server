@@ -40,7 +40,10 @@ const (
 const KindServer = "server"
 
 // Device is one paired device. TokenHash is the lowercase hex SHA-256 of the
-// device's token. A server-kind device (Kind KindServer) has no App.
+// device's token. A server-kind device (Kind KindServer) has no App; Server
+// is what it announced about itself, once it has. Replica marks a device of
+// this server's main, which this server admits on the main's word (see
+// SetReplica); it is never written to the file.
 type Device struct {
 	ID        string    `json:"id"`
 	App       string    `json:"app"`
@@ -49,6 +52,8 @@ type Device struct {
 	TokenHash string    `json:"tokenHash"`
 	PairedAt  time.Time `json:"pairedAt"`
 	LastSeen  time.Time `json:"lastSeen"`
+	Server    *Server   `json:"server,omitempty"`
+	Replica   bool      `json:"-"`
 }
 
 // IsServer reports whether d is a server-kind device.
@@ -67,6 +72,7 @@ type Registry struct {
 
 	mu      sync.Mutex
 	devices []Device
+	replica []Device // the main's devices, on a subordinate; see SetReplica
 	// touched records when Touch last wrote the file for a device. Writes made
 	// by other operations are not recorded here.
 	touched map[string]time.Time
@@ -75,8 +81,9 @@ type Registry struct {
 // Open reads the registry at path. A missing file is an empty registry (the
 // file is created on the first change); an unreadable or invalid file is an
 // error and is left untouched: an entry with an empty or repeated id, an
-// unknown kind, an invalid app id (a server-kind entry has none), or a
-// tokenHash that is not 64 lowercase hex digits. Times
+// unknown kind, an invalid app id (a server-kind entry has none), a
+// tokenHash that is not 64 lowercase hex digits, or a server that is not
+// valid or not a server-kind device's. Times
 // are read into UTC. now supplies the clock for PairedAt, LastSeen and write
 // throttling.
 func Open(path string, now func() time.Time) (*Registry, error) {
@@ -108,6 +115,10 @@ func Open(path string, now func() time.Time) (*Registry, error) {
 			return nil, fmt.Errorf("%s: devices[%d]: app %q must match ^[a-z0-9-]{1,64}$", path, i, d.App)
 		case !tokenHashPattern.MatchString(d.TokenHash):
 			return nil, fmt.Errorf("%s: devices[%d]: tokenHash must be 64 lowercase hex digits", path, i)
+		case d.Server != nil && !d.IsServer():
+			return nil, fmt.Errorf("%s: devices[%d]: only a server-kind device has a server", path, i)
+		case d.Server != nil && d.Server.Validate() != nil:
+			return nil, fmt.Errorf("%s: devices[%d]: server: %v", path, i, d.Server.Validate())
 		}
 		seen[d.ID] = true
 		d.PairedAt, d.LastSeen = d.PairedAt.UTC(), d.LastSeen.UTC()
@@ -160,24 +171,23 @@ func (r *Registry) pair(kind, app, name string) (Device, string, error) {
 
 // Authenticate reports whether token belongs to device id of app. A
 // server-kind device matches any app, and app "" too: it is admitted to
-// every app. It does not update LastSeen; call Touch for that.
+// every app. A device of the replica (SetReplica) is checked the same way,
+// against the hash its main sent: the token is 32 random bytes, so its
+// SHA-256 alone proves it, with no salt. It does not update LastSeen; call
+// Touch for that.
 func (r *Registry) Authenticate(app, id, token string) (Device, bool) {
 	got := hashToken(token)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, d := range r.devices {
-		if d.ID != id || (d.App != app && !d.IsServer()) {
-			continue
-		}
-		if subtle.ConstantTimeCompare([]byte(d.TokenHash), []byte(got)) == 1 {
-			return d, true
-		}
-
+	d, ok := r.getLocked(id)
+	if !ok || (d.App != app && !d.IsServer()) {
 		return Device{}, false
 	}
-
-	return Device{}, false
+	if subtle.ConstantTimeCompare([]byte(d.TokenHash), []byte(got)) != 1 {
+		return Device{}, false
+	}
+	return d, true
 }
 
 // Touch sets LastSeen of device id to now. The file is written only if Touch
@@ -205,7 +215,9 @@ func (r *Registry) Touch(id string) {
 }
 
 // Remove deletes device id and reports whether it existed. The device's token
-// stops working at once even if the file cannot be written.
+// stops working at once even if the file cannot be written. A device of the
+// replica is not this server's to remove: it goes when the main's registry
+// drops it.
 func (r *Registry) Remove(id string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -247,18 +259,25 @@ func (r *Registry) RemoveApp(app string) []Device {
 	return removed
 }
 
-// Get returns device id.
+// Get returns device id: this server's own, or else one of the replica.
 func (r *Registry) Get(id string) (Device, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.getLocked(id)
+}
+
+// getLocked returns device id: this server's own first, then the replica's.
+// The caller holds r.mu.
+func (r *Registry) getLocked(id string) (Device, bool) {
 	if i := r.indexOf(id); i >= 0 {
 		return r.devices[i], true
 	}
-	return Device{}, false
+	return r.replicaLocked(id)
 }
 
-// List returns a copy of all devices, sorted by app, then name, then id.
-// Server-kind devices, which have no app, come first.
+// List returns a copy of this server's own devices, sorted by app, then
+// name, then id. Server-kind devices, which have no app, come first. The
+// replica is not listed.
 func (r *Registry) List() []Device {
 	r.mu.Lock()
 	out := append([]Device(nil), r.devices...)

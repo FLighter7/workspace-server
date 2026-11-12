@@ -89,16 +89,16 @@ Module `github.com/FLighter7/workspace-server`, Go 1.27. Dependencies:
 | `internal/identity` | `identity.json`: serverId, certificate, ICE password, mDNS name. |
 | `internal/config` | `config.json`: name, UDP and HTTP ports. |
 | `internal/apps` | `apps.json`: the app registry. It is reloaded when the file changes. |
-| `internal/devices` | `devices.json`: paired devices and their token hashes; a server-kind device (a subordinate) has no app. |
+| `internal/devices` | `devices.json`: paired devices and their token hashes; a server-kind device (a subordinate) has no app, and keeps what it announced. On a subordinate, also the main's devices it admits (the replica, in memory). |
 | `internal/store` | Documents, etags and history. |
 | `internal/fsutil` | `WriteFileAtomic`, shared by every file writer. |
 | `internal/pairing` | The pairing code, secrets and refused pairings, in memory. |
 | `internal/protocol` | One session over a data channel: framing, the message state machine, the ordered send queue. |
-| `internal/hub` | The protocol's backend: authentication, rate limits, broadcast of `changed`, closing sessions on removal; server-kind devices, link sessions and the app list. |
+| `internal/hub` | The protocol's backend: authentication, rate limits, broadcast of `changed`, closing sessions on removal; server-kind devices, link sessions, the app list, `announce`, the subordinates in `welcome` and the device registry pushed to subordinates; `pair` refused on a subordinate. |
 | `internal/rtc` | The UDP listener and the signaling-free accept path. It creates a peer connection per unknown ufrag. |
 | `internal/mdns` | The minimal mDNS responder for the `<uuid>.local` name, and a one-shot resolver for a main's name. |
 | `internal/wsclient` | A Go client of the protocol: the answer, the pairing code, framing and the messages, as in `client/`, and `Dial` with Pion as the offerer. |
-| `internal/upstream` | A subordinate's link to its main: `upstream.json`, the link and app sessions, the sync rule (pull, push, the main's copy winning a divergence), the write guard. |
+| `internal/upstream` | A subordinate's link to its main: `upstream.json`, the link and app sessions, the sync rule (pull, push, the main's copy winning a divergence), the write guard; announcing this server and keeping the main's device registry. |
 | `internal/netaddr` | LAN IPv4 addresses and interfaces. |
 | `internal/web` | The localhost page: serves the page built from `client-wss/` (embedded from `ui/dist`), the API, the guard. |
 | `internal/autostart` | LaunchAgent, `systemd --user` unit, Windows logon task; opening the page. |
@@ -131,13 +131,13 @@ The page `internal/web` serves: Vue 3, Vuetify 4 and vue-i18n, built with Vite. 
 | `openServerChannel.ts` | `RTCPeerConnection` with no ICE servers, one data channel labelled `workspace`; a closed channel closes the peer connection. |
 | `ChannelFraming.ts` | Text frames, bodies in 16 KiB pieces, flow control at 1 MiB / 256 KiB. |
 | `ServerClient.ts` | The messages, one request at a time; `changed` pushes; an unknown error code reads as `internal`. |
-| `PairingStore.ts` | The pairing record in Web Storage under the app's key; every access guarded. |
-| `SyncEngine.ts` | When to connect, sync and write; retries, halts, the write guard, the conflict loop. The app's `SyncAdapter` merges its document; its `DocumentError` halts sync. |
+| `PairingStore.ts` | The pairing record in Web Storage under the app's key, with the main's subordinates as optional fallback servers; every access guarded. |
+| `SyncEngine.ts` | When to connect, sync and write; retries, halts, the write guard, the conflict loop; the main and its subordinates at once, preferring the main. The app's `SyncAdapter` merges its document; its `DocumentError` halts sync. |
 | `startInPage.ts` | Starts the engine and follows the page's visibility, the back-forward cache and the network. |
 | `WorkspaceError.ts` | The error codes, by kind: server, pairing code, transport, engine. |
 | `testing/` | `FakeServer` and `FakeChannel`, exported as `@flighter7/workspace-client/testing` for apps' tests. |
 
-**The contract as data:** `testdata/conformance/` holds the contract as vectors. The client package's `conformance.test.ts` plays them against `ServerClient`, `parsePairingCode` and `buildServerAnswer`. The Go tests play the same files against the `Session` (`internal/protocol`), `EncodeCode` (`internal/pairing`), the reference answer builder (`internal/rtc`) and the Go client (`internal/wsclient`). `frames.json` keeps the exchanges only servers speak (server-kind pairing, link sessions, `apps`) in a section of their own, `serverKind`, which the client package does not read. A change on one side that the other does not follow fails a test. A change to the contract changes `docs/protocol.md`, the vectors and both sides in one commit.
+**The contract as data:** `testdata/conformance/` holds the contract as vectors. The client package's `conformance.test.ts` plays them against `ServerClient`, `parsePairingCode` and `buildServerAnswer`. The Go tests play the same files against the `Session` (`internal/protocol`), `EncodeCode` (`internal/pairing`), the reference answer builder (`internal/rtc`) and the Go client (`internal/wsclient`). `frames.json` keeps the exchanges only servers speak (server-kind pairing, link sessions, `apps`, `announce` and `devices`) in a section of their own, `serverKind`, which the client package does not read. A change on one side that the other does not follow fails a test. A change to the contract changes `docs/protocol.md`, the vectors and both sides in one commit.
 
 | File | Holds |
 | --- | --- |
@@ -374,14 +374,14 @@ The code format and the outcomes are in [protocol.md](protocol.md).
 
 A server is a **main** or a **subordinate**. A main has no upstream server. A subordinate is linked to one main and mirrors its apps on its own disk: a laptop that keeps a PC's documents when it travels. This section describes what is built; "Not built yet" at its end lists the rest.
 
-**The design of the whole hub** (at home, away, switching the main) is drawn in [images/connections.svg](images/connections.svg). It shows the planned design: of it, the link and the sync rule (pull, push, divergence) are built so far.
+**The design of the whole hub** (at home, away, switching the main) is drawn in [images/connections.svg](images/connections.svg). It shows the planned design: of it, the link, the sync rule (pull, push, divergence) and handing subordinates out to devices are built so far.
 
 - **The role** is a subordinate's while `upstream.json` exists in the server folder. Every `welcome` names it (`role`), and `/api/status` shows it.
 - **Only a main can be an upstream.** The link checks the role in every `welcome` it gets and refuses any but `main`, a missing one included (a server from before roles): subordinates form a star of depth one around a main, which cannot hold a cycle. A main that links to another becomes a subordinate and closes the sessions of its own server-kind devices; its subordinates reconnect, read `subordinate`, and stop.
 
 ### Linking
 
-- **How a server is told to link:** `POST /api/upstream {"code": "<the main's pairing code>"}` on its page's API, guarded like every route. It answers once the pairing is done (within 30 s) with the link's status; `GET /api/upstream` reports the status at any time. The page has no section for it yet, and there is no unlinking: a halted link, or a link to the wrong main, is undone only by a reset, which forgets the link, or by deleting `upstream.json` while the server is stopped.
+- **How a server is told to link:** `POST /api/upstream {"code": "<the main's pairing code>"}` on its page's API, guarded like every route. It answers once the pairing is done (within 30 s) with the link's status; `GET /api/upstream` reports the status at any time, with `devices`, the number of the main's devices this server admits. The page has no section for it yet, and there is no unlinking: a halted link, or a link to the wrong main, is undone only by a reset, which forgets the link, or by deleting `upstream.json` while the server is stopped.
 - **The steps:**
   1. parse the code as the client package does (the vectors pin it), and refuse this server's own code;
   2. reach the main and `pair` as a device of kind `server`, named with this server's name;
@@ -445,10 +445,21 @@ A last line of defence against a write loop, as in the client package's engine: 
 - **Why both ways:** with pushes stopped and pulls going on, every change on U would replace L's unpushed document again, each time into history. Stopped, L's copy stays current on L, where its devices still sync.
 - **Per app:** each app is its own document and its own loop, as each app has its own engine on a device.
 
+### Handing subordinates out to devices
+
+Devices pair only with the main, which hands its subordinates out to them; a phone that travels with the laptop then syncs with the laptop's server without a second pairing. The contract is in [protocol.md](protocol.md), "Servers" and "Subordinates: fallback servers for a device".
+
+- **Announcing:** every link session, once the main's `welcome` shows that it lists subordinates (the field is there), sends `announce` with this server's connection data: its id, name, ICE password, fingerprint (uppercase colon hex), UDP port and hosts (the `.local` name, then at most 15 LAN addresses), read live. It announces again on the same session after the page changes its name or UDP port (`Link.SelfChanged`); an address change reconnects the link, and the new session announces. The main keeps the data with the server-kind device in `devices.json` (written only when it changed) and lists it in every `welcome` it sends as a main, of every session, `[]` included.
+- **The device registry:** the main answers `announce` with its devices of apps (id, app, token hash) and pushes the registry again to every link session that announced after each change it makes: a pairing, its undoing, a removal, an app's removal. The answer goes out through the same push, under the same lock, so the last registry a subordinate hears is the newest. Server-kind devices are not in it.
+- **Admitting the main's devices:** the link keeps the registry in `upstream.json` and hands it to the hub (`Hub.Replicate`), which makes it the registry's replica: `Devices.Authenticate` and `Get` see it after this server's own devices, `List` and `devices.json` never do. A device of the replica is admitted to its own app by the SHA-256 of the token it presents: tokens are 32 random bytes, so the hash proves the token with no salt, and a stolen hash does not connect. `upstream.json` is read at start, before the main is reached, so the main's devices sync here while it is away, a restart included. A device the registry drops has its sessions closed at once; its in-flight `put` gets `badToken`.
+- **Removals reach a subordinate late:** while the link is down, a device removed on the main is still admitted here, until the next link brings the registry. Accepted for a single user. A subordinate the main removed (its link halts on `badToken`) clears the registry: the main's devices are no longer admitted here.
+- **`pair` on a subordinate** is `notMain`, of either kind, before anything is checked: no secret is used and no failure counted. The page still issues codes (stage 4 replaces that with `invite`), and they fail with `notMain`.
+- **`forget` through a subordinate** closes the device's sessions here and does not reach the main, which keeps the device until it is removed on its page; this server cannot delete a device of the replica.
+- **On the device** (the client package): see "The client package" below and its README. The engine connects to the main and every subordinate at once and prefers the main.
+
 ### Not built yet
 
-- Handing subordinates out to devices: subordinates announce themselves to the main, `welcome` lists them, the main's device registry is replicated to them, and `pair` is refused on a subordinate.
-- The page: the "Upstream server" section, unlinking, `invite`, and server-kind devices marked on the main's page (until then a server-kind device shows on the Devices page in a group with no app name).
+- The page: the "Upstream server" section, unlinking, `invite`, and server-kind devices marked on the main's page (until then a server-kind device shows on the Devices page in a group with no app name, and a subordinate's page offers pairing codes that fail with `notMain`).
 - Switching the main (`term`).
 
 ## Storage
@@ -490,11 +501,11 @@ apps/<id>/history/     previous documents
   - `history` defaults to 10 (range 1–100).
   - `maxBytes` defaults to 64 MiB (range 1 KiB–1 GiB). Zero values mean the default.
   - The list decides which apps may pair. It is configuration, not security: the device token is the security.
-- **`devices.json`** is `{devices: [{id, app, kind, name, tokenHash, pairedAt, lastSeen}]}`, one entry per device per app. A server-kind device (`kind: "server"`, a subordinate) has `app: ""` and is admitted to every app; `kind` is left out for a device of an app.
+- **`devices.json`** is `{devices: [{id, app, kind, name, tokenHash, pairedAt, lastSeen, server}]}`, one entry per device per app. A server-kind device (`kind: "server"`, a subordinate) has `app: ""` and is admitted to every app; `kind` is left out for a device of an app. `server` is what a server-kind device announced, `{serverId, name, password, fingerprint, port, hosts}`, absent until it has; an entry of an app with one, or one that breaks the announce rules, stops the server like any invalid entry.
   - Times are RFC 3339 UTC, and are read into UTC whatever offset the file holds.
   - `lastSeen` is written at most once a minute per device. A write that fails is retried, and logged, at most once a minute too.
   - On load, an entry with an empty or repeated id, an unknown `kind`, an invalid app id (a server-kind entry must have none) or a `tokenHash` that is not 64 lowercase hex digits stops the server with the file's path and the entry's index; the file is left untouched, like an invalid `apps.json` or `config.json`. Dropping such entries instead would lose them at the next write.
-- **`upstream.json`** is `{serverId, name, password, fingerprint, port, hosts, device, token, linkedAt, apps: {<id>: {base}}}`: the main, this server's device there and its token in plain text (hence 0600, like a browser's pairing record), and per app the agreed etag. An invalid file stops the server with its path and is left untouched, like the other registry files.
+- **`upstream.json`** is `{serverId, name, password, fingerprint, port, hosts, device, token, linkedAt, apps: {<id>: {base}}, devices: [{id, app, tokenHash}]}`: the main, this server's device there and its token in plain text (hence 0600, like a browser's pairing record), per app the agreed etag, and the main's device registry as it last came (hashes only). An invalid file stops the server with its path and is left untouched, like the other registry files.
 - **Documents** are exactly the bytes the last writer sent; the etag is their lowercase hex SHA-256.
   - A write goes to a temporary file in the same directory. It is fsynced and renamed over the target, under a per-app lock covering the compare and the write.
   - Before a write replaces a document, the old one becomes `history/<UTC yyyymmddThhmmss.mmmZ>-<first 8 hex of its etag>.json`, and the oldest beyond `history` are deleted.
@@ -763,6 +774,16 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 - **L13, the write guard counts one app's pushes and stops that app, both ways, until the server starts again** (see "The write guard"), like the client package's engine, which stops writing until the app opens again.
   - Cost: a subordinate whose devices write one app more than 10 times a minute between them (several busy devices on the laptop, which their own guards make unlikely) stops syncing that app with the main until the server restarts. Until the page's "Upstream server" section shows it, only the log and `GET /api/upstream` do.
 
+### Handing out (2026-11-12)
+
+- **L14, `announce` is answered by the device registry,** and the registry is pushed only to link sessions that announced. One round trip on every link session, and an old subordinate, which never announces, never gets a frame it does not know.
+- **L15, a main always sends `subordinates`, `[]` included:** a device drops a subordinate the main no longer lists, and a subordinate knows that its main takes `announce`. A main from before would close the link session over an unknown frame, which halts the link (`protocol`).
+- **L16, the subordinate gets token hashes, never tokens,** and checks a token by its SHA-256, which a 256-bit random token needs no salt for. The replica lives in `upstream.json`, not `devices.json`: it goes with the link (a reset forgets both), is never listed on the page, and an old binary reading `devices.json` meets nothing new but `server`, which it ignores and drops at its next write.
+- **L17, a removed device is admitted by a subordinate until its next link** (the user's single-user trade, accepted in the plan). A subordinate the main removed clears the replica: the main no longer vouches for those devices.
+- **L18, `pair` on a subordinate gets a new code, `notMain`,** checked before the secret: nothing to consume, and no failure counted, since the device did nothing wrong. An old client reads it as `internal`. No `proto` bump (codes may be added).
+- **L19, the device prefers the main by its `role`,** then the server it paired with: the paired main answering is taken at once; any other answer waits until 2 s after the start (`MAIN_GRACE_MS`), or until every attempt ended. A dead server holds an attempt until it times out (8 s in the browser), which is why nothing waits for every attempt. Only the paired server's refusals stop sync: a subordinate's `badToken` can mean a device it has not heard of yet. `serverChanged` is a `welcome` from outside the known set. `lastEtag` stays shared: etags are content hashes.
+- **L20, `forget` through a subordinate stays there:** relaying it would need a new frame for a rare case; the main's page removes the device.
+
 ### Process
 
 - **Development (R10):** the Go rewrite was developed directly on `main`, one reviewed task at a time. Every commit carries the orchestrator's attribution line.
@@ -783,6 +804,9 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 - A subordinate holds N + 1 of the main's 64 sessions for N apps.
 - When the main removes a subordinate, each of the subordinate's sessions fails once on reconnecting. With 10 apps or more that is the 10th failure within a minute, and the main blocks the subordinate's address for 10 minutes, the browser on that machine included.
 - A subordinate cannot be unlinked yet, except by a reset.
+- A device removed on the main is still admitted by a subordinate whose link is down, until its next link; `forget` sent to a subordinate does not reach the main.
+- A subordinate's page still issues pairing codes, which fail with `notMain` (until stage 4's `invite`).
+- The device registry travels in one text frame, which must fit one data-channel message (256 KiB): about 1,500 devices.
 - A divergence between a subordinate and its main is settled by the main's copy; a change that only lived on the subordinate, whose writing device vanished before it merged again, survives only in the subordinate's `history/` (see "The sync rule").
 - The write guard stops an app on a subordinate after more than 10 pushes to the main within a minute, until the server starts again.
 - Small known gaps and their fixes are listed in [TODO.md](TODO.md).
@@ -803,6 +827,7 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 | The client package's e2e (two Chromium devices pair, merge and get a `changed` push; `badSecret`; `unknownApp`) and its unit and conformance tests; the Go conformance tests | Windows 10 22H2 (19045), 2026-11-10 | pass |
 | Mac Safari, Android | | never tried |
 | Two servers linked in one process over real WebRTC on `127.0.0.1` (Go tests: pairing as a server, the app list, the pull, reconnects; then push, divergence, a conflict during a push, the write guard, no ping-pong); the mDNS resolver against the server's own responder on this machine's LAN | Windows 10 22H2 (19045), 2026-11-12 | pass. A subordinate and a main on two machines: not tried. |
+| Handing out: `announce`, the subordinates in `welcome`, the registry replicated and removals, the replica admitted with the main stopped and after the subordinate's restart, `pair` refused (Go, real WebRTC on `127.0.0.1`); Chromium devices paired with a main falling back to its subordinate when the main stops, and both servers converging after both moved (the client package's e2e and the todo app's, two server processes on this machine) | Windows 10 22H2 (19045), 2026-11-12 | pass. Two machines, phones, Safari: not tried. |
 
 ## Testing
 
@@ -849,14 +874,15 @@ pnpm --dir client run test:e2e   # builds the server with Go, two Chromium devic
 - An integration test: the real UDP listener on loopback with a Pion client using the client-built answer. It pairs, puts and gets, and receives `changed` on a second client. It also checks that a wrong password is ignored.
 - The listener's admission (password, session cap, recently ended ufrags) by feeding binding requests straight to its packet handler, and the teardown's drain with a stand-in peer connection.
 - The contract vectors (`testdata/conformance/`), played against the `Session`, `EncodeCode`, the reference answer builder and the Go client, and by the client package against its client.
-- Server-kind devices in the hub: pairing, admission to every app and to link sessions, the app list and its pushes, `Replace`, removal across apps; the `Stored` hook (after a stored put only, outside the hub's locks, never after `Replace`).
+- Server-kind devices in the hub: pairing, admission to every app and to link sessions, the app list and its pushes, `Replace`, removal across apps; the `Stored` hook (after a stored put only, outside the hub's locks, never after `Replace`); `announce` and its refusals, the subordinates in a main's `welcome` (none in a subordinate's), the registry pushed after every change and only to link sessions that announced, `pair` refused on a subordinate with nothing used or counted, the replica admitted by hash to its own app and its dropped devices' sessions closed.
 - The mDNS resolver: query and answer as pure functions, and a lookup of the server's own responder on the real port 5353 (skipped where it cannot run).
-- The link, on real servers in one process linked over real WebRTC on `127.0.0.1`: every row of the sync table (the same document on both sides before a first link; only U moved; only L moved, pushed at once after each device's write; a first link where only L has a document; both moved while the link was down; a first link with different documents on both sides, U winning and L's version found in its history; the devices' merge written back and pushed), a conflict during a push (U's document changed behind its hub, so L pushes against a stale etag and U wins), writes made on L while U was down pushed once it is back (the last only), the write guard stopping one app while another goes on, the guard's sliding minute with a fake clock, and no write ping-pong (devices on both sides, the histories and the link's log stay still for 1.5 s after convergence); the app list (added and removed on the main), a subordinate refused as an upstream with its pairing undone there, a subordinate removed on the main, reconnects after the main's listener restarts, after a restart from `upstream.json` and after a network change; and in `cmd/workspace-server`, two whole servers linked through `POST /api/upstream`, a device's write on the subordinate pushed to the main, then reset.
+- The link, on real servers in one process linked over real WebRTC on `127.0.0.1`: every row of the sync table (the same document on both sides before a first link; only U moved; only L moved, pushed at once after each device's write; a first link where only L has a document; both moved while the link was down; a first link with different documents on both sides, U winning and L's version found in its history; the devices' merge written back and pushed), a conflict during a push (U's document changed behind its hub, so L pushes against a stale etag and U wins), writes made on L while U was down pushed once it is back (the last only), the write guard stopping one app while another goes on, the guard's sliding minute with a fake clock, and no write ping-pong (devices on both sides, the histories and the link's log stay still for 1.5 s after convergence); the app list (added and removed on the main), a subordinate refused as an upstream (`notMain`), a subordinate removed on the main (and its replica cleared), reconnects after the main's listener restarts, after a restart from `upstream.json` and after a network change; handing out: the main's `welcome` listing what the subordinate announced, re-announcing after a change, the registry replicated and a removal refused at once while linked, the replica admitted with the main stopped and after the subordinate's restart, a removal while away admitted until the next link; every device "on the subordinate" pairs with the main and is admitted on its word. In `cmd/workspace-server`, two whole servers linked through `POST /api/upstream`: the subordinate announced (as its status says) in the main's `welcome`, `pair` refused on it, a device paired with the main admitted there and its write pushed to the main, then reset.
 - The client package:
   - its unit tests: framing, the pairing code, the protocol client, the pairing store, the answer;
   - the engine against a small union-merge adapter and a `FakeServer`;
   - the page lifecycle with stand-in event targets;
-  - its e2e: the built package in Chromium, against a server built from this checkout. Two devices pair, merge and receive each other's edit through a `changed` push; a used code gets `badSecret`; another app id gets `unknownApp`.
+  - fallback servers: learning them from the main, preferring the main within the grace period, falling back, a subordinate's refusals not halting, `serverChanged` outside the set, records with and without the field;
+  - its e2e: the built package in Chromium, against a server built from this checkout. Two devices pair, merge and receive each other's edit through a `changed` push; a used code gets `badSecret`; another app id gets `unknownApp`. Against a main and a linked subordinate (two processes): devices paired with the main learn the subordinate, sync through it while the main is stopped, and every copy converges after both servers moved while apart, the subordinate's own version found in its history.
 
 ### Traps when checking on Windows
 

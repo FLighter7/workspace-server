@@ -20,6 +20,47 @@ export interface PairingCode extends ServerTarget {
 	secret: string;
 }
 
+/**
+ * Another server that serves this device's pairing: a subordinate of the
+ * main it paired with, which the main lists in its `welcome`. The device
+ * reaches it with the same device id and token, so it is a pairing code
+ * without the secret.
+ */
+export interface FallbackServer extends ServerTarget {
+	serverId: string;
+	name: string;
+}
+
+const FINGERPRINT_HEX = /^([0-9A-F]{2}:){31}[0-9A-F]{2}$/;
+/** A host goes into the answer's SDP as is: a `.local` name or an address, nothing that ends a line. */
+const HOST = /^[A-Za-z0-9.:-]{1,253}$/;
+
+/**
+ * Reads one server of a main's list, or of a stored pairing; `null` for one
+ * this device could not build a connection to, which is then left out.
+ */
+export function readFallbackServer(value: unknown): FallbackServer | null {
+	if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+	const { serverId, name, password, fingerprint, port, hosts } = value as Record<string, unknown>;
+	const valid =
+		isNonEmptyString(serverId) &&
+		isNonEmptyString(name) &&
+		typeof password === 'string' &&
+		password.length >= MIN_PASSWORD_LENGTH &&
+		typeof fingerprint === 'string' &&
+		FINGERPRINT_HEX.test(fingerprint) &&
+		typeof port === 'number' &&
+		Number.isInteger(port) &&
+		port >= 1 &&
+		port <= 65535 &&
+		Array.isArray(hosts) &&
+		hosts.length > 0 &&
+		hosts.every((host) => typeof host === 'string' && HOST.test(host));
+	if (!valid) return null;
+
+	return { serverId, name, password, fingerprint, port, hosts: [...(hosts as string[])] };
+}
+
 const CODE_PATTERN = /^wsrv(\d+)\.([A-Za-z0-9_-]+)$/;
 /** The pairing code version this client reads: codes start with `wsrv1.`. */
 export const PAIRING_CODE_VERSION = 1;

@@ -1,6 +1,10 @@
-import type { ServerTarget } from './PairingCode.js';
+import { readFallbackServer, type FallbackServer, type ServerTarget } from './PairingCode.js';
 
-/** What a device keeps after pairing: how to reach the server, and who it is there. */
+/**
+ * What a device keeps after pairing: how to reach the server it paired
+ * with, and who it is there. Its fallback servers take the same device and
+ * token.
+ */
 export interface Pairing extends ServerTarget {
 	serverId: string;
 	name: string;
@@ -12,6 +16,13 @@ export interface Pairing extends ServerTarget {
 	lastEtag: string | null;
 	/** ISO 8601 UTC of the last successful sync. */
 	lastSyncAt: string | null;
+	/**
+	 * The paired server's subordinates, as its last `welcome` listed them:
+	 * the engine syncs with one of them when the paired server is out of
+	 * reach. Absent from a record saved before there were any, which reads
+	 * as none.
+	 */
+	fallbacks?: FallbackServer[];
 }
 
 /** Where the sync engine keeps this device's pairing. */
@@ -69,7 +80,7 @@ function readPairing(value: unknown): Pairing | null {
 		isNullableString(lastSyncAt);
 	if (!valid) return null;
 
-	return {
+	const pairing: Pairing = {
 		serverId,
 		name,
 		device,
@@ -81,6 +92,15 @@ function readPairing(value: unknown): Pairing | null {
 		lastEtag,
 		lastSyncAt,
 	};
+	// A list that does not read costs the fallbacks, never the pairing.
+	const fallbacks = Array.isArray(raw.fallbacks)
+		? raw.fallbacks
+				.map(readFallbackServer)
+				.filter((server): server is FallbackServer => server !== null)
+		: [];
+	if (fallbacks.length > 0) pairing.fallbacks = fallbacks;
+
+	return pairing;
 }
 
 /**

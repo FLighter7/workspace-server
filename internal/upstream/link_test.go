@@ -73,6 +73,11 @@ type node struct {
 	cur      atomic.Pointer[Link] // link, for the hub's goroutines
 	logs     *logBuf
 	linkDeps Deps
+	up       *node // the main, once linkTo linked n to it
+
+	// selfName and selfPort, when set, are what n announces instead of its
+	// own name and port.
+	selfName, selfPort atomic.Value
 }
 
 func startNode(t *testing.T, name string) *node {
@@ -94,6 +99,24 @@ func startNode(t *testing.T, name string) *node {
 	if n.fpHex, err = n.id.FingerprintHex(); err != nil {
 		t.Fatal(err)
 	}
+	n.cfg = rtc.Config{
+		Addresses:   []net.IP{net.IPv4(127, 0, 0, 1)},
+		Port:        freePort(t),
+		ICEPwd:      n.id.ICEPwd,
+		Certificate: cert,
+		Logf:        func(format string, args ...any) { t.Logf(name+": rtc: "+format, args...) },
+	}
+	n.open()
+	n.listen()
+	return n
+}
+
+// open reads the server's files into new registries, a hub and a link, as a
+// server start does, and starts the link.
+func (n *node) open() {
+	t, name := n.t, n.name
+	t.Helper()
+	var err error
 	if n.apps, err = apps.Open(filepath.Join(n.dir, "apps.json")); err != nil { // lists "todo"
 		t.Fatal(err)
 	}
@@ -116,6 +139,7 @@ func startNode(t *testing.T, name string) *node {
 		Logf:     n.logs.printf,
 		Stored:   func(app string) { n.cur.Load().LocalWrite(app) },
 	})
+	n.cfg.Backend = n.hub
 	n.linkDeps = Deps{
 		Path:     filepath.Join(n.dir, "upstream.json"),
 		ServerID: n.id.ServerID,
@@ -126,21 +150,39 @@ func startNode(t *testing.T, name string) *node {
 		Dial: func(ctx context.Context, t wsclient.Target, app string) (*wsclient.Client, error) {
 			return wsclient.Dial(ctx, t, app, wsclient.DialOptions{})
 		},
+		Self:       n.self,
+		Admit:      n.hub.Replicate,
 		Logf:       n.logs.printf,
 		MinBackoff: 50 * time.Millisecond,
 		MaxBackoff: 400 * time.Millisecond,
 	}
 	n.openLink()
-	n.cfg = rtc.Config{
-		Addresses:   []net.IP{net.IPv4(127, 0, 0, 1)},
-		Port:        freePort(t),
-		ICEPwd:      n.id.ICEPwd,
-		Certificate: cert,
-		Backend:     n.hub,
-		Logf:        func(format string, args ...any) { t.Logf(name+": rtc: "+format, args...) },
+}
+
+// self is how devices reach n, as it announces it.
+func (n *node) self() wsclient.Server {
+	s := wsclient.Server{
+		ServerID: n.id.ServerID, Name: n.name, Password: n.id.ICEPwd, Fingerprint: n.fpHex,
+		Port: n.cfg.Port, Hosts: []string{"127.0.0.1"},
 	}
+	if v, ok := n.selfName.Load().(string); ok {
+		s.Name = v
+	}
+	if v, ok := n.selfPort.Load().(int); ok {
+		s.Port = v
+	}
+	return s
+}
+
+// restart stops n and starts it again from its files, on the same port.
+func (n *node) restart() {
+	n.t.Helper()
+	n.link.Close()
+	if err := n.l.Close(); err != nil {
+		n.t.Fatal(err)
+	}
+	n.open()
 	n.listen()
-	return n
 }
 
 // openLink opens the link from upstream.json and starts it, as a server
@@ -189,6 +231,7 @@ func (n *node) linkTo(up *node) {
 	if err := n.link.Pair(ctx, up.code()); err != nil {
 		n.t.Fatalf("%s: link to %s: %v", n.name, up.name, err)
 	}
+	n.up = up
 }
 
 // etag is the etag of n's document of app, "" when there is none.
@@ -215,17 +258,83 @@ func (n *node) write(app, body string, ifEtag *string) string {
 // device is a device paired with a server over WebRTC, which records the
 // changed pushes it hears.
 type device struct {
+	id      string
 	cl      *wsclient.Client
 	welcome wsclient.Welcome
 	mu      sync.Mutex
 	heard   []string
 }
 
+// device pairs a device of app and returns it connected to n. A
+// subordinate pairs nothing: the device pairs with n's main and connects to
+// n once n admits it on the main's word, as a phone does.
 func (n *node) device(app string) *device {
+	n.t.Helper()
+	if n.up != nil && n.link.Role() == RoleSubordinate {
+		id, token := n.up.pair(app)
+		waitFor(n.t, "the subordinate to admit the device", func() bool { _, ok := n.devices.Get(id); return ok })
+		return n.connect(app, id, token)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testDeadline)
+	defer cancel()
+	secret, _ := n.secrets.Issue()
+	d := n.dial(ctx, app)
+	p, w, err := d.cl.Pair(ctx, "", secret, "Phone")
+	if err != nil {
+		n.t.Fatalf("%s: pair a device: %v", n.name, err)
+	}
+	d.id, d.welcome = p.Device, w
+	if _, err := d.cl.Head(ctx); err != nil { // confirms the pairing
+		n.t.Fatal(err)
+	}
+	return d
+}
+
+// pair pairs a device of app with n and returns its id and token, without
+// keeping a session.
+func (n *node) pair(app string) (id, token string) {
 	n.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testDeadline)
 	defer cancel()
 	secret, _ := n.secrets.Issue()
+	d := n.dial(ctx, app)
+	defer d.cl.Close()
+	p, _, err := d.cl.Pair(ctx, "", secret, "Phone")
+	if err != nil {
+		n.t.Fatalf("%s: pair a device: %v", n.name, err)
+	}
+	if _, err := d.cl.Head(ctx); err != nil { // confirms the pairing
+		n.t.Fatal(err)
+	}
+	return p.Device, p.Token
+}
+
+// connect connects a paired device to n with hello.
+func (n *node) connect(app, id, token string) *device {
+	n.t.Helper()
+	d, err := n.tryConnect(app, id, token)
+	if err != nil {
+		n.t.Fatalf("%s: hello: %v", n.name, err)
+	}
+	return d
+}
+
+// tryConnect connects a paired device to n with hello, and returns the
+// error hello failed with.
+func (n *node) tryConnect(app, id, token string) (*device, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), testDeadline)
+	defer cancel()
+	d := n.dial(ctx, app)
+	d.id = id
+	var err error
+	d.welcome, err = d.cl.Hello(ctx, id, token)
+	return d, err
+}
+
+// dial opens a session to n for app that records the changed pushes it
+// hears.
+func (n *node) dial(ctx context.Context, app string) *device {
+	n.t.Helper()
 	cl, err := wsclient.Dial(ctx, n.target(), app, wsclient.DialOptions{})
 	if err != nil {
 		n.t.Fatalf("%s: dial: %v", n.name, err)
@@ -237,12 +346,6 @@ func (n *node) device(app string) *device {
 		defer d.mu.Unlock()
 		d.heard = append(d.heard, etag)
 	})
-	if _, d.welcome, err = cl.Pair(ctx, "", secret, "Phone"); err != nil {
-		n.t.Fatalf("%s: pair a device: %v", n.name, err)
-	}
-	if _, err := cl.Head(ctx); err != nil { // confirms the pairing
-		n.t.Fatal(err)
-	}
 	return d
 }
 
@@ -379,8 +482,9 @@ func TestAppList(t *testing.T) {
 	}
 }
 
-// Only a main can be an upstream: a server refuses to link to a subordinate,
-// keeps no pairing, and leaves none behind there.
+// Only a main can be an upstream: a subordinate refuses a server's pair as
+// it refuses a device's (notMain), so the server keeps no pairing and leaves
+// none behind there.
 func TestASubordinateIsNoUpstream(t *testing.T) {
 	main := startNode(t, "Desk")
 	sub := startNode(t, "Laptop")

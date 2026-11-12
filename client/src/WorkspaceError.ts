@@ -9,6 +9,7 @@ export const SERVER_ERROR_CODES = [
 	'notJson',
 	'notAuthenticated',
 	'internal',
+	'notMain',
 ] as const;
 
 export type ServerErrorCode = (typeof SERVER_ERROR_CODES)[number];

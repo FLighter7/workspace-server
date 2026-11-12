@@ -224,13 +224,17 @@ type fakeBackend struct {
 	apps    []AppInfo
 	appsErr *Error
 
+	devices     []DeviceEntry
+	announceErr *Error
+
 	// calls logs every call in order: "hello", "hello returned", "pair",
 	// "pair returned", "head", "get", "maxBytes", "put", "forget", "closed".
-	calls   []string
-	hellos  [][3]string // app, device, token
-	pairs   [][4]string // kind, app, secret, name
-	puts    []putCall
-	forgets [][2]string // app, device
+	calls     []string
+	hellos    [][3]string // app, device, token
+	pairs     [][4]string // kind, app, secret, name
+	puts      []putCall
+	forgets   [][2]string // app, device
+	announces []ServerInfo
 }
 
 func newFakeBackend() *fakeBackend {
@@ -319,6 +323,21 @@ func (b *fakeBackend) Apps(s *Session) ([]AppInfo, *Error) {
 	defer b.mu.Unlock()
 	b.calls = append(b.calls, "apps")
 	return b.apps, b.appsErr
+}
+
+// Announce records the server and, unless told to refuse, answers with the
+// registry the test set, as the hub does.
+func (b *fakeBackend) Announce(s *Session, server ServerInfo) *Error {
+	b.mu.Lock()
+	b.calls = append(b.calls, "announce")
+	b.announces = append(b.announces, server)
+	list, err := b.devices, b.announceErr
+	b.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	s.PushDevices(list)
+	return nil
 }
 
 func (b *fakeBackend) Closed(s *Session) { b.log("closed") }

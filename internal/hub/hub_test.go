@@ -415,7 +415,7 @@ func TestHelloOutcomes(t *testing.T) {
 		w := waitFrames(t, fc, "welcome", 1)[0]
 		want := obj{
 			"t": "welcome", "proto": float64(1), "role": "main", "serverId": "srv-1", "name": "Desk",
-			"etag": store.Etag(doc), "hosts": []any{"u.local", "192.168.1.5"},
+			"etag": store.Etag(doc), "hosts": []any{"u.local", "192.168.1.5"}, "subordinates": []any{},
 		}
 		if !reflect.DeepEqual(w, want) {
 			t.Errorf("welcome %v, want %v", w, want)

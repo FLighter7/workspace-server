@@ -1,4 +1,5 @@
 import { ChannelFraming, type Frame, type FrameChannel, type Incoming } from './ChannelFraming.js';
+import { readFallbackServer, type FallbackServer } from './PairingCode.js';
 import { WorkspaceError, isServerErrorCode } from './WorkspaceError.js';
 
 /** The protocol this client speaks; the server refuses any other with `protocol`. */
@@ -14,6 +15,17 @@ export interface Welcome {
 	etag: string | null;
 	/** The server's `.local` name first, then its current LAN IPv4 addresses. */
 	hosts: string[];
+	/**
+	 * `main`, or `subordinate` for a server linked to a main; absent from a
+	 * server from before roles, which is a main.
+	 */
+	role?: string;
+	/**
+	 * A main's subordinates, which serve its devices too: absent from a
+	 * subordinate and from a server from before subordinates, `[]` from a
+	 * main without any. An entry this client cannot read is left out.
+	 */
+	subordinates?: FallbackServer[];
 }
 
 export type PutResult = { stored: true; etag: string } | { stored: false; etag: string | null };
@@ -59,7 +71,15 @@ function readWelcome(frame: Frame): Welcome {
 		throw protocolError('A malformed welcome');
 	}
 
-	return { serverId, name, etag, hosts: [...hosts] as string[] };
+	const welcome: Welcome = { serverId, name, etag, hosts: [...hosts] as string[] };
+	if (typeof frame.role === 'string') welcome.role = frame.role;
+	if (Array.isArray(frame.subordinates)) {
+		welcome.subordinates = frame.subordinates
+			.map(readFallbackServer)
+			.filter((server): server is FallbackServer => server !== null);
+	}
+
+	return welcome;
 }
 
 /** An error frame as an error; a code this client does not know reads as `internal`, a temporary error. */

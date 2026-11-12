@@ -26,6 +26,9 @@ const (
 	// many failed attempts; nothing else is checked. It is temporary: the
 	// pairing still stands.
 	CodeBlocked = "blocked"
+	// CodeNotMain answers pair on a subordinate: devices pair only with the
+	// main, which then hands its subordinates out to them.
+	CodeNotMain = "notMain"
 )
 
 // The roles a server names in welcome: a main has no upstream server; a
@@ -53,18 +56,42 @@ type Error struct {
 // Welcome is what a welcome frame tells an authenticated client. Etag is nil
 // when the app has no document, and always on a link session. Role is
 // RoleMain or RoleSubordinate; an empty Role is left out of the frame.
+// Subordinates is what a main lists: nil leaves the field out of the frame
+// (a subordinate), and an empty, non-nil list sends [] (a main without
+// any).
 type Welcome struct {
-	ServerID string
-	Name     string
-	Etag     *string
-	Hosts    []string
-	Role     string
+	ServerID     string
+	Name         string
+	Etag         *string
+	Hosts        []string
+	Role         string
+	Subordinates []ServerInfo
 }
 
 // AppInfo is one entry of the app list a server-kind session is told.
 type AppInfo struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+// ServerInfo is how a device reaches a server: a pairing code without the
+// secret. A subordinate announces its own to its main, and a main lists its
+// subordinates' in every welcome. Fingerprint is uppercase colon hex.
+type ServerInfo struct {
+	ServerID    string   `json:"serverId"`
+	Name        string   `json:"name"`
+	Password    string   `json:"password"`
+	Fingerprint string   `json:"fingerprint"`
+	Port        int      `json:"port"`
+	Hosts       []string `json:"hosts"`
+}
+
+// DeviceEntry is one device of an app in the registry a main sends its
+// subordinates: never a token, only the token's SHA-256 in lowercase hex.
+type DeviceEntry struct {
+	ID        string `json:"id"`
+	App       string `json:"app"`
+	TokenHash string `json:"tokenHash"`
 }
 
 // Channel is the data channel a Session speaks over. *webrtc.DataChannel
@@ -96,6 +123,12 @@ type Backend interface {
 	// it. Only a server-kind device may ask: any other gets an error with
 	// CodeProtocol, which closes the session.
 	Apps(s *Session) ([]AppInfo, *Error)
+	// Announce takes a subordinate's connection data from its link session
+	// and answers with the device registry, which it sends with
+	// s.PushDevices, as it does again whenever the registry changes. The
+	// session calls it only for a link session; an error with CodeProtocol
+	// closes the session.
+	Announce(s *Session, server ServerInfo) *Error
 	Head(app string) (*string, *Error)
 	Get(app string) ([]byte, *string, *Error)
 	// MaxBytes is the largest body a put to app may announce.

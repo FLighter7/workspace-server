@@ -40,7 +40,7 @@ func TestConformanceErrorCodes(t *testing.T) {
 	conformance.Read(t, "error-codes.json", &v)
 	ours := []string{
 		CodeProtocol, CodeUnknownApp, CodeBadSecret, CodeBadToken, CodeBlocked,
-		CodeTooLarge, CodeNotJSON, CodeNotAuthenticated, CodeInternal,
+		CodeTooLarge, CodeNotJSON, CodeNotAuthenticated, CodeInternal, CodeNotMain,
 	}
 	slices.Sort(ours)
 	theirs := slices.Clone(v.Server)
@@ -82,24 +82,26 @@ type exchange struct {
 	Session string                     `json:"session"`
 	Backend map[string]json.RawMessage `json:"backend"`
 	Call    *struct {
-		Method string  `json:"method"`
-		Kind   string  `json:"kind"`
-		App    string  `json:"app"`
-		Device string  `json:"device"`
-		Token  string  `json:"token"`
-		Secret string  `json:"secret"`
-		Name   string  `json:"name"`
-		IfEtag *string `json:"ifEtag"`
-		Body   string  `json:"body"`
+		Method string      `json:"method"`
+		Kind   string      `json:"kind"`
+		App    string      `json:"app"`
+		Device string      `json:"device"`
+		Token  string      `json:"token"`
+		Secret string      `json:"secret"`
+		Name   string      `json:"name"`
+		IfEtag *string     `json:"ifEtag"`
+		Body   string      `json:"body"`
+		Server *ServerInfo `json:"server"`
 	} `json:"call"`
-	Client     obj       `json:"client"`
-	ClientBody *string   `json:"clientBody"`
-	Push       *string   `json:"push"`
-	PushApps   []AppInfo `json:"pushApps"`
-	Server     []obj     `json:"server"`
-	ServerBody *string   `json:"serverBody"`
-	Closes     bool      `json:"closes"`
-	Error      string    `json:"error"`
+	Client      obj           `json:"client"`
+	ClientBody  *string       `json:"clientBody"`
+	Push        *string       `json:"push"`
+	PushApps    []AppInfo     `json:"pushApps"`
+	PushDevices []DeviceEntry `json:"pushDevices"`
+	Server      []obj         `json:"server"`
+	ServerBody  *string       `json:"serverBody"`
+	Closes      bool          `json:"closes"`
+	Error       string        `json:"error"`
 }
 
 type frameVectors struct {
@@ -134,14 +136,15 @@ func configure(t *testing.T, b *fakeBackend, state map[string]json.RawMessage) {
 		switch key {
 		case "welcome":
 			var w struct {
-				ServerID string   `json:"serverId"`
-				Name     string   `json:"name"`
-				Etag     *string  `json:"etag"`
-				Hosts    []string `json:"hosts"`
-				Role     string   `json:"role"`
+				ServerID     string       `json:"serverId"`
+				Name         string       `json:"name"`
+				Etag         *string      `json:"etag"`
+				Hosts        []string     `json:"hosts"`
+				Role         string       `json:"role"`
+				Subordinates []ServerInfo `json:"subordinates"`
 			}
 			decode(raw, &w)
-			b.welcome = Welcome{ServerID: w.ServerID, Name: w.Name, Etag: w.Etag, Hosts: w.Hosts, Role: w.Role}
+			b.welcome = Welcome{ServerID: w.ServerID, Name: w.Name, Etag: w.Etag, Hosts: w.Hosts, Role: w.Role, Subordinates: w.Subordinates}
 		case "helloError":
 			b.helloErr = refusal(raw)
 		case "paired":
@@ -177,6 +180,10 @@ func configure(t *testing.T, b *fakeBackend, state map[string]json.RawMessage) {
 			decode(raw, &b.apps)
 		case "appsError":
 			b.appsErr = refusal(raw)
+		case "devices":
+			decode(raw, &b.devices)
+		case "announceError":
+			b.announceErr = refusal(raw)
 		default:
 			t.Fatalf("unknown backend state %q", key)
 		}
@@ -281,6 +288,8 @@ func TestConformanceExchanges(t *testing.T) {
 				s.PushChanged(*ex.Push)
 			case ex.PushApps != nil:
 				s.PushApps(ex.PushApps)
+			case ex.PushDevices != nil:
+				s.PushDevices(ex.PushDevices)
 			default:
 				frame, err := json.Marshal(ex.Client)
 				if err != nil {
@@ -337,6 +346,16 @@ func TestConformanceExchanges(t *testing.T) {
 			case "apps":
 				if ex.Error == "" && b.count("apps") != 1 {
 					t.Errorf("backend Apps called %d times, want 1", b.count("apps"))
+				}
+			case "announce":
+				if ex.Error != "" {
+					return
+				}
+				b.mu.Lock()
+				announces := slices.Clone(b.announces)
+				b.mu.Unlock()
+				if len(announces) != 1 || !reflect.DeepEqual(announces[0], *c.Server) {
+					t.Errorf("backend Announce got %+v, want %+v", announces, *c.Server)
 				}
 			case "put":
 				puts := b.putCalls()

@@ -43,6 +43,43 @@ describe('createPairingStore', () => {
 		expect(store.load()).toEqual(saved);
 	});
 
+	it('keeps fallback servers, and reads a record without them as having none', () => {
+		const { store } = setup();
+		const laptop = {
+			serverId: 'Lp7tOp0123ab',
+			name: 'Laptop',
+			password: 'Zx9yW8vU7tS6rQ5pO4nM3lK2',
+			fingerprint: Array.from({ length: 32 }, () => 'C3').join(':'),
+			port: 47801,
+			hosts: ['5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local', '192.168.1.30'],
+		};
+		const pairing = makePairing({ fallbacks: [laptop] });
+
+		store.save(pairing);
+		expect(store.load()).toEqual(pairing);
+
+		store.save(makePairing());
+		expect(store.load()).not.toHaveProperty('fallbacks');
+	});
+
+	it('drops fallbacks it cannot read, never the pairing', () => {
+		const { storage, store } = setup();
+		const laptop = {
+			serverId: 'Lp7tOp0123ab',
+			name: 'Laptop',
+			password: 'Zx9yW8vU7tS6rQ5pO4nM3lK2',
+			fingerprint: Array.from({ length: 32 }, () => 'C3').join(':'),
+			port: 47801,
+			hosts: ['192.168.1.30'],
+		};
+		const broken = { ...laptop, serverId: 'Tb1tOp0123ab', port: 0 };
+		storage.setItem(KEY, JSON.stringify({ ...makePairing(), fallbacks: [broken, laptop] }));
+		expect(store.load()?.fallbacks).toEqual([laptop]);
+
+		storage.setItem(KEY, JSON.stringify({ ...makePairing(), fallbacks: 'nope' }));
+		expect(store.load()).toEqual(makePairing());
+	});
+
 	it('load returns null for a missing record', () => {
 		expect(setup().store.load()).toBeNull();
 	});

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"sync"
 	"time"
 )
@@ -61,7 +62,7 @@ const (
 // (docs/protocol.md, "Errors"). Any other reads as CodeInternal.
 var ServerCodes = []string{
 	"protocol", "unknownApp", "badSecret", "badToken", "blocked",
-	"tooLarge", "notJson", "notAuthenticated", "internal",
+	"tooLarge", "notJson", "notAuthenticated", "internal", "notMain",
 }
 
 // Error is a failure this client reports: a server's error frame, or one of
@@ -97,13 +98,38 @@ type Channel interface {
 
 // Welcome is what a welcome tells the client. Etag is nil when there is no
 // document, and always on a link session. Role is empty when the server
-// named none: a server from before roles.
+// named none: a server from before roles. Subordinates is what a main
+// lists: nil when the welcome carries no list (a subordinate, or a main from
+// before subordinates were handed out, which takes no announce either), and
+// empty but not nil for a main without any. An entry this client cannot
+// read is left out.
 type Welcome struct {
-	ServerID string   `json:"serverId"`
-	Name     string   `json:"name"`
-	Etag     *string  `json:"etag"`
-	Hosts    []string `json:"hosts"`
-	Role     string   `json:"role,omitempty"`
+	ServerID     string   `json:"serverId"`
+	Name         string   `json:"name"`
+	Etag         *string  `json:"etag"`
+	Hosts        []string `json:"hosts"`
+	Role         string   `json:"role,omitempty"`
+	Subordinates []Server `json:"subordinates,omitempty"`
+}
+
+// Server is how a device reaches a server: a pairing code without the
+// secret, as a subordinate announces itself and a main lists its
+// subordinates. Fingerprint is uppercase colon hex.
+type Server struct {
+	ServerID    string   `json:"serverId"`
+	Name        string   `json:"name"`
+	Password    string   `json:"password"`
+	Fingerprint string   `json:"fingerprint"`
+	Port        int      `json:"port"`
+	Hosts       []string `json:"hosts"`
+}
+
+// Device is one device of a main's registry: its id, its app, and its
+// token's SHA-256 in lowercase hex.
+type Device struct {
+	ID        string `json:"id"`
+	App       string `json:"app"`
+	TokenHash string `json:"tokenHash"`
 }
 
 // Paired is what a successful pair returns: the new device and its token.
@@ -150,6 +176,7 @@ type Client struct {
 	ended     error
 	onChanged func(etag string)
 	onApps    func(list []App)
+	onDevices func(list []Device)
 
 	done chan struct{} // closed when the client ends
 	low  chan struct{} // the channel's buffer drained to BufferLow
@@ -189,6 +216,14 @@ func (c *Client) OnApps(f func(list []App)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onApps = f
+}
+
+// OnDevices sets the listener of the device registries the main pushes, and
+// of the one Announce reads.
+func (c *Client) OnDevices(f func(list []Device)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onDevices = f
 }
 
 // Done is closed when the client ends: the channel closed, the server broke
@@ -301,7 +336,7 @@ func (c *Client) assemble(text bool, data []byte) (*incoming, error) {
 // waiting for it.
 func (c *Client) dispatch(in incoming) {
 	c.mu.Lock()
-	onChanged, onApps, p := c.onChanged, c.onApps, c.pending
+	onChanged, onApps, onDevices, p := c.onChanged, c.onApps, c.onDevices, c.pending
 	c.mu.Unlock()
 
 	switch in.t {
@@ -320,6 +355,18 @@ func (c *Client) dispatch(in incoming) {
 			onApps(list)
 		}
 		if p == nil || p.kind != "apps" {
+			return // a push
+		}
+	case "devices":
+		list, err := readDevices(in.frame)
+		if err != nil {
+			c.fail(err)
+			return
+		}
+		if onDevices != nil {
+			onDevices(list)
+		}
+		if p == nil || p.kind != "announce" {
 			return // a push
 		}
 	case "error":
@@ -546,6 +593,22 @@ func (c *Client) Apps(ctx context.Context) ([]App, error) {
 	return list, err
 }
 
+// Announce tells the main, over a link session, how devices reach this
+// server, and returns the main's device registry, which the main pushes
+// again on every change. The listener set with OnDevices hears it too.
+func (c *Client) Announce(ctx context.Context, self Server) ([]Device, error) {
+	var list []Device
+	err := c.request(ctx, map[string]any{"t": "announce", "server": self}, nil, func(in incoming) (bool, error) {
+		if in.t != "devices" {
+			return false, protocolError("unexpected %s", in.t)
+		}
+		var err error
+		list, err = readDevices(in.frame)
+		return true, err
+	})
+	return list, err
+}
+
 // Forget asks the server to delete this device. It returns once the server
 // has closed the channel, or after a short wait.
 func (c *Client) Forget(ctx context.Context) error {
@@ -603,7 +666,65 @@ func readWelcome(frame map[string]json.RawMessage) (Welcome, error) {
 		return Welcome{}, protocolError("a malformed welcome")
 	}
 	role, _ := readString(frame["role"])
-	return Welcome{ServerID: serverID, Name: name, Etag: etag, Hosts: hosts, Role: role}, nil
+	w := Welcome{ServerID: serverID, Name: name, Etag: etag, Hosts: hosts, Role: role}
+	if raw, ok := frame["subordinates"]; ok {
+		w.Subordinates = readServers(raw)
+	}
+	return w, nil
+}
+
+// readServers reads a main's list of subordinates, never nil: an entry this
+// client cannot read is left out, and so is a list that is not one.
+func readServers(raw json.RawMessage) []Server {
+	var entries []json.RawMessage
+	_ = json.Unmarshal(raw, &entries)
+	out := []Server{}
+	for _, e := range entries {
+		var s Server
+		if json.Unmarshal(e, &s) == nil && s.valid() {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+var (
+	fingerprintPattern = regexp.MustCompile(`^([0-9A-F]{2}:){31}[0-9A-F]{2}$`)
+	hostPattern        = regexp.MustCompile(`^[A-Za-z0-9.:-]{1,253}$`)
+)
+
+// valid reports whether a device can build a connection to s: the rules of
+// the client package's readFallbackServer.
+func (s Server) valid() bool {
+	if s.ServerID == "" || s.Name == "" || len(s.Password) < minPasswordLength ||
+		!fingerprintPattern.MatchString(s.Fingerprint) || s.Port < 1 || s.Port > 65535 || len(s.Hosts) == 0 {
+		return false
+	}
+	for _, h := range s.Hosts {
+		if !hostPattern.MatchString(h) {
+			return false
+		}
+	}
+	return true
+}
+
+func readDevices(frame map[string]json.RawMessage) ([]Device, error) {
+	var raw []struct {
+		ID        *string `json:"id"`
+		App       *string `json:"app"`
+		TokenHash *string `json:"tokenHash"`
+	}
+	if json.Unmarshal(frame["devices"], &raw) != nil || raw == nil {
+		return nil, protocolError("a malformed devices")
+	}
+	list := make([]Device, 0, len(raw))
+	for _, d := range raw {
+		if d.ID == nil || d.App == nil || d.TokenHash == nil {
+			return nil, protocolError("a malformed devices")
+		}
+		list = append(list, Device{ID: *d.ID, App: *d.App, TokenHash: *d.TokenHash})
+	}
+	return list, nil
 }
 
 func readApps(frame map[string]json.RawMessage) ([]App, error) {

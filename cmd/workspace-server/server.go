@@ -454,20 +454,21 @@ func serveOnce(ctx context.Context, opts serverOptions, logger *log.Logger, last
 // mu guards the live settings that the hub and the web page read; it is
 // never held while calling out. Lock order: ctl, then mu.
 type server struct {
-	id          *identity.Identity
-	cert        webrtc.Certificate
-	fingerprint string // base64url of the certificate's SHA-256, for pairing codes
-	cfgPath     string
-	apps        *apps.Registry
-	devices     *devices.Registry
-	store       *store.Store
-	secrets     *pairing.Secrets
-	refusals    *pairing.Refusals
-	hub         *hub.Hub
-	link        *upstream.Link // the link to an upstream server; idle on a main
-	handler     http.Handler
-	logger      *log.Logger
-	pageLog     *log.Logger // the web server's own errors
+	id             *identity.Identity
+	cert           webrtc.Certificate
+	fingerprint    string // base64url of the certificate's SHA-256, for pairing codes
+	fingerprintHex string // uppercase colon hex of the same, as a subordinate announces it
+	cfgPath        string
+	apps           *apps.Registry
+	devices        *devices.Registry
+	store          *store.Store
+	secrets        *pairing.Secrets
+	refusals       *pairing.Refusals
+	hub            *hub.Hub
+	link           *upstream.Link // the link to an upstream server; idle on a main
+	handler        http.Handler
+	logger         *log.Logger
+	pageLog        *log.Logger // the web server's own errors
 
 	appsErr string // the apps.json failure last logged; only the apps watcher uses it
 
@@ -530,6 +531,9 @@ func newServer(opts serverOptions, logger *log.Logger) (*server, error) {
 		return nil, err
 	}
 	s.id, s.cert, s.fingerprint = id, cert, base64.RawURLEncoding.EncodeToString(fp[:])
+	if s.fingerprintHex, err = id.FingerprintHex(); err != nil {
+		return nil, err
+	}
 
 	host, _ := os.Hostname()
 	fileCfg, err := config.Load(s.cfgPath, defaultName(host))
@@ -583,7 +587,11 @@ func newServer(opts serverOptions, logger *log.Logger) (*server, error) {
 		Store:    s.store,
 		Writer:   s.hub,
 		Dial:     s.dialUpstream,
-		Logf:     func(format string, args ...any) { s.logf("upstream: "+format, args...) },
+		// What the link announces to the main, which hands it out to its
+		// devices, and the main's devices, which this server then admits.
+		Self:  s.self,
+		Admit: s.hub.Replicate,
+		Logf:  func(format string, args ...any) { s.logf("upstream: "+format, args...) },
 	})
 	if err != nil {
 		return nil, err
@@ -916,6 +924,21 @@ func (s *server) hosts() []string {
 // holds mu.
 func (s *server) hostsLocked() []string {
 	return append([]string{s.id.MDNSName}, addrStrings(s.addrs)...)
+}
+
+// self is how devices reach this server: its pairing code without the
+// secret, which a subordinate announces to its main.
+func (s *server) self() wsclient.Server {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hosts := s.hostsLocked()
+	if len(hosts) > devices.MaxServerHosts { // the .local name stays first
+		hosts = hosts[:devices.MaxServerHosts]
+	}
+	return wsclient.Server{
+		ServerID: s.id.ServerID, Name: s.cfg.Name, Password: s.id.ICEPwd,
+		Fingerprint: s.fingerprintHex, Port: s.cfg.UDPPort, Hosts: hosts,
+	}
 }
 
 func (s *server) httpPort() int {

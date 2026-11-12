@@ -1,4 +1,4 @@
-import type { ServerTarget } from '../PairingCode.js';
+import type { FallbackServer, ServerTarget } from '../PairingCode.js';
 import type { PutResult, Welcome } from '../ServerClient.js';
 import type { SyncClient } from '../SyncEngine.js';
 import { WorkspaceError, type WorkspaceErrorCode } from '../WorkspaceError.js';
@@ -14,11 +14,23 @@ function bytesOf(body: Uint8Array | string): Uint8Array {
  * records every call in order, across clients (`hello#1`, `put#2`, …).
  *
  * Several engines may share one server, standing in for several devices.
+ * Several servers stand in for a main and its subordinates: give each its
+ * own `serverId` and `port`, list the subordinates' `entry()` in the main's
+ * `subordinates`, let them share `devices` (the main's registry, which a
+ * subordinate admits), and pass `FakeServer.route(...)` as `connect`.
  */
 export class FakeServer {
 	serverId = 'S1';
 	name = 'Desk';
 	hosts = ['a.local', '192.168.1.5'];
+	/** How a device reaches this server: what `entry()` and `route` go by. */
+	password = 'p'.repeat(24);
+	fingerprint = Array.from({ length: 32 }, () => 'AB').join(':');
+	port = 47801;
+	/** The welcome's role; left out, as an older server does, when `undefined`. */
+	role: string | undefined = undefined;
+	/** The welcome's list of subordinates; left out when `undefined`, as a subordinate does. */
+	subordinates: FallbackServer[] | undefined = undefined;
 	etag: string | null = null;
 	body: Uint8Array = new Uint8Array(0);
 	/** Paired devices: id to token. */
@@ -32,6 +44,8 @@ export class FakeServer {
 	pairError: WorkspaceErrorCode | null = null;
 	/** Answer this many next `put`s with a conflict, as though another device wrote first. */
 	conflicts = 0;
+	/** While set, `connect` waits for it: a server slow to answer, or one away until it times out. */
+	connectGate: Promise<void> | null = null;
 
 	readonly clients: FakeClient[] = [];
 	readonly log: string[] = [];
@@ -42,12 +56,40 @@ export class FakeServer {
 	readonly connect = async (target: ServerTarget): Promise<SyncClient> => {
 		void target;
 		this.log.push('connect');
+		if (this.connectGate) await this.connectGate;
 		if (this.connectError) throw new WorkspaceError('Fake connect failure', this.connectError);
 		const client = new FakeClient(this, this.clients.length + 1);
 		this.clients.push(client);
 
 		return client;
 	};
+
+	/** How a device reaches this server, as a main lists it among its subordinates. */
+	entry(): FallbackServer {
+		return {
+			serverId: this.serverId,
+			name: this.name,
+			password: this.password,
+			fingerprint: this.fingerprint,
+			port: this.port,
+			hosts: [...this.hosts],
+		};
+	}
+
+	/**
+	 * A `connect` that reaches whichever of `servers` the target names (by
+	 * port and fingerprint); any other target times out.
+	 */
+	static route(...servers: FakeServer[]): (target: ServerTarget) => Promise<SyncClient> {
+		return async (target) => {
+			const server = servers.find(
+				(s) => s.port === target.port && s.fingerprint === target.fingerprint,
+			);
+			if (!server) throw new WorkspaceError('No fake server there', 'connectTimeout');
+
+			return server.connect(target);
+		};
+	}
 
 	/** Stores a document as though another device had written it; returns its etag. */
 	store(body: Uint8Array | string): string {
@@ -178,11 +220,17 @@ export class FakeClient implements SyncClient {
 	}
 
 	private welcome(): Welcome {
-		return {
+		const welcome: Welcome = {
 			serverId: this.server.serverId,
 			name: this.server.name,
 			etag: this.server.etag,
 			hosts: [...this.server.hosts],
 		};
+		if (this.server.role !== undefined) welcome.role = this.server.role;
+		if (this.server.subordinates) {
+			welcome.subordinates = this.server.subordinates.map((s) => ({ ...s, hosts: [...s.hosts] }));
+		}
+
+		return welcome;
 	}
 }
