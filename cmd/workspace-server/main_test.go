@@ -25,6 +25,7 @@ type fakeDeps struct {
 	stdin       string
 	terminal    bool
 
+	version    string
 	defaultDir string
 	exe        string
 
@@ -51,6 +52,7 @@ type fakeDeps struct {
 
 func newFakeDeps(t *testing.T) *fakeDeps {
 	return &fakeDeps{
+		version:    "1.0.0-test",
 		defaultDir: filepath.Join(t.TempDir(), "workspace-server"),
 		exe:        "/opt/ws/workspace-server",
 		port:       47800,
@@ -74,6 +76,7 @@ func (f *fakeDeps) got() []string {
 
 func (f *fakeDeps) deps() deps {
 	return deps{
+		version: f.version,
 		serve: func(_ context.Context, opts serverOptions, _ io.Writer) error {
 			f.note("serve")
 			f.mu.Lock()

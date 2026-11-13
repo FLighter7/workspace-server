@@ -155,6 +155,10 @@ func runServer(ctx context.Context, opts serverOptions, logw io.Writer) error {
 // cleanups close the log and release the lock before the caller removes
 // anything.
 func runOwned(ctx context.Context, opts serverOptions, logw io.Writer) (action, string, error) {
+	// Before anything is created, locked or logged.
+	if err := checkDevDirsHere(opts.Dir, readDataDir(opts.Dir)); err != nil {
+		return action{}, "", err
+	}
 	if err := os.MkdirAll(opts.Dir, 0o700); err != nil {
 		return action{}, "", fmt.Errorf("create the server folder: %w", err)
 	}

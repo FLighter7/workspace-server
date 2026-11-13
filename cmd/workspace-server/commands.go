@@ -82,6 +82,10 @@ func alreadyRunning(d deps, port int) {
 // one that runs), lists it among the installed programs on Windows, and
 // opens the page.
 func start(d deps) int {
+	// First: the installed server keeps running and autostart stays as it is.
+	if d.version == devVersion {
+		return fail(d, errDevStart)
+	}
 	binary, err := d.binaryPath()
 	if err != nil {
 		return fail(d, err)
@@ -109,7 +113,7 @@ func start(d deps) int {
 	if err := d.install(binary, dir, port); err != nil {
 		return fail(d, err)
 	}
-	if err := d.registerEntry(binary, version); err != nil {
+	if err := d.registerEntry(binary, d.version); err != nil {
 		fmt.Fprintf(d.stderr, "workspace-server: warning: %v\n", err)
 	}
 	showPage(d, port, startPageWait, "Opened the web page: ", "Open the web page: ")
@@ -200,6 +204,12 @@ func deleteCommand(ctx context.Context, d deps, o stopOptions) int {
 			fmt.Fprint(d.stdout, "Press Enter to close this window.")
 			readLine(ctx, in)
 		}()
+	}
+	if def, err := d.defaultDir(); err == nil {
+		if err := checkDevDirs(d.version, def, o.dir, readDataDir(o.dir)); err != nil {
+			fmt.Fprintln(d.stdout, "Nothing was deleted.")
+			return fail(d, err)
+		}
 	}
 	main := isMain(d, o.dir)
 	if !o.yes && !d.isTerminal() {

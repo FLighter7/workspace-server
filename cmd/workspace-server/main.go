@@ -77,6 +77,8 @@ type serveFunc func(ctx context.Context, opts serverOptions, logw io.Writer) err
 // deps is everything the commands touch outside the process, so that tests
 // can stand in for it.
 type deps struct {
+	version string // the build's; devVersion for a development build
+
 	serve       serveFunc
 	probe       func(dir string) (port int, ok bool)
 	requestStop func(port int) error
@@ -107,6 +109,7 @@ type deps struct {
 
 func realDeps() deps {
 	return deps{
+		version:         version,
 		serve:           runServer,
 		probe:           probeServer,
 		requestStop:     requestStop,

@@ -70,6 +70,9 @@ func checkDataDir(current, target string) (dataCheck, error) {
 	}
 	target = filepath.Clean(target)
 	c.Path = target
+	if err := checkDevDirsHere(target); err != nil {
+		return refuse("%v", err)
+	}
 	if target == filepath.Clean(current) {
 		c.Verdict = verdictSame
 		return c, nil

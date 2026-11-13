@@ -53,6 +53,12 @@ func recordExits(t *testing.T, dir string, main bool) *exitRecorder {
 	t.Helper()
 	r := &exitRecorder{dir: dir, fail: map[string]error{}, dirExisted: map[string]bool{}}
 	saved := []any{removeDataFn, removeServerDirFn, unregisterEntry, removeProgram, unregisterAutostart, binaryPath, defaultServerDir, resetSignals}
+	savedVersion := version
+	if main {
+		// The installed server is a release build: a development one refuses
+		// the default server folder.
+		version = "1.0.0-test"
+	}
 	resetSignals = func() { r.note("signals") }
 	removeDataFn = func(d string) error {
 		if err := r.note("data"); err != nil {
@@ -90,6 +96,7 @@ func recordExits(t *testing.T, dir string, main bool) *exitRecorder {
 		binaryPath = saved[5].(func() (string, error))
 		defaultServerDir = saved[6].(func() (string, error))
 		resetSignals = saved[7].(func())
+		version = savedVersion
 	})
 	return r
 }

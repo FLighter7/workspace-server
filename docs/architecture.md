@@ -647,6 +647,12 @@ apps/<id>/history/     previous documents
 | `delete [-dir] [--yes] [--pause]` | Shows what goes (folders, counts, the program file), asks `[y/N]` (Enter is no; without a terminal and without `--yes`, exit 2), stops like `stop`, then removes the data (when the data folder is another one), the server folder, and, for the main server, the Apps entry and the program file. `--pause` waits for Enter (the Windows uninstaller's window). A signal, or the console window closing, ends the question and the pause at once with nothing deleted. A side server whose folder does not exist has nothing to delete; for the main server it lists only the program file and autostart. |
 
 - **The main server** is the one on the default server folder. Autostart, the program file and the Apps entry belong to it; `-dir` with another folder touches none of them.
+- **A development build** (version `dev`: built without the ldflag, as every `go build` and `go run` is) never uses the installed server's folders (`devguard.go`, D11). Protected are the default server folder and the data folder its `config.json` names, and every folder inside either; paths compare with `filepath.Rel` (case-insensitive on Windows) and `os.SameFile`.
+  - `run` and interactive mode refuse in `runOwned`, before the folder is created, locked or logged in, when the server folder or the data folder its own `config.json` names is protected.
+  - The page's data-folder check (`checkDataDir`) gives `unavailable` for a protected target, so a move or an adopt cannot reach it.
+  - `start` refuses before anything else, so the installed server keeps running and autostart stays.
+  - `delete` refuses a protected server folder or data folder. `stop` works.
+  - To run on the default folder on purpose, build with a version: `go build -ldflags "-X main.version=0.0.0-local" -o tmp/x.exe ./cmd/workspace-server`.
 - **The CLI always sends `{}` to the stop route** and does its removals itself after the server is gone. A server asked to unregister autostart as it exits could otherwise remove the registration `start` has just written.
 
 ### Autostart (`internal/autostart`)
@@ -891,6 +897,13 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
   - Why not resume by itself: a pause and a retry would hide a real loop, which would then go on, stopping and resuming, and quietly fill both histories, pushing out the versions that hold the loss window (see "The sync rule"). A person who presses Resume has seen that the app stopped.
   - Cost: a loop that goes on stops the app again, after at most 10 more versions in each server's history per press.
 
+### Development builds (the user's choice, 2026-11-13)
+
+- **D11, a development build keeps off the installed server's folders** (see "Commands, autostart and removal"). The user runs the installed server and develops it on the same machine. The lock keeps a second server off a folder only while the first one runs; with it stopped, a `go run` without `-dir`, a `start` or `delete` from a development build, or a move or adopt on a development server's page reached the real data.
+  - Why the version and not a flag: a forgotten flag is the very mistake to catch, while a release build needs nothing; the e2e harnesses always pass `-dir` under `tmp/`, so they are unaffected.
+  - Why not the alternatives discussed: a read-only data folder stops the installed server's own writes, so sync stops while it is on, and the folder's read-only attribute does not cover the files in it on Windows; a write freeze on the page does not bind another process; snapshots beside the history were left for later.
+  - Cost: a check of `start`, autostart or `delete` on the real default folder needs a build with a version. Two release builds can still share a data folder (D7).
+
 ### Process
 
 - **Development (R10):** the Go rewrite was developed directly on `main`, one reviewed task at a time. Every commit carries the orchestrator's attribution line.
@@ -984,6 +997,7 @@ pnpm --dir client run test:e2e   # builds the server with Go, two Chromium devic
 - The data folders: every verdict, the copy, reset and the safe deletions.
 - The log cap, under concurrent writers.
 - The commands with fakes: interactive, `run`, `start`, `stop`, `delete`.
+- A development build (D11): the protected folders (a folder inside one, the moved data folder, a path differing only in case on Windows), `runServer` refusing the default folder with nothing created in it and a side folder naming the installed data, `checkDataDir` refusing both as a target, `start` refusing with nothing called, `delete` refusing the installed server directly and through a side folder, a side server deleted and `stop` working.
 - The control client against a fake server.
 - An integration test: the real UDP listener on loopback with a Pion client using the client-built answer. It pairs, puts and gets, and receives `changed` on a second client. It also checks that a wrong password is ignored.
 - The listener's admission (password, session cap, recently ended ufrags) by feeding binding requests straight to its packet handler, and the teardown's drain with a stand-in peer connection.
