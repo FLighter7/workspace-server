@@ -244,6 +244,8 @@ func (s *server) HandOver(ctx context.Context, serverID string) (bool, error) {
 		return false, web.ErrNoSuchServer
 	case errors.Is(err, hub.ErrNotConnected):
 		return false, web.ErrNotConnected
+	case errors.Is(err, hub.ErrDiverged):
+		return false, upstream.ErrDiverged
 	case err != nil:
 		return false, err
 	}

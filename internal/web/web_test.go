@@ -1377,6 +1377,7 @@ func TestPromoteAndHandOver(t *testing.T) {
 		{ErrNotMain, http.StatusConflict, "notMain"},
 		{ErrNoSuchServer, http.StatusNotFound, "notFound"},
 		{ErrNotConnected, http.StatusConflict, "notConnected"},
+		{upstream.ErrDiverged, http.StatusConflict, "diverged"},
 		{errors.New("disk"), http.StatusInternalServerError, "internal"},
 	} {
 		f.handOverErr = tc.err

@@ -274,6 +274,10 @@ type Link struct {
 	running  map[string]*appWorker
 	removing map[string]bool
 	relist   chan struct{}
+	// others is, per app, the main whose sessions of the app last said that
+	// another of its subordinates diverged on it and waits for a choice
+	// (welcome and diverged pushes); absent when none does. Under divMu.
+	others map[string]string
 }
 
 // Open loads the link from deps.Path; a missing file is a main's state. It
@@ -313,6 +317,7 @@ func Open(d Deps) (*Link, error) {
 		up: map[string]*string{}, links: map[string]*appLink{}, hidden: map[string][2]*string{}, local: map[string]chan struct{}{},
 		divs: map[string]*divergence{}, divTell: make(chan struct{}, 1),
 		running: map[string]*appWorker{}, removing: map[string]bool{}, relist: make(chan struct{}, 1),
+		others: map[string]string{},
 	}, nil
 }
 
@@ -1241,6 +1246,7 @@ func (l *Link) AppRemoving(app string) (done func()) {
 		l.mu.Unlock()
 		l.divMu.Lock()
 		delete(l.divs, app)
+		delete(l.others, app)
 		l.divMu.Unlock()
 		poke(l.relist)
 		poke(l.divTell)
@@ -1336,6 +1342,7 @@ func (l *Link) appSession(ctx context.Context, app string) error {
 	defer cl.Close()
 	changed := make(chan *string, 1)
 	cl.OnChanged(func(rev *string) { latest(changed, rev) })
+	cl.OnDiverged(func(list []wsclient.DivergedServer) { l.heardDiverged(app, st.ServerID, list) })
 	w, err := cl.Hello(ctx, st.Device, st.Token)
 	if err != nil {
 		return refused(err)
@@ -1343,6 +1350,7 @@ func (l *Link) appSession(ctx context.Context, app string) error {
 	if err := checkWelcome(w, st.ServerID); err != nil {
 		return err
 	}
+	l.heardDiverged(app, st.ServerID, w.Diverged)
 	local := l.localWrites(app)
 	select { // the sync below reads what was written before
 	case <-local:

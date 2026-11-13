@@ -563,6 +563,8 @@ func (a *api) handOver(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "server")
 	case errors.Is(err, ErrNotConnected):
 		writeError(w, http.StatusConflict, codeNotConnected, err.Error())
+	case errors.Is(err, upstream.ErrDiverged):
+		writeError(w, http.StatusConflict, codeDiverged, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 	}

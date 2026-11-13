@@ -204,8 +204,8 @@ type Backend interface {
 	PromoteUpstream(ctx context.Context, force bool) (followed bool, err error)
 	// HandOver asks the subordinate serverID to take the role of main over,
 	// and reports whether this server stepped down to it in time. Its
-	// errors wrap ErrNotMain, ErrNoSuchServer or ErrNotConnected, or are
-	// internal.
+	// errors wrap ErrNotMain, ErrNoSuchServer, ErrNotConnected or
+	// upstream.ErrDiverged, or are internal.
 	HandOver(ctx context.Context, serverID string) (done bool, err error)
 	// ResumeUpstream resumes an app the write guard stopped: its count of
 	// pushes starts again, and it syncs with the main at once, or once the

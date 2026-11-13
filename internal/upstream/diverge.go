@@ -334,7 +334,11 @@ func (l *Link) divergedApps() []string {
 }
 
 // anyDivergence reports whether any app listed here diverged from the main,
-// a choice waiting or being carried out.
+// a choice waiting or being carried out, or the main last said that another
+// of its subordinates diverged on an app and waits for a choice: a planned
+// switch waits for the whole family. A choice the main holds for another
+// subordinate that has not reached it is not heard here (see "Switching the
+// main" in docs/architecture.md).
 func (l *Link) anyDivergence() bool {
 	mainID := l.mainID()
 	if mainID == "" || l.d.Apps == nil {
@@ -345,7 +349,29 @@ func (l *Link) anyDivergence() bool {
 			return true
 		}
 	}
+	l.divMu.Lock()
+	defer l.divMu.Unlock()
+	for _, from := range l.others {
+		if from == mainID {
+			return true
+		}
+	}
 	return false
+}
+
+// heardDiverged records what the main mainID said, on its session of app,
+// of the divergences on app that wait for a choice: whether one of another
+// server than this one is among them.
+func (l *Link) heardDiverged(app, mainID string, list []wsclient.DivergedServer) {
+	l.divMu.Lock()
+	defer l.divMu.Unlock()
+	for _, d := range list {
+		if d.ServerID != l.d.ServerID {
+			l.others[app] = mainID
+			return
+		}
+	}
+	delete(l.others, app)
 }
 
 // tellDivergences tells the main, over the link session cl, the state of

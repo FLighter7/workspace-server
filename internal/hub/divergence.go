@@ -138,6 +138,28 @@ func (h *Hub) divergedLocked(app string) []protocol.DivergedServer {
 	return out
 }
 
+// ErrDiverged: a subordinate is not asked to take the role of main while
+// one of this server's subordinates diverged on an app, waiting for a
+// choice or for one made here to reach it.
+var ErrDiverged = errors.New("a subordinate's documents diverged from this server's, and wait for a device's choice or for one to reach it; choose on a device first")
+
+// anyDivergence reports whether a subordinate of this server diverged on an
+// app it lists, a choice waiting or not yet taken there.
+func (h *Hub) anyDivergence() bool {
+	for _, a := range h.d.Apps.List() {
+		_, unlock, ok := h.lockListed(a.ID)
+		if !ok {
+			continue
+		}
+		n := len(h.subDivergences(a.ID))
+		unlock()
+		if n > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Divergences lists the divergences of app that wait for a device's choice,
 // as a welcome names them: for the page.
 func (h *Hub) Divergences(app string) []protocol.DivergedServer {

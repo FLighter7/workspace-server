@@ -506,3 +506,38 @@ func TestRemovedAppWhileDiverged(t *testing.T) {
 		t.Errorf("the main's set %v changed", main.set("todo"))
 	}
 }
+
+// A planned switch waits for the whole family: a subordinate whose own
+// copy is in step is refused while the main says that another subordinate
+// diverged, and the main refuses to hand its role over meanwhile; once a
+// device chose and it was carried out, neither refuses for that.
+func TestPlannedSwitchWaitsForTheFamily(t *testing.T) {
+	desk := startNode(t, "Desk")
+	laptop := startNode(t, "Laptop")
+	tablet := startNode(t, "Tablet")
+	v1 := desk.write("todo", `{"v":1}`, nil)
+	makeFamily(t, desk, laptop, tablet)
+	waitFor(t, "both to hold the desk's document", func() bool { return laptop.agreed("todo", v1) && tablet.agreed("todo", v1) })
+	phone, tab := desk.device("todo"), laptop.device("todo")
+
+	laptop.link.Close()
+	phone.put(t, &v1, `{"v":2}`)
+	tab.put(t, &v1, `{"v":1,"laptop":true}`)
+	laptop.openLink()
+	waitFor(t, "the desk to know the laptop's divergence", func() bool { return phone.hearsDiverged(laptop.id.ServerID) })
+	waitFor(t, "the tablet to hear of it", func() bool { return tablet.link.anyDivergence() })
+	if _, err := tablet.link.Promote(ctx(t), false); !errors.Is(err, ErrDiverged) {
+		t.Errorf("the tablet's planned switch: %v, want ErrDiverged", err)
+	}
+	if err := desk.hub.TakeOver(tablet.id.ServerID); !errors.Is(err, hub.ErrDiverged) {
+		t.Errorf("the desk's hand-over: %v, want hub.ErrDiverged", err)
+	}
+	if tablet.link.Role() != RoleSubordinate || desk.link.Role() != RoleMain {
+		t.Fatal("a refused switch changed a role")
+	}
+
+	phone.resolve(t, laptop.id.ServerID, protocol.KeepMain)
+	waitFor(t, "the divergence to end", func() bool { _, ok := laptop.divergenceFile("todo"); return !ok })
+	waitFor(t, "the tablet to hear it ended", func() bool { return !tablet.link.anyDivergence() })
+	waitFor(t, "the desk to forget it", func() bool { return len(desk.hub.Divergences("todo")) == 0 })
+}

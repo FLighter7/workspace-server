@@ -348,3 +348,28 @@ func TestRemoveAppTellsTheLinkFirst(t *testing.T) {
 		t.Errorf("calls %v, want %v", calls, want)
 	}
 }
+
+// TakeOver refuses while a subordinate's divergence waits for a choice, and
+// while a choice made here has not reached it; once the subordinate says
+// none waits, it goes through.
+func TestTakeOverWaitsForDivergences(t *testing.T) {
+	e := newEnv(t)
+	idA, tokA := e.device(t, "todo")
+	a, fa := e.login(t, "192.168.1.9:5000", "todo", idA, tokA)
+	_, _, link, fl := linkedLaptop(t, e)
+	link.HandleText(divergedFrame("todo", since1))
+	lastDiverged(t, fa, 1)
+	if err := e.hub.TakeOver(laptopID); !errors.Is(err, ErrDiverged) {
+		t.Errorf("TakeOver while a divergence waits: %v, want ErrDiverged", err)
+	}
+	a.HandleText(frame(obj{"t": "resolve", "server": laptopID, "keep": "main"}))
+	waitFrames(t, fa, "resolved", 1)
+	if err := e.hub.TakeOver(laptopID); !errors.Is(err, ErrDiverged) {
+		t.Errorf("TakeOver while a choice has not reached the subordinate: %v, want ErrDiverged", err)
+	}
+	link.HandleText(divergedFrame("todo", nil))
+	settleLink(t, link, fl)
+	if err := e.hub.TakeOver(laptopID); err != nil {
+		t.Errorf("TakeOver once none waits: %v", err)
+	}
+}

@@ -756,8 +756,10 @@ func (h *Hub) serverDevice(serverID string) string {
 
 // TakeOver asks the server serverID, a subordinate linked to this one, over
 // its link session, to become the main of the family (takeOver). It is
-// ErrNoSuchServer when no server-kind device here has that id, and
-// ErrNotConnected when it has no link session now.
+// ErrNoSuchServer when no server-kind device here has that id,
+// ErrNotConnected when it has no link session now, and ErrDiverged while a
+// subordinate's divergence waits for a choice or for one made here to reach
+// it: the documents of the family are not the same.
 func (h *Hub) TakeOver(serverID string) error {
 	id := h.serverDevice(serverID)
 	if id == "" {
@@ -766,6 +768,9 @@ func (h *Hub) TakeOver(serverID string) error {
 	sessions := h.registered(func(m member) bool { return m.device == id && m.server && m.app == "" && !m.family })
 	if len(sessions) == 0 {
 		return ErrNotConnected
+	}
+	if h.anyDivergence() {
+		return ErrDiverged
 	}
 	for _, s := range sessions {
 		s.PushTakeOver()
