@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -9,7 +10,10 @@ import (
 	"testing"
 )
 
-var errInjected = errors.New("injected failure")
+// errInjected stands in for a crash: it is transient, so the journal stays
+// and the next operation or start carries the commit through, as after a
+// real crash.
+var errInjected = fmt.Errorf("injected failure: %w", errTransient)
 
 // inject makes the store's file operations fail where fail says, until the
 // test ends. fail gets the operation's name and its path (a rename's target).
@@ -118,11 +122,12 @@ func TestCommitCrashAtEveryStep(t *testing.T) {
 		{"removing a deleted document", func(op, path string) bool {
 			return op == "remove" && filepath.Base(path) == "del.json"
 		}, true},
+		// The index is a cache: a failure to write it fails nothing.
 		{"writing the index", func(op, path string) bool {
 			return op == "write" && filepath.Base(path) == indexName
 		}, true},
 		{"removing the staging folder", func(op, path string) bool {
-			return op == "removeAll" && filepath.Base(path) == txA
+			return op == "removeAll" && filepath.Base(path) == stagingDir(txA)
 		}, true},
 		{"removing the journal", func(op, path string) bool {
 			return op == "remove" && filepath.Base(path) == journalName
@@ -134,7 +139,11 @@ func TestCommitCrashAtEveryStep(t *testing.T) {
 				failing := true
 				inject(t, func(op, path string) bool { return failing && tc.fail(op, path) })
 				_, err := e.s.Commit("todo", "phone", txA)
-				if !errors.Is(err, errInjected) {
+				if tc.name == "writing the index" {
+					if err != nil {
+						t.Fatalf("Commit = %v, want it through with the index unsaved", err)
+					}
+				} else if !errors.Is(err, errInjected) {
 					t.Fatalf("Commit = %v, want the injected failure", err)
 				}
 				failing = false

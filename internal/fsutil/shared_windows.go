@@ -112,7 +112,11 @@ func renamePOSIX(oldpath, newpath string) error {
 	size := int(unsafe.Offsetof(fileRenameInfo{}.FileName)) + nameBytes + 2
 	buf := make([]byte, size)
 	info := (*fileRenameInfo)(unsafe.Pointer(&buf[0]))
-	info.Flags = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS
+	// IGNORE_READONLY_ATTRIBUTE: a document someone marked read-only is
+	// replaced like any other, rather than failing with ACCESS_DENIED, which
+	// would read as a busy file.
+	info.Flags = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS |
+		windows.FILE_RENAME_IGNORE_READONLY_ATTRIBUTE
 	info.FileNameLength = uint32(nameBytes)
 	copy(unsafe.Slice(&info.FileName[0], len(to)), to)
 	if err := windows.SetFileInformationByHandle(h, windows.FileRenameInfoEx, &buf[0], uint32(size)); err != nil {

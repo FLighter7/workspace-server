@@ -19,6 +19,7 @@ type docEntry struct {
 	Etag  string `json:"etag"`
 	Bytes int64  `json:"bytes"`
 	Mtime int64  `json:"mtime"`
+	Racy  bool   `json:"racy,omitempty"` // hashed too soon after its mtime to trust it
 }
 
 // tombstone records a deleted document.

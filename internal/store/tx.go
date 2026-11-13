@@ -9,6 +9,7 @@ import (
 	"hash"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,9 +26,26 @@ import (
 // arrives (every persistEvery bytes and when a put's body stops), so a put
 // cut off resumes from there.
 
+// syncFile flushes a body to disk; a test replaces it.
+var syncFile = (*os.File).Sync
+
 // persistEvery is how many bytes of a body arrive between two saves of
 // tx.json; a restart resumes the body from the last save.
 var persistEvery int64 = 8 << 20
+
+// stagingDir names the staging folder of transaction tx: its id in hex, so
+// that two ids that differ only in case (the client chooses them) never share
+// a folder on a file system that ignores case.
+func stagingDir(tx string) string { return hex.EncodeToString([]byte(tx)) }
+
+// txOfDir reads a staging folder's name back into its transaction id.
+func txOfDir(name string) (string, bool) {
+	b, err := hex.DecodeString(name)
+	if err != nil || hex.EncodeToString(b) != name || !ValidTx(string(b)) {
+		return "", false
+	}
+	return string(b), true
+}
 
 // ValidTx reports whether tx is a valid transaction id: 16 to 64 characters
 // of [A-Za-z0-9_-], chosen by the client.
@@ -144,7 +162,8 @@ func (s *Store) loadTxs(app string) (map[string]*txState, error) {
 	}
 next:
 	for _, e := range entries {
-		if !e.IsDir() || !ValidTx(e.Name()) {
+		tx, ok := txOfDir(e.Name())
+		if !e.IsDir() || !ok {
 			continue
 		}
 		tdir := filepath.Join(dir, e.Name())
@@ -153,7 +172,7 @@ next:
 			continue
 		}
 		var rec txRecord
-		if json.Unmarshal(data, &rec) != nil || rec.Tx != e.Name() || rec.Device == "" {
+		if json.Unmarshal(data, &rec) != nil || rec.Tx != tx || rec.Device == "" {
 			continue
 		}
 		for i := range rec.Ops {
@@ -229,28 +248,41 @@ func (s *Store) sweep(app string, a *appState, now time.Time) error {
 		errs = append(errs, err)
 	}
 	for _, e := range entries {
-		if a.txs[e.Name()] != nil {
+		path := filepath.Join(dir, e.Name())
+		if tx, ok := txOfDir(e.Name()); ok && a.txs[tx] != nil {
+			removeTemps(path) // tx.json's, left by a crash
 			continue
 		}
-		path := filepath.Join(dir, e.Name())
 		if err := retryBusy(func() error { return removeAll(path) }); err != nil {
 			errs = append(errs, err)
 		}
 	}
+	removeTemps(s.wss(app)) // index.json's and journal.json's
 	return errors.Join(errs...)
+}
+
+// removeTemps removes the temporary files that fsutil.WriteFileAtomic leaves
+// in dir when the process dies between writing and renaming one. The caller
+// holds the app's lock, so no write of the store is under way.
+func removeTemps(dir string) {
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.Type().IsRegular() && strings.Contains(e.Name(), ".tmp-") {
+			_ = removeFile(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 // projected returns the size app's set would have after t, with extra in
 // place of t's change to the same key: a put frees what the document it
-// replaces takes, and a delete frees all of it.
+// replaces takes, and a delete frees all of it. The sum saturates at
+// math.MaxInt64 rather than wrap around.
 func (s *Store) projected(a *appState, t *txState, extra *opRecord) int64 {
-	size := a.idx.Bytes
+	kept, added := a.idx.Bytes, int64(0)
 	add := func(op opRecord) {
-		cur := a.idx.Docs[op.Key].Bytes // 0 for a new document
-		if op.Delete {
-			size -= cur
-		} else {
-			size += op.Bytes - cur
+		kept -= a.idx.Docs[op.Key].Bytes // 0 for a new document
+		if !op.Delete {
+			added = satAdd(added, op.Bytes)
 		}
 	}
 	for _, op := range t.rec.Ops {
@@ -261,7 +293,24 @@ func (s *Store) projected(a *appState, t *txState, extra *opRecord) int64 {
 	if extra != nil {
 		add(*extra)
 	}
-	return size
+	return satAdd(max(kept, 0), added)
+}
+
+// satAdd returns a+b for a, b >= 0, or math.MaxInt64 if that overflows.
+func satAdd(a, b int64) int64 {
+	if b > math.MaxInt64-a {
+		return math.MaxInt64
+	}
+	return a + b
+}
+
+// overQuota reports whether a set of size bytes after a transaction is
+// refused: when it exceeds the app's quota and is larger than the set is
+// now. A set already over its quota (the quota was lowered, or files were
+// added by hand) can always shrink, by deleting or by a smaller body, but
+// not grow.
+func (s *Store) overQuota(app string, a *appState, size int64) bool {
+	return size > s.quotaOf(app) && size > a.idx.Bytes
 }
 
 // Begin opens the transaction tx of device on app, or returns to it, and
@@ -297,7 +346,7 @@ func (s *Store) Begin(app, device, tx string) ([]Staged, error) {
 		}
 		t := &txState{
 			rec:   txRecord{Tx: tx, Device: device, Created: now.UTC(), Active: now.UTC(), Ops: []opRecord{}},
-			dir:   filepath.Join(s.wss(app), stagingName, tx),
+			dir:   filepath.Join(s.wss(app), stagingName, stagingDir(tx)),
 			sinks: map[string]*Sink{},
 		}
 		if err := s.persistTx(t); err != nil {
@@ -337,17 +386,29 @@ func (s *Store) Put(app, device, tx string, k Key, ifEtag *string, bytes, offset
 			return err
 		}
 		ks := k.String()
-		if old := t.sinks[ks]; old != nil {
-			old.kill()
-			delete(t.sinks, ks)
-		}
+		// Checked before a body still being written for ks is ended, so a
+		// put that is refused leaves it be. That body counts with what it
+		// has received so far.
 		op := t.op(ks)
-		if offset > 0 && (op == nil || op.Delete || op.Bytes != bytes || offset > op.Received) {
+		old := t.sinks[ks]
+		received := int64(0)
+		if op != nil {
+			received = op.Received
+		}
+		if old != nil {
+			received = max(received, old.Received())
+		}
+		if offset > 0 && (op == nil || op.Delete || op.Bytes != bytes || offset > received) {
 			return fmt.Errorf("%w: %s has not received %d of %d bytes", ErrBadBody, ks, offset, bytes)
 		}
 		next := opRecord{Key: ks, IfEtag: cloneEtag(ifEtag), Bytes: bytes}
-		if s.projected(a, t, &next) > s.quotaOf(app) {
+		if bytes > s.quotaOf(app) || s.overQuota(app, a, s.projected(a, t, &next)) {
 			return ErrQuota
+		}
+		if old != nil {
+			old.kill()
+			delete(t.sinks, ks)
+			op.Received = received
 		}
 		if offset > 0 && offset == bytes {
 			op.IfEtag = next.IfEtag
@@ -544,14 +605,17 @@ func (k *Sink) Write(p []byte) (int, error) {
 		return n, err
 	}
 	if received == k.bytes {
-		// Complete: synced once, here, outside the app's lock.
-		err := k.f.Sync()
-		if cerr := k.f.Close(); err == nil {
-			err = cerr
-		}
+		// Complete: synced once, here, outside the app's lock and the
+		// Sink's, so that ending the transaction meanwhile never waits for
+		// the disk. The file is the Sink's no more: kill leaves it alone.
+		f := k.f
 		k.f, k.done = nil, true
 		etag := hex.EncodeToString(k.h.Sum(nil))
 		k.mu.Unlock()
+		err := syncFile(f)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
 		if err != nil {
 			k.record(0, "", true) // the body cannot be trusted: resume from 0
 			return n, err
@@ -559,15 +623,38 @@ func (k *Sink) Write(p []byte) (int, error) {
 		return n, k.record(received, etag, true)
 	}
 	persist := received-k.saved >= persistEvery
+	f := k.f
 	k.mu.Unlock()
 	if persist {
-		return n, k.record(received, "", false)
+		return n, k.syncAndRecord(f, received, false)
 	}
 	return n, nil
 }
 
-// Close ends the body where it stands. The transaction keeps what arrived,
-// and a later Put resumes it. Closing a complete body does nothing.
+// syncAndRecord syncs what f holds, then records received. tx.json never
+// counts a byte that a power loss could still take back: a resume would
+// hash zeros where the body was, and the commit would store them. The sync
+// runs outside the Sink's lock; if kill closes f meanwhile, the sync fails
+// or finishes first, and the record finds the transaction gone.
+func (k *Sink) syncAndRecord(f *os.File, received int64, final bool) error {
+	if err := syncFile(f); err != nil {
+		if rerr := k.record(k.lastSaved(), "", final); rerr != nil {
+			return rerr
+		}
+		return err
+	}
+	return k.record(received, "", final)
+}
+
+// lastSaved returns what tx.json last recorded.
+func (k *Sink) lastSaved() int64 {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.saved
+}
+
+// Close ends the body where it stands, synced. The transaction keeps what
+// arrived, and a later Put resumes it. Closing a complete body does nothing.
 func (k *Sink) Close() error {
 	k.mu.Lock()
 	if k.done || k.err != nil {
@@ -575,12 +662,13 @@ func (k *Sink) Close() error {
 		return nil
 	}
 	k.done = true
-	err := k.f.Close()
+	f := k.f
 	k.f = nil
 	received := k.received
 	k.mu.Unlock()
-	if rerr := k.record(received, "", true); err == nil {
-		err = rerr
+	err := k.syncAndRecord(f, received, true)
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
 	return err
 }

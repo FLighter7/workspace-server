@@ -82,7 +82,10 @@ func (s *Store) Write(app string, body []byte, ifEtag *string) (string, error) {
 			}
 			return &ConflictError{Revision: cloneEtag(a.idx.Revision), Docs: []DocEtag{{Key: DataKey, Etag: current}}}
 		}
-		if a.idx.Bytes-cur.Bytes+int64(len(body)) > s.quotaOf(app) {
+		if err := s.checkTargets(app, a, []string{ks}); err != nil {
+			return err
+		}
+		if s.overQuota(app, a, a.idx.Bytes-cur.Bytes+int64(len(body))) {
 			return ErrQuota
 		}
 
@@ -97,7 +100,7 @@ func (s *Store) Write(app string, body []byte, ifEtag *string) (string, error) {
 			return err
 		}
 		etag = Etag(body)
-		j := journal{Tx: name, At: s.now().UTC(), Ops: []journalOp{{
+		j := journal{Tx: "shim", Staging: name, At: s.now().UTC(), Ops: []journalOp{{
 			Key: ks, From: stagingName + "/" + name + "/b0", Etag: etag, Bytes: int64(len(body)),
 		}}}
 		if err := s.commitJournal(app, a, &j, nil); err != nil {

@@ -807,6 +807,10 @@ func TestPutLimits(t *testing.T) {
 	if got := e.hub.MaxBytes("todo"); got != apps.DefaultQuota {
 		t.Errorf("MaxBytes(todo) = %d, want %d", got, apps.DefaultQuota)
 	}
+	e.addApp(t, apps.App{ID: "huge", Quota: apps.MaxQuota})
+	if got := e.hub.MaxBytes("huge"); got != 1<<30 {
+		t.Errorf("MaxBytes(huge) = %d, want the shim's cap of 1 GiB", got)
+	}
 	if got := e.hub.MaxBytes("nope"); got != 0 {
 		t.Errorf("MaxBytes(nope) = %d, want 0", got)
 	}

@@ -25,6 +25,11 @@ var (
 	readFile    = os.ReadFile // the server's own files only, never a document
 	hashFile    = hashShared
 
+	// racyWindow is how close to its mtime a file may be hashed and still
+	// be trusted by size and mtime afterwards: more than the coarsest mtime
+	// tick of a common file system (FAT's 2 s).
+	racyWindow = 3 * time.Second
+
 	// busyRetries and busyDelay are how often and how far apart a rename or
 	// a removal that another program's handle blocks is tried again.
 	busyRetries = 10
@@ -53,6 +58,15 @@ func hashShared(path string) (etag string, size int64, mtime int64, err error) {
 	return hex.EncodeToString(h.Sum(nil)), n, fi.ModTime().UnixNano(), nil
 }
 
+// errTransient marks a failure that may pass, as isBusy does for the
+// system's own; the tests wrap it to stand in for a crash in the middle of
+// a commit, which a later operation carries through.
+var errTransient = errors.New("store: transient failure")
+
+// isTransient reports whether err may pass if tried again later: another
+// program's handle on the file (isBusy), or errTransient.
+func isTransient(err error) bool { return isBusy(err) || errors.Is(err, errTransient) }
+
 // retryBusy runs op, and again while it fails because another handle has the
 // file open (isBusy), up to busyRetries more times.
 func retryBusy(op func() error) error {
@@ -72,6 +86,10 @@ func removeEmptyDirs(dir, root string) {
 	for {
 		rel, err := filepath.Rel(root, dir)
 		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+			return
+		}
+		// Never a link or a junction, which os.Remove would remove too.
+		if fi, err := os.Lstat(dir); err != nil || fi.Mode().Type() != fs.ModeDir {
 			return
 		}
 		if err := removeFile(dir); err != nil {
@@ -107,8 +125,8 @@ func (s *Store) reconcile(app string, a *appState) (bool, error) {
 		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
 			// No key can lie below a folder that is not a valid one,
-			// .wss included.
-			if !ValidFolder(rel) {
+			// .wss included, nor below anything but a plain folder.
+			if !ValidFolder(rel) || d.Type() != fs.ModeDir {
 				return filepath.SkipDir
 			}
 			return nil
@@ -129,7 +147,7 @@ func (s *Store) reconcile(app string, a *appState) (bool, error) {
 			return err
 		}
 		e, have := a.idx.Docs[ks]
-		if have && e.Bytes == fi.Size() && e.Mtime == fi.ModTime().UnixNano() {
+		if have && !e.Racy && e.Bytes == fi.Size() && e.Mtime == fi.ModTime().UnixNano() {
 			seen[ks] = true
 			return nil
 		}
@@ -141,7 +159,11 @@ func (s *Store) reconcile(app string, a *appState) (bool, error) {
 			return err
 		}
 		seen[ks] = true
-		next := docEntry{Etag: etag, Bytes: size, Mtime: mtime}
+		// A file hashed within racyWindow of its mtime may change again
+		// within the same tick of the clock, keeping its size and mtime:
+		// it is hashed again at the next reconcile, until it is older.
+		age := time.Since(time.Unix(0, mtime))
+		next := docEntry{Etag: etag, Bytes: size, Mtime: mtime, Racy: age < racyWindow && age > -racyWindow}
 		if !have || e != next {
 			a.idx.put(ks, next)
 			dirty = true

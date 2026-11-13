@@ -152,6 +152,18 @@ type Store struct {
 
 	mu   sync.Mutex // guards apps
 	apps map[string]*appState
+
+	logFn func(format string, args ...any) // set by SetLogf before use
+}
+
+// SetLogf makes the store log what it does on its own, such as a change of
+// a commit it had to drop, through logf. Call it before the store is used.
+func (s *Store) SetLogf(logf func(format string, args ...any)) { s.logFn = logf }
+
+func (s *Store) logf(format string, args ...any) {
+	if s.logFn != nil {
+		s.logFn(format, args...)
+	}
 }
 
 // appState is what the store holds of an app in memory. mu is the app's
@@ -164,6 +176,18 @@ type appState struct {
 	txs     map[string]*txState // the open transactions, by id
 	journal bool                // a journal waits to be applied
 	unsaved bool                // the index changed, but saving it failed
+	// failing is when applying the journal first failed for a reason that
+	// may pass; zero while nothing failed.
+	failing time.Time
+}
+
+// failingSince returns when applying a's journal began to fail, starting
+// the clock now if it had not; apply calls it only after a failure.
+func (s *Store) failingSince(a *appState) time.Time {
+	if a.failing.IsZero() {
+		a.failing = s.now()
+	}
+	return a.failing
 }
 
 // New returns a Store whose apps live in <root>/<app>/. now gives the time of
@@ -371,31 +395,33 @@ func (s *Store) Open(app string, k Key, etag string) (*os.File, DocInfo, error) 
 	var info DocInfo
 	err := s.do(app, func(a *appState) error {
 		ks := k.String()
-		for range 2 {
+		for attempt := 0; ; attempt++ {
 			e, ok := a.idx.Docs[ks]
 			if !ok || e.Etag != etag {
 				return ErrStale
 			}
 			file, err := fsutil.OpenShared(s.docPath(app, ks))
 			if err == nil {
-				fi, err := file.Stat()
-				if err == nil && fi.Mode().IsRegular() && fi.Size() == e.Bytes && fi.ModTime().UnixNano() == e.Mtime {
+				fi, serr := file.Stat()
+				if serr == nil && fi.Mode().IsRegular() && fi.Size() == e.Bytes && fi.ModTime().UnixNano() == e.Mtime {
 					f, info = file, DocInfo{Key: k, Etag: e.Etag, Bytes: e.Bytes}
 					return nil
 				}
 				_ = file.Close()
-				if err != nil {
-					return err
+				err = serr
+			}
+			if attempt > 0 {
+				if err == nil || errors.Is(err, fs.ErrNotExist) {
+					return ErrStale
 				}
-			} else if !errors.Is(err, fs.ErrNotExist) {
 				return err
 			}
-			// Changed or removed by hand since the index saw it.
+			// Changed, removed or replaced by a folder by hand since the
+			// index saw it: the reconcile tells.
 			if _, err := s.reconcile(app, a); err != nil {
 				return err
 			}
 		}
-		return ErrStale
 	})
 	return f, info, err
 }

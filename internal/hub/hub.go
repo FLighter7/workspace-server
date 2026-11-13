@@ -352,15 +352,21 @@ func (h *Hub) Get(app string) ([]byte, *string, *protocol.Error) {
 	return doc, etag, nil
 }
 
+// shimMaxBytes caps a put's body until stage 2 of the files plan: the
+// session still holds a body and its replies in memory, and a quota may be
+// up to 1 TiB.
+const shimMaxBytes = int64(1 << 30)
+
 // MaxBytes returns app's size limit, 0 when it is not listed: its quota,
-// which the whole set of its files shares (the shim of the files plan: stage
-// 2 replaces this with the quota checks of the transactions).
+// which the whole set of its files shares, but at most shimMaxBytes (the
+// shim of the files plan: stage 2 replaces this with the quota checks of
+// the transactions and streams the bodies).
 func (h *Hub) MaxBytes(app string) int64 {
 	a, ok := h.d.Apps.Get(app)
 	if !ok {
 		return 0
 	}
-	return a.Quota
+	return min(a.Quota, shimMaxBytes)
 }
 
 // Apps returns the app list to a session of a server-kind device. Any other

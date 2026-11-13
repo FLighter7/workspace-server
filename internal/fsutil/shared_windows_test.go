@@ -158,3 +158,25 @@ func TestPosixUnsupported(t *testing.T) {
 		}
 	}
 }
+
+// A target someone marked read-only is replaced all the same, also under a
+// reader.
+func TestRenameOverReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	live, staged := filepath.Join(dir, "live"), filepath.Join(dir, "staged")
+	writeFile(t, live, []byte("old"))
+	writeFile(t, staged, []byte("new"))
+	if err := os.Chmod(live, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := openPartlyRead(t, live, 1)
+	if err := Rename(staged, live); err != nil {
+		t.Fatalf("Rename over a read-only file: %v", err)
+	}
+	if rest, _ := io.ReadAll(r); string(rest) != "ld" {
+		t.Errorf("the reader read %q after the rename", rest)
+	}
+	if b, err := ReadFileShared(live); err != nil || string(b) != "new" {
+		t.Errorf("the name holds %q, %v", b, err)
+	}
+}

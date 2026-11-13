@@ -255,7 +255,7 @@ func TestOneTransactionPerDevice(t *testing.T) {
 	if _, err := e.s.Commit("todo", "phone", txA); !errors.Is(err, ErrNoTransaction) {
 		t.Errorf("Commit of the discarded one = %v, want ErrNoTransaction", err)
 	}
-	if _, err := os.Stat(filepath.Join(e.root, "todo", ".wss", "staging", txA)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(e.root, "todo", ".wss", "staging", stagingDir(txA))); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the discarded transaction's folder stays: %v", err)
 	}
 	// Another device cannot touch one that is not its own.
@@ -402,7 +402,7 @@ func TestRestartInTheMiddleOfAPut(t *testing.T) {
 	// A body file that lost its end in a crash counts only what it holds.
 	e.begin("todo", "phone", txA)
 	e.put("todo", "phone", txA, "d.txt", nil, "0123456789")
-	bodyFile := filepath.Join(e.root, "todo", ".wss", "staging", txA, "b0")
+	bodyFile := filepath.Join(e.root, "todo", ".wss", "staging", stagingDir(txA), "b0")
 	if err := os.Truncate(bodyFile, 4); err != nil {
 		t.Fatal(err)
 	}

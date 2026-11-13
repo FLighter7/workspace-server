@@ -305,6 +305,8 @@ func TestRevision(t *testing.T) {
 }
 
 func TestReconcileTakesInHandEdits(t *testing.T) {
+	racyWindow = 0 // the files below are hashed right after they are written
+	t.Cleanup(func() { racyWindow = 3 * time.Second })
 	e := newEnv(t)
 	e.writeFile("todo", "data.json", `{"v":1}`)
 	e.writeFile("todo", "photos/2026/a.jpg", "jpeg")

@@ -628,6 +628,7 @@ func newServer(opts serverOptions, logger *log.Logger) (*server, error) {
 		a, _ := s.apps.Get(app)
 		return a.Quota
 	})
+	s.store.SetLogf(func(format string, args ...any) { s.logf("store: "+format, args...) })
 	// A commit cut short is carried through, hand edits taken in, expired
 	// transactions removed. An app that fails is tried again at its next
 	// operation, which reports the error to its devices.
