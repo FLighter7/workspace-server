@@ -48,10 +48,95 @@ type dataCheck struct {
 // partialSuffix names the copy moveData builds before it renames it.
 const partialSuffix = ".partial"
 
+// readmeText is WSS-Data's README.txt: what the folder is, for a person who
+// comes across it.
+const readmeText = `WSS-Data: your workspace-server data
+
+This folder holds the data of the apps that sync through workspace-server
+on this computer. Each app's files are in apps/<app id>/.
+
+Do not change, move, rename or delete this folder or anything in it.
+The server and the apps on your devices rely on it exactly as it is:
+a change made here can lose your data.
+
+To move your data to another folder, change the data folder on the
+server's page (Server → Data folder); the server moves it for you.
+`
+
+// wssDir returns the WSS-Data folder of the data folder dataDir, the one
+// that holds the apps' data: dataDir/WSS-Data, or dataDir itself when the
+// user chose a WSS-Data folder, so that there is no WSS-Data/WSS-Data. A
+// folder is taken for one when it is named exactly WSS-Data and holds apps or
+// README.txt, or nothing at all (missing or empty): a WSS-Data folder that a
+// deletion emptied, or one just being made, stays the data's folder.
+func wssDir(dataDir string) string {
+	if filepath.Base(dataDir) == wssDirName && isWSSFolder(dataDir) {
+		return dataDir
+	}
+	return filepath.Join(dataDir, wssDirName)
+}
+
+// isWSSFolder reports whether dir holds apps or README.txt, or nothing.
+func isWSSFolder(dir string) bool {
+	for _, name := range []string{storeDir, readmeFile} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			return true
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	return errors.Is(err, os.ErrNotExist) || err == nil && len(entries) == 0
+}
+
+// appsRoot returns the folder of the apps' folders in the data folder
+// dataDir: WSS-Data/apps.
+func appsRoot(dataDir string) string {
+	return filepath.Join(wssDir(dataDir), storeDir)
+}
+
+// ensureWSS creates the WSS-Data folder wss when it is missing, and its
+// README.txt; an existing README.txt is never written over.
+func ensureWSS(wss string) error {
+	if err := os.Mkdir(wss, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	if fi, err := os.Stat(wss); err != nil {
+		return err
+	} else if !fi.IsDir() {
+		return fmt.Errorf("%s is not a folder", wss)
+	}
+	path := filepath.Join(wss, readmeFile)
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		return err // there already, or cannot be told
+	}
+	return fsutil.WriteFileAtomic(path, []byte(readmeText), 0o644)
+}
+
+// removeWSSIfEmpty deletes the WSS-Data folder wss and its README.txt when
+// nothing else is left in it. A missing folder is nothing to do.
+func removeWSSIfEmpty(wss string) error {
+	entries, err := os.ReadDir(wss)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.Name() != readmeFile {
+			return nil
+		}
+	}
+	if err := os.Remove(filepath.Join(wss, readmeFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return os.Remove(wss)
+}
+
 // checkDataDir tells what moving the data folder from current to target
-// would do. It changes nothing but a probe file that tests whether target is
-// writable. The error is for a failure to read the current folder; every
-// problem with target is a verdict.
+// would do: both are data folders as the user chose them, and the verdict
+// looks at their WSS-Data folders. It changes nothing but a probe file that
+// tests whether target is writable. The error is for a failure to read the
+// current folder; every problem with target is a verdict.
 func checkDataDir(current, target string) (dataCheck, error) {
 	c := dataCheck{Path: target}
 	curData, err := hasData(current)
@@ -73,12 +158,13 @@ func checkDataDir(current, target string) (dataCheck, error) {
 	if err := checkDevDirsHere(target); err != nil {
 		return refuse("%v", err)
 	}
-	if target == filepath.Clean(current) {
+	curWSS, tgtWSS := wssDir(current), wssDir(target)
+	if target == filepath.Clean(current) || filepath.Clean(tgtWSS) == filepath.Clean(curWSS) {
 		c.Verdict = verdictSame
 		return c, nil
 	}
-	if within(filepath.Join(current, storeDir), target) {
-		return refuse("%s is inside the current data", target)
+	if within(curWSS, target) {
+		return refuse("%s is inside the current data, %s", target, curWSS)
 	}
 	fi, err := os.Stat(target)
 	switch {
@@ -97,12 +183,19 @@ func checkDataDir(current, target string) (dataCheck, error) {
 	case !fi.IsDir():
 		return refuse("%s is not a folder", target)
 	}
-	if os.SameFile(fi, statOrNil(current)) {
+	if os.SameFile(fi, statOrNil(current)) || os.SameFile(statOrNil(tgtWSS), statOrNil(curWSS)) {
 		c.Verdict = verdictSame
 		return c, nil
 	}
 	if err := probeWritable(target); err != nil {
 		return refuse("cannot write to %s: %v", target, err)
+	}
+	if wfi, err := os.Stat(tgtWSS); err == nil && !wfi.IsDir() {
+		return refuse("%s is not a folder", tgtWSS)
+	} else if err == nil {
+		if err := probeWritable(tgtWSS); err != nil {
+			return refuse("cannot write to %s: %v", tgtWSS, err)
+		}
 	}
 	tgtData, err := hasData(target)
 	if err != nil {
@@ -146,15 +239,18 @@ func probeWritable(dir string) error {
 	return os.Remove(name)
 }
 
-// The data folder's apps folder may hold more than the server's: apps is a
-// common folder name, and the user may have chosen a folder that already has
-// one. The server's own app folders are those with a valid app id that hold
-// a document (data.json) or a history folder; everything else under apps is
+// The apps folder in WSS-Data may hold more than the server's: someone may
+// have put a folder there by hand, and a folder the user chose that is
+// itself named WSS-Data may have held an apps folder of its own. The
+// server's own app folders are those with a valid app id that hold a
+// document (data.json) or a history folder; everything else under apps is
 // not data, and is never moved or deleted.
 
-// appDirs returns the names of the server's app folders in dataDir, sorted.
+// appDirs returns the names of the server's app folders in the data folder
+// dataDir, sorted.
 func appDirs(dataDir string) ([]string, error) {
-	entries, err := os.ReadDir(filepath.Join(dataDir, storeDir))
+	root := appsRoot(dataDir)
+	entries, err := os.ReadDir(root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -166,7 +262,7 @@ func appDirs(dataDir string) ([]string, error) {
 		if !e.IsDir() || !apps.ValidID(e.Name()) {
 			continue
 		}
-		dir := filepath.Join(dataDir, storeDir, e.Name())
+		dir := filepath.Join(root, e.Name())
 		if isRegular(filepath.Join(dir, "data.json")) || isDir(filepath.Join(dir, "history")) {
 			ids = append(ids, e.Name())
 		}
@@ -213,7 +309,7 @@ func hasData(dataDir string) (bool, error) {
 		return false, err
 	}
 	for _, id := range ids {
-		has, err := hasFiles(filepath.Join(dataDir, storeDir, id))
+		has, err := hasFiles(filepath.Join(appsRoot(dataDir), id))
 		if err != nil || has {
 			return has, err
 		}
@@ -221,14 +317,16 @@ func hasData(dataDir string) (bool, error) {
 	return false, nil
 }
 
-// removeApps deletes the server's app folders in dataDir, and the empty
-// folders with a valid app id, then the apps folder if nothing else is left
-// in it. Anything else under apps stays.
+// removeApps deletes the server's app folders in the data folder dataDir,
+// and the empty folders with a valid app id, then the apps folder if nothing
+// else is left in it, and then README.txt and the WSS-Data folder if nothing
+// else is left in that. Anything else stays.
 func removeApps(dataDir string) error {
-	root := filepath.Join(dataDir, storeDir)
+	wss := wssDir(dataDir)
+	root := filepath.Join(wss, storeDir)
 	entries, err := os.ReadDir(root)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return removeWSSIfEmpty(wss)
 	}
 	if err != nil {
 		return err
@@ -257,12 +355,15 @@ func removeApps(dataDir string) error {
 			first = err
 		}
 	}
+	if err := removeWSSIfEmpty(wss); err != nil && first == nil {
+		first = err
+	}
 	return first
 }
 
 // listAppData describes the apps with a valid id in dataDir that hold data.
 func listAppData(dataDir string) ([]appData, error) {
-	st := store.New(filepath.Join(dataDir, storeDir), time.Now)
+	st := store.New(appsRoot(dataDir), time.Now)
 	var out []appData
 	for _, id := range adoptableApps(dataDir) {
 		s, err := st.Stat(id)
@@ -283,14 +384,17 @@ func adoptableApps(dataDir string) []string {
 	return ids
 }
 
-// moveData copies the server's app folders of from into to: first to
-// apps.partial, fsynced, then into place, so that to never holds a half copy
-// under the real name. An apps folder already in to must hold no data; its
-// empty app folders are replaced, and anything that is not the server's
-// stays. The source is left in place: the caller deletes it once the
-// configuration points at to. On a failure nothing is added to to.
+// moveData copies the server's app folders of the data folder from into the
+// data folder to: first to WSS-Data/apps.partial in to, fsynced, then into
+// place, so that to never holds a half copy under the real name, and then
+// writes README.txt there if it is missing. An apps folder already in to
+// must hold no data; its empty app folders are replaced, and anything that
+// is not the server's stays. The source is left in place: the caller deletes
+// it once the configuration points at to. On a failure nothing is added to
+// to.
 func moveData(from, to string) error {
-	dst := filepath.Join(to, storeDir)
+	wss := wssDir(to)
+	dst := filepath.Join(wss, storeDir)
 	partial := dst + partialSuffix
 	if data, err := hasData(to); err != nil {
 		return err
@@ -307,12 +411,18 @@ func moveData(from, to string) error {
 	if err := os.RemoveAll(partial); err != nil {
 		return err
 	}
+	_, statErr := os.Stat(wss)
+	madeWSS := errors.Is(statErr, os.ErrNotExist)
 	fail := func(err error) error {
 		_ = os.RemoveAll(partial)
+		if madeWSS {
+			_ = removeWSSIfEmpty(wss)
+		}
 		return fmt.Errorf("copy the data to %s: %w", to, err)
 	}
+	src := appsRoot(from)
 	for _, id := range ids {
-		if err := copyTree(filepath.Join(from, storeDir, id), filepath.Join(partial, id)); err != nil {
+		if err := copyTree(filepath.Join(src, id), filepath.Join(partial, id)); err != nil {
 			return fail(err)
 		}
 	}
@@ -321,8 +431,9 @@ func moveData(from, to string) error {
 		if err := os.Rename(partial, dst); err != nil {
 			return fail(err)
 		}
-		_ = fsutil.SyncDir(to)
-		return nil
+		_ = fsutil.SyncDir(wss)
+		_ = fsutil.SyncDir(filepath.Dir(wss)) // a WSS-Data folder made here
+		return ensureWSS(wss)
 	}
 	// An apps folder is there already: put each app into it. An app folder
 	// of the same name is an empty leftover (there is no data in to).
@@ -344,7 +455,10 @@ func moveData(from, to string) error {
 		}
 	}
 	_ = fsutil.SyncDir(dst)
-	return os.RemoveAll(partial)
+	if err := os.RemoveAll(partial); err != nil {
+		return err
+	}
+	return ensureWSS(wss)
 }
 
 // syncTree syncs every folder below and at root, deepest first, best effort,
@@ -407,7 +521,7 @@ func copyFile(src, dst string) error {
 
 // resetServerDir deletes what makes the server known to its devices: its
 // identity, the app list, the paired devices, its link to an upstream server,
-// and the server's app folders in dataDir.
+// and the server's app folders in the data folder dataDir (see removeApps).
 // config.json, the log and the lock stay. It attempts every removal and
 // returns the first error.
 func resetServerDir(serverDir, dataDir string) error {
@@ -490,9 +604,10 @@ func removeServerDir(dir string) error {
 }
 
 // removeData deletes the apps' data in a data folder other than the server
-// folder: the server's app folders (see removeApps), and then the folder
-// itself only if nothing else is left in it. The user may have chosen a folder that holds other files. A
-// missing folder is nothing to do.
+// folder: the server's app folders and the WSS-Data folder (see removeApps),
+// and then the folder itself only if nothing else is left in it. The user
+// may have chosen a folder that holds other files. A missing folder is
+// nothing to do.
 func removeData(dataDir string) error {
 	if err := removeApps(dataDir); err != nil {
 		return err

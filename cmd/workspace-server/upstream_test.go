@@ -32,10 +32,10 @@ const linkWait = 20 * time.Second
 func TestTwoServersLinkPullAndPush(t *testing.T) {
 	mainDir, subDir := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(mainDir, "apps.json"), `{"apps":[{"id":"todo","name":"Todo"},{"id":"notes","name":"Notes"}]}`)
-	if err := os.MkdirAll(filepath.Join(mainDir, "apps", "todo"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(mainDir, "WSS-Data", "apps", "todo"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(mainDir, "apps", "todo", "data.json"), `{"v":1}`)
+	writeFile(t, filepath.Join(mainDir, "WSS-Data", "apps", "todo", "data.json"), `{"v":1}`)
 
 	mu, mp := freePorts(t)
 	su := freeUDPPort(t, mu, mp)

@@ -25,8 +25,10 @@ var errDevStart = fmt.Errorf("this is a development build (version %s): it is ne
 
 // checkDevDirs returns a devBuildError when v is a development build and one
 // of dirs is the default server folder def, the data folder def's config
-// names, or a folder inside either. A release build, or an empty def, passes
-// anything. dirs are absolute paths; empty ones are skipped.
+// names, or a folder inside either, or a folder whose WSS-Data is one of
+// these: the parent of an installed data folder that is a WSS-Data chosen
+// itself. A release build, or an empty def, passes anything. dirs are
+// absolute paths; empty ones are skipped.
 func checkDevDirs(v, def string, dirs ...string) error {
 	if v != devVersion || def == "" {
 		return nil
@@ -40,8 +42,10 @@ func checkDevDirs(v, def string, dirs ...string) error {
 			continue
 		}
 		for _, p := range protected {
-			if within(p, dir) || os.SameFile(statOrNil(p), statOrNil(dir)) {
-				return devBuildError{dir}
+			for _, d := range []string{dir, wssDir(dir)} {
+				if within(p, d) || os.SameFile(statOrNil(p), statOrNil(d)) {
+					return devBuildError{dir}
+				}
 			}
 		}
 	}

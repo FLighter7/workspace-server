@@ -75,7 +75,7 @@
 	"addIt": "Add it?",
 	"addedRetry": "Added. Now pair the device again.",
 	"dataDirLabel": "Data folder",
-	"dataDirHint": "Where the apps' documents and versions are kept. A folder that does not exist yet is created.",
+	"dataDirHint": "The server keeps the apps' data in a WSS-Data folder inside the folder you choose, or in the WSS-Data folder itself if you choose one. A folder that does not exist yet is created.",
 	"dataDirChange": "Change",
 	"moveTitle": "Move the data?",
 	"moveText": "The current data of the apps below will be moved to the new folder, and the server restarts.",

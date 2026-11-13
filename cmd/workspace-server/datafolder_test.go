@@ -9,10 +9,11 @@ import (
 	"testing"
 )
 
-// putData writes an app's document and n history versions under dataDir.
+// putData writes an app's document and n history versions in the data
+// folder dataDir, in its WSS-Data folder.
 func putData(t *testing.T, dataDir, id, doc string, versions int) {
 	t.Helper()
-	app := filepath.Join(dataDir, "apps", id)
+	app := filepath.Join(wssDir(dataDir), "apps", id)
 	if err := os.MkdirAll(filepath.Join(app, "history"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -51,8 +52,30 @@ func TestCheckDataDirVerdicts(t *testing.T) {
 		}, verdictUnavailable},
 		{"inside the current apps folder", func(t *testing.T, cur, _ string) string {
 			putData(t, cur, "todo", `{"a":1}`, 0)
-			return filepath.Join(cur, "apps", "todo")
+			return filepath.Join(cur, "WSS-Data", "apps", "todo")
 		}, verdictUnavailable},
+		{"inside the current WSS-Data", func(t *testing.T, cur, _ string) string {
+			putData(t, cur, "todo", `{"a":1}`, 0)
+			return filepath.Join(cur, "WSS-Data", "more")
+		}, verdictUnavailable},
+		{"the current WSS-Data itself", func(t *testing.T, cur, _ string) string {
+			putData(t, cur, "todo", `{"a":1}`, 0)
+			writeFile(t, filepath.Join(cur, "WSS-Data", "README.txt"), readmeText)
+			return filepath.Join(cur, "WSS-Data")
+		}, verdictSame},
+		{"WSS-Data is a file there", func(t *testing.T, _, tgt string) string {
+			writeFile(t, filepath.Join(tgt, "WSS-Data"), "x")
+			return tgt
+		}, verdictUnavailable},
+		{"data outside WSS-Data is not data", func(t *testing.T, _, tgt string) string {
+			writeFileAll(t, filepath.Join(tgt, "apps", "notes", "data.json"), `{"n":1}`)
+			return tgt
+		}, verdictSwitch},
+		{"a WSS-Data folder with data, chosen itself", func(t *testing.T, _, tgt string) string {
+			wss := filepath.Join(tgt, "WSS-Data")
+			writeFileAll(t, filepath.Join(wss, "apps", "notes", "data.json"), `{"n":1}`)
+			return wss
+		}, verdictAdopt},
 		{"empty target, current data", func(t *testing.T, cur, tgt string) string {
 			putData(t, cur, "todo", `{"a":1}`, 1)
 			return tgt
@@ -96,7 +119,7 @@ func TestCheckDataDirListsTheApps(t *testing.T) {
 	cur, tgt := t.TempDir(), t.TempDir()
 	putData(t, cur, "todo", `{"a":1}`, 2)
 	putData(t, tgt, "notes", `{"nn":12}`, 1)
-	if err := os.MkdirAll(filepath.Join(tgt, "apps", "Bad_ID"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(tgt, "WSS-Data", "apps", "Bad_ID"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	c, err := checkDataDir(cur, tgt)
@@ -123,8 +146,8 @@ func TestMoveDataCopiesEverything(t *testing.T) {
 		t.Fatalf("moveData = %v", err)
 	}
 	for _, rel := range []string{
-		"apps/todo/data.json", "apps/notes/data.json",
-		"apps/todo/history/20260101T000000Z-00000000.json", "apps/todo/history/20260102T000000Z-00000001.json",
+		"WSS-Data/apps/todo/data.json", "WSS-Data/apps/notes/data.json",
+		"WSS-Data/apps/todo/history/20260101T000000Z-00000000.json", "WSS-Data/apps/todo/history/20260102T000000Z-00000001.json",
 	} {
 		a, err1 := os.ReadFile(filepath.Join(from, rel))
 		b, err2 := os.ReadFile(filepath.Join(to, rel))
@@ -132,8 +155,11 @@ func TestMoveDataCopiesEverything(t *testing.T) {
 			t.Errorf("%s: source %q (%v), copy %q (%v)", rel, a, err1, b, err2)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(to, "apps.partial")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(to, "WSS-Data", "apps.partial")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("apps.partial is left: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(to, "WSS-Data", "README.txt")); err != nil || string(b) != readmeText {
+		t.Errorf("README.txt in the target: %q, %v", b, err)
 	}
 }
 
@@ -144,7 +170,7 @@ func TestMoveDataReplacesEmptyAppFolders(t *testing.T) {
 	if err := moveData(from, to); err != nil {
 		t.Fatalf("moveData = %v", err)
 	}
-	if b, _ := os.ReadFile(filepath.Join(to, "apps", "todo", "data.json")); string(b) != `{"a":1}` {
+	if b, _ := os.ReadFile(filepath.Join(to, "WSS-Data", "apps", "todo", "data.json")); string(b) != `{"a":1}` {
 		t.Errorf("copy %q", b)
 	}
 }
@@ -153,16 +179,14 @@ func TestMoveDataFailureLeavesNoPartialCopy(t *testing.T) {
 	from, to := t.TempDir(), t.TempDir()
 	putData(t, from, "todo", `{"a":1}`, 0)
 	putData(t, from, "notes", `{"n":2}`, 0)
-	makeUnreadable(t, filepath.Join(from, "apps", "notes", "data.json"))
+	makeUnreadable(t, filepath.Join(from, "WSS-Data", "apps", "notes", "data.json"))
 	if err := moveData(from, to); err == nil {
 		t.Fatal("moveData = nil, want the read error")
 	}
-	for _, name := range []string{"apps", "apps.partial"} {
-		if _, err := os.Stat(filepath.Join(to, name)); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("%s exists after a failed move: %v", name, err)
-		}
+	if _, err := os.Stat(filepath.Join(to, "WSS-Data")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("WSS-Data exists after a failed move: %v", err)
 	}
-	if b, _ := os.ReadFile(filepath.Join(from, "apps", "todo", "data.json")); string(b) != `{"a":1}` {
+	if b, _ := os.ReadFile(filepath.Join(from, "WSS-Data", "apps", "todo", "data.json")); string(b) != `{"a":1}` {
 		t.Errorf("the source changed: %q", b)
 	}
 }
@@ -171,10 +195,10 @@ func TestAdoptableApps(t *testing.T) {
 	dir := t.TempDir()
 	putData(t, dir, "todo", `{}`, 0)
 	putData(t, dir, "notes", "", 1)
-	if err := os.MkdirAll(filepath.Join(dir, "apps", "Bad_ID"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "WSS-Data", "apps", "Bad_ID"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(dir, "apps", "stray.json"), "{}")
+	writeFile(t, filepath.Join(dir, "WSS-Data", "apps", "stray.json"), "{}")
 	if got, want := adoptableApps(dir), []string{"notes", "todo"}; !slices.Equal(got, want) {
 		t.Errorf("adoptableApps = %v, want %v", got, want)
 	}
@@ -205,9 +229,9 @@ func TestResetServerDirKeepsTheSettings(t *testing.T) {
 	if err := resetServerDir(dir, dataDir); err != nil {
 		t.Fatalf("resetServerDir = %v", err)
 	}
-	for _, name := range []string{"config.json", "server.log", "server.lock", "apps/todo/data.json"} {
+	for _, name := range []string{"config.json", "server.log", "server.lock", "WSS-Data/apps/todo/data.json"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			t.Errorf("%s was removed: %v", name, err) // apps/ of the server folder is not the data folder here
+			t.Errorf("%s was removed: %v", name, err) // the server folder is not the data folder here
 		}
 	}
 	for _, name := range []string{"identity.json", "apps.json", "devices.json"} {
@@ -215,8 +239,8 @@ func TestResetServerDirKeepsTheSettings(t *testing.T) {
 			t.Errorf("%s is still there", name)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dataDir, "apps")); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("the data folder's apps is still there")
+	if _, err := os.Stat(filepath.Join(dataDir, "WSS-Data")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the data folder's WSS-Data is still there")
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "mine.txt")); err != nil {
 		t.Errorf("an unrelated file in the data folder went: %v", err)
@@ -305,8 +329,8 @@ func TestRemoveDataKeepsAFolderWithOtherFiles(t *testing.T) {
 	if err := removeData(dataDir); err != nil {
 		t.Fatalf("removeData = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dataDir, "apps")); !errors.Is(err, os.ErrNotExist) {
-		t.Error("apps is still there")
+	if _, err := os.Stat(filepath.Join(dataDir, "WSS-Data")); !errors.Is(err, os.ErrNotExist) {
+		t.Error("WSS-Data is still there")
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "mine.txt")); err != nil {
 		t.Errorf("the user's file went: %v", err)
@@ -324,8 +348,8 @@ func TestRemoveDataMissingIsNothing(t *testing.T) {
 // are ours.
 func TestForeignAppsFolderIsNotData(t *testing.T) {
 	dir := t.TempDir()
-	writeFileAll(t, filepath.Join(dir, "apps", "MyTool", "notes.txt"), "the user's")
-	writeFileAll(t, filepath.Join(dir, "apps", "notes", "random.txt"), "the user's too")
+	writeFileAll(t, filepath.Join(dir, "WSS-Data", "apps", "MyTool", "notes.txt"), "the user's")
+	writeFileAll(t, filepath.Join(dir, "WSS-Data", "apps", "notes", "random.txt"), "the user's too")
 	if has, err := hasData(dir); err != nil || has {
 		t.Errorf("hasData = %v, %v; a foreign apps folder is not data", has, err)
 	}
@@ -341,18 +365,19 @@ func TestResetAndRemoveKeepAForeignAppsFolder(t *testing.T) {
 		"removeData": removeData,
 	} {
 		dir := t.TempDir()
-		writeFileAll(t, filepath.Join(dir, "apps", "MyTool", "notes.txt"), "the user's")
-		writeFileAll(t, filepath.Join(dir, "apps", "notes", "random.txt"), "the user's too")
+		writeFileAll(t, filepath.Join(dir, "WSS-Data", "apps", "MyTool", "notes.txt"), "the user's")
+		writeFileAll(t, filepath.Join(dir, "WSS-Data", "apps", "notes", "random.txt"), "the user's too")
+		writeFile(t, filepath.Join(dir, "WSS-Data", "README.txt"), readmeText)
 		putData(t, dir, "todo", `{"a":1}`, 1)
 		if err := remove(dir); err != nil {
 			t.Fatalf("%s = %v", name, err)
 		}
-		for _, keep := range []string{"apps/MyTool/notes.txt", "apps/notes/random.txt"} {
+		for _, keep := range []string{"WSS-Data/apps/MyTool/notes.txt", "WSS-Data/apps/notes/random.txt", "WSS-Data/README.txt"} {
 			if _, err := os.Stat(filepath.Join(dir, keep)); err != nil {
-				t.Errorf("%s deleted the user's %s", name, keep)
+				t.Errorf("%s deleted %s", name, keep)
 			}
 		}
-		if _, err := os.Stat(filepath.Join(dir, "apps", "todo")); !errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Stat(filepath.Join(dir, "WSS-Data", "apps", "todo")); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s kept the server's todo folder", name)
 		}
 	}
@@ -361,17 +386,17 @@ func TestResetAndRemoveKeepAForeignAppsFolder(t *testing.T) {
 func TestMoveDataKeepsForeignFilesInTheTarget(t *testing.T) {
 	from, to := t.TempDir(), t.TempDir()
 	putData(t, from, "todo", `{"a":1}`, 1)
-	writeFileAll(t, filepath.Join(to, "apps", "MyTool", "notes.txt"), "the user's")
+	writeFileAll(t, filepath.Join(to, "WSS-Data", "apps", "MyTool", "notes.txt"), "the user's")
 	if err := moveData(from, to); err != nil {
 		t.Fatalf("moveData = %v", err)
 	}
-	if b, _ := os.ReadFile(filepath.Join(to, "apps", "todo", "data.json")); string(b) != `{"a":1}` {
+	if b, _ := os.ReadFile(filepath.Join(to, "WSS-Data", "apps", "todo", "data.json")); string(b) != `{"a":1}` {
 		t.Errorf("the moved document: %q", b)
 	}
-	if _, err := os.Stat(filepath.Join(to, "apps", "MyTool", "notes.txt")); err != nil {
+	if _, err := os.Stat(filepath.Join(to, "WSS-Data", "apps", "MyTool", "notes.txt")); err != nil {
 		t.Errorf("the move deleted the user's file: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(to, "apps.partial")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(to, "WSS-Data", "apps.partial")); !errors.Is(err, os.ErrNotExist) {
 		t.Error("apps.partial is left")
 	}
 }
@@ -382,4 +407,166 @@ func writeFileAll(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 	writeFile(t, path, content)
+}
+
+func TestWSSDir(t *testing.T) {
+	root := t.TempDir()
+	mk := func(rel string, files ...string) string {
+		dir := filepath.Join(root, rel)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			writeFileAll(t, filepath.Join(dir, f), "x")
+		}
+		return dir
+	}
+	nested := func(dir string) string { return filepath.Join(dir, "WSS-Data") }
+	cases := []struct {
+		name, dir, want string
+	}{
+		{"a plain folder", mk("plain"), nested(filepath.Join(root, "plain"))},
+		{"a plain folder holding apps", mk("withapps", "apps/todo/data.json"), nested(filepath.Join(root, "withapps"))},
+		{"WSS-Data with README.txt", mk("a/WSS-Data", "README.txt"), filepath.Join(root, "a", "WSS-Data")},
+		{"WSS-Data with apps", mk("b/WSS-Data", "apps/todo/data.json"), filepath.Join(root, "b", "WSS-Data")},
+		{"an empty WSS-Data", mk("c/WSS-Data"), filepath.Join(root, "c", "WSS-Data")},
+		{"a missing WSS-Data", filepath.Join(root, "d", "WSS-Data"), filepath.Join(root, "d", "WSS-Data")},
+		{"WSS-Data holding other files only", mk("e/WSS-Data", "photo.jpg"), nested(filepath.Join(root, "e", "WSS-Data"))},
+		{"another name's case", mk("f/wss-data", "README.txt"), nested(filepath.Join(root, "f", "wss-data"))},
+	}
+	for _, c := range cases {
+		if got := wssDir(c.dir); got != c.want {
+			t.Errorf("%s: wssDir = %s, want %s", c.name, got, c.want)
+		}
+	}
+	if got, want := appsRoot(filepath.Join(root, "plain")), filepath.Join(root, "plain", "WSS-Data", "apps"); got != want {
+		t.Errorf("appsRoot = %s, want %s", got, want)
+	}
+}
+
+// Choosing a WSS-Data folder as the data folder uses it as is: the data is
+// moved into it, not into a WSS-Data inside it.
+func TestMoveDataIntoAWSSDataFolderChosenItself(t *testing.T) {
+	from := t.TempDir()
+	putData(t, from, "todo", `{"a":1}`, 0)
+	to := filepath.Join(t.TempDir(), "WSS-Data")
+	c, err := checkDataDir(from, to)
+	if err != nil || c.Verdict != verdictCreate {
+		t.Fatalf("checkDataDir = %s %q, %v; want create", c.Verdict, c.Message, err)
+	}
+	if err := ensureDataDir(to); err != nil {
+		t.Fatal(err)
+	}
+	if err := moveData(from, to); err != nil {
+		t.Fatalf("moveData = %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(to, "apps", "todo", "data.json")); string(b) != `{"a":1}` {
+		t.Errorf("the moved document: %q", b)
+	}
+	if _, err := os.Stat(filepath.Join(to, "README.txt")); err != nil {
+		t.Errorf("README.txt: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(to, "WSS-Data")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a WSS-Data inside the chosen WSS-Data: %v", err)
+	}
+	// Moving back to the folder holding it is the same data.
+	if c, _ := checkDataDir(to, filepath.Dir(to)); c.Verdict != verdictSame {
+		t.Errorf("its parent: verdict %s, want same", c.Verdict)
+	}
+}
+
+// README.txt is written with WSS-Data, written again when it is gone, and
+// never written over.
+func TestEnsureDataDirWritesTheReadme(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	readme := filepath.Join(dataDir, "WSS-Data", "README.txt")
+	if err := ensureDataDir(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(readme); err != nil || string(b) != readmeText {
+		t.Fatalf("README.txt %q, %v", b, err)
+	}
+	if err := os.Remove(readme); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureDataDir(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(readme); err != nil || string(b) != readmeText {
+		t.Errorf("README.txt after it was deleted: %q, %v", b, err)
+	}
+	writeFile(t, readme, "the user's words")
+	if err := ensureDataDir(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(readme); string(b) != "the user's words" {
+		t.Errorf("README.txt was written over: %q", b)
+	}
+}
+
+func TestEnsureDataDirRefusesAWSSDataFile(t *testing.T) {
+	dataDir := t.TempDir()
+	writeFile(t, filepath.Join(dataDir, "WSS-Data"), "x")
+	if err := ensureDataDir(dataDir); err == nil || !strings.Contains(err.Error(), "not available") {
+		t.Errorf("ensureDataDir = %v, want the folder unavailable", err)
+	}
+}
+
+// Deleting the data removes README.txt and WSS-Data only when nothing else
+// is left in WSS-Data.
+func TestRemoveDataKeepsAWSSDataFolderWithOtherFiles(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	if err := ensureDataDir(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	putData(t, dataDir, "todo", `{"a":1}`, 1)
+	writeFile(t, filepath.Join(dataDir, "WSS-Data", "notes.txt"), "the user's")
+	if err := removeData(dataDir); err != nil {
+		t.Fatalf("removeData = %v", err)
+	}
+	for _, keep := range []string{"WSS-Data/notes.txt", "WSS-Data/README.txt"} {
+		if _, err := os.Stat(filepath.Join(dataDir, keep)); err != nil {
+			t.Errorf("%s went: %v", keep, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "WSS-Data", "apps")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("apps is still there: %v", err)
+	}
+
+	// Without the other file, all of it goes.
+	if err := os.Remove(filepath.Join(dataDir, "WSS-Data", "notes.txt")); err != nil {
+		t.Fatal(err)
+	}
+	putData(t, dataDir, "todo", `{"a":1}`, 0)
+	if err := removeData(dataDir); err != nil {
+		t.Fatalf("removeData = %v", err)
+	}
+	if _, err := os.Stat(dataDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the data folder is still there: %v", err)
+	}
+}
+
+// A WSS-Data folder chosen itself goes with its data; the reset, which
+// serves again from it, finds it again rather than a WSS-Data inside it.
+func TestResetOfAWSSDataFolderChosenItself(t *testing.T) {
+	wss := filepath.Join(t.TempDir(), "WSS-Data")
+	if err := ensureDataDir(wss); err != nil {
+		t.Fatal(err)
+	}
+	putData(t, wss, "todo", `{"a":1}`, 0)
+	if err := resetServerDir(t.TempDir(), wss); err != nil {
+		t.Fatalf("resetServerDir = %v", err)
+	}
+	if _, err := os.Stat(wss); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the emptied WSS-Data is still there: %v", err)
+	}
+	if err := ensureDataDir(wss); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(wss, "README.txt")); err != nil {
+		t.Errorf("README.txt: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wss, "WSS-Data")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a WSS-Data inside the chosen WSS-Data: %v", err)
+	}
 }

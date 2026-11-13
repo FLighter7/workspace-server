@@ -129,10 +129,10 @@ func TestRunServerKeepsTheDataInTheDataFolder(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "data") // missing; its parent exists
 	udp, port := freePorts(t)
 	writeConfig(t, dir, config.Config{Name: "Desk", UDPPort: udp, HTTPPort: port, DataDir: dataDir})
-	if err := os.MkdirAll(filepath.Join(dataDir, "apps", "todo"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(dataDir, "WSS-Data", "apps", "todo"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dataDir, "apps", "todo", "data.json"), []byte(`{"a":1}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dataDir, "WSS-Data", "apps", "todo", "data.json"), []byte(`{"a":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -149,8 +149,8 @@ func TestRunServerKeepsTheDataInTheDataFolder(t *testing.T) {
 			t.Errorf("%s is in the data folder", name)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "apps")); err == nil {
-		t.Errorf("the server folder has an apps folder; the data belongs in %s", dataDir)
+	if _, err := os.Stat(filepath.Join(dir, "WSS-Data")); err == nil {
+		t.Errorf("the server folder has a WSS-Data folder; the data belongs in %s", dataDir)
 	}
 }
 
@@ -163,6 +163,9 @@ func TestRunServerCreatesTheDataFolder(t *testing.T) {
 	startServer(t, dir, 0, port).stop(t)
 	if fi, err := os.Stat(dataDir); err != nil || !fi.IsDir() {
 		t.Errorf("the data folder was not created: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dataDir, "WSS-Data", "README.txt")); err != nil || string(b) != readmeText {
+		t.Errorf("README.txt in the new data folder: %q, %v", b, err)
 	}
 }
 

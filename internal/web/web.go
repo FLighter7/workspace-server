@@ -37,7 +37,7 @@ type Status struct {
 	HTTPPort    int      `json:"httpPort"`
 	Program     string   `json:"program"`    // the program file
 	ServerDir   string   `json:"serverDir"`  // settings, identity, devices, log
-	DataDir     string   `json:"dataDir"`    // the apps' data; never empty
+	DataDir     string   `json:"dataDir"`    // the WSS-Data folder that holds the apps' data; never empty
 	MainServer  bool     `json:"mainServer"` // the default server folder: owns autostart and the program file
 	LastError   string   `json:"lastError"`  // why the last reset or data move failed; "" when none did
 	Role        string   `json:"role"`       // "main", or "subordinate" while linked to an upstream server

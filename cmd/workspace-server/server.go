@@ -40,8 +40,10 @@ import (
 	"github.com/FLighter7/workspace-server/internal/wsclient"
 )
 
-// Files in the server folder; storeDir is in the data folder, which is the
-// server folder unless config.json names another.
+// Files in the server folder. The apps' data is in the WSS-Data folder
+// (wssDirName) of the data folder, which is the server folder unless
+// config.json names another; see wssDir. WSS-Data holds storeDir and
+// readmeFile.
 const (
 	identityFile = "identity.json"
 	configFile   = "config.json"
@@ -49,7 +51,9 @@ const (
 	devicesFile  = "devices.json"
 	upstreamFile = "upstream.json"
 	familyFile   = "family.json"
+	wssDirName   = "WSS-Data"
 	storeDir     = "apps"
+	readmeFile   = "README.txt"
 	logName      = "server.log"
 	lockFile     = "server.lock"
 )
@@ -233,7 +237,7 @@ func runOwned(ctx context.Context, opts serverOptions, logw io.Writer) (action, 
 		}
 		switch act.kind {
 		case actReset:
-			logger.Printf("resetting: the identity, the apps, the devices and the data in %s go; the settings stay", dataDir)
+			logger.Printf("resetting: the identity, the apps, the devices and the data in %s go; the settings stay", wssDir(dataDir))
 			if err := resetServerDir(opts.Dir, dataDir); err != nil {
 				lastErr = "reset: " + err.Error()
 				logger.Printf("the reset failed: %v", err)
@@ -479,7 +483,8 @@ type server struct {
 	appsErr string // the apps.json failure last logged; only the apps watcher uses it
 
 	serverDir string             // the server folder
-	dataDir   string             // the data folder in effect
+	dataDir   string             // the data folder in effect, as the user chose it
+	dataWSS   string             // its WSS-Data folder, which holds the data
 	cancel    context.CancelFunc // ends this run; set by serveOnce
 	lastErr   string             // why the previous restart failed
 
@@ -556,9 +561,8 @@ func newServer(opts serverOptions, logger *log.Logger) (*server, error) {
 	if err := ensureDataDir(dataDir); err != nil {
 		return nil, err
 	}
-	if dataDir != dir {
-		logger.Printf("the apps' data is in %s", dataDir)
-	}
+	s.dataWSS = wssDir(dataDir)
+	logger.Printf("the apps' data is in %s", s.dataWSS)
 
 	if s.apps, err = apps.Open(filepath.Join(dir, appsFile)); err != nil {
 		return nil, err
@@ -566,7 +570,7 @@ func newServer(opts serverOptions, logger *log.Logger) (*server, error) {
 	if s.devices, err = devices.Open(filepath.Join(dir, devicesFile), time.Now); err != nil {
 		return nil, err
 	}
-	s.store = store.New(filepath.Join(dataDir, storeDir), time.Now)
+	s.store = store.New(filepath.Join(s.dataWSS, storeDir), time.Now)
 	s.secrets = pairing.NewSecrets(time.Now)
 	s.refusals = pairing.NewRefusals(time.Now)
 	s.hub = hub.New(hub.Deps{
@@ -975,25 +979,31 @@ func effectiveDataDir(serverDir string, cfg config.Config) string {
 }
 
 // ensureDataDir creates the data folder path when it is missing and its
-// parent exists. A missing parent means an unmounted disk or a vanished
+// parent exists, then its WSS-Data folder, and writes WSS-Data's README.txt
+// when it is missing. A missing parent means an unmounted disk or a vanished
 // share: creating the folder there would show the user an empty server where
 // their data used to be, so it is an error instead.
 func ensureDataDir(path string) error {
+	unavailable := func(err error) error {
+		return fmt.Errorf("the data folder %s is not available: %w", path, err)
+	}
 	fi, err := os.Stat(path)
-	if err == nil {
-		if !fi.IsDir() {
-			return fmt.Errorf("the data folder %s is not available: not a folder", path)
+	switch {
+	case err == nil && !fi.IsDir():
+		return unavailable(errors.New("not a folder"))
+	case err == nil:
+	case !errors.Is(err, os.ErrNotExist):
+		return unavailable(err)
+	default:
+		if _, err := os.Stat(filepath.Dir(path)); err != nil {
+			return unavailable(err)
 		}
-		return nil
+		if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return unavailable(err)
+		}
 	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("the data folder %s is not available: %w", path, err)
-	}
-	if _, err := os.Stat(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("the data folder %s is not available: %w", path, err)
-	}
-	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return fmt.Errorf("the data folder %s is not available: %w", path, err)
+	if err := ensureWSS(wssDir(path)); err != nil {
+		return unavailable(err)
 	}
 	return nil
 }

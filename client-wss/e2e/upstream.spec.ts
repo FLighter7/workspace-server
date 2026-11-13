@@ -27,8 +27,8 @@ test.beforeAll(async () => {
 	mkdirSync(SCRATCH, { recursive: true });
 	tmp = mkdtempSync(join(SCRATCH, 'page-e2e-'));
 	const binary = buildServer(tmp);
-	mkdirSync(join(tmp, 'main', 'apps', 'todo'), { recursive: true });
-	writeFileSync(join(tmp, 'main', 'apps', 'todo', 'data.json'), '{"v":1}');
+	mkdirSync(join(tmp, 'main', 'WSS-Data', 'apps', 'todo'), { recursive: true });
+	writeFileSync(join(tmp, 'main', 'WSS-Data', 'apps', 'todo', 'data.json'), '{"v":1}');
 	main = await Server.start(binary, join(tmp, 'main'));
 	sub = await Server.start(binary, join(tmp, 'sub'));
 	await main.api('PUT', '/api/config', { name: 'Desk' });

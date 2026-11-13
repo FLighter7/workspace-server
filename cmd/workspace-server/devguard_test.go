@@ -39,7 +39,7 @@ func TestCheckDevDirs(t *testing.T) {
 	installedServer(t, def, data, devVersion)
 	other := filepath.Join(root, "tmp", "dev")
 
-	refused := []string{def, filepath.Join(def, "apps"), data, filepath.Join(data, "apps", "todo")}
+	refused := []string{def, filepath.Join(def, "WSS-Data"), data, filepath.Join(data, "WSS-Data", "apps", "todo")}
 	if runtime.GOOS == "windows" {
 		refused = append(refused, strings.ToUpper(def), strings.ToUpper(data))
 	}
@@ -120,6 +120,23 @@ func TestDevBuildDoesNotMoveOntoTheInstalledData(t *testing.T) {
 	version = "1.0.0"
 	if c, _ := checkDataDir(cur, data); c.Verdict != verdictAdopt {
 		t.Errorf("a release build: verdict %s, want %s", c.Verdict, verdictAdopt)
+	}
+}
+
+// The installed server's data folder may be a WSS-Data folder chosen
+// itself: the folder holding it, as a data folder, would share it.
+func TestCheckDevDirsSeesAWSSDataFolderChosenItself(t *testing.T) {
+	root := t.TempDir()
+	def, data := filepath.Join(root, "installed"), filepath.Join(root, "shared", "WSS-Data")
+	installedServer(t, def, data, devVersion)
+	writeFile(t, filepath.Join(data, "README.txt"), readmeText)
+	parent := filepath.Dir(data)
+	var e devBuildError
+	if err := checkDevDirs(devVersion, def, parent); !errors.As(err, &e) || e.dir != parent {
+		t.Errorf("checkDevDirs(dev, %s) = %v, want a refusal naming it", parent, err)
+	}
+	if c, _ := checkDataDir(filepath.Join(root, "dev"), parent); c.Verdict != verdictUnavailable {
+		t.Errorf("checkDataDir(%s) = %s, want unavailable", parent, c.Verdict)
 	}
 }
 

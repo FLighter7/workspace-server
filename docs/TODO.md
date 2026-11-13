@@ -33,4 +33,6 @@ Everything about the local hub (a subordinate, handing it out, switching the mai
 - **The main's page keeps showing a code an `invite` revoked** until it expires (L21); pairing with it then gets `badSecret`.
 - **The Upstream server section on a promoted main is wordy;** tighten its text.
 - **Older servers** (moot until releases differ, since none of these versions was released): a main from before `invite` answers it with `protocol`, which closes the link session, and the subordinate opens it again (untested); a subordinate from before the switch of the main would halt on `takeOver`.
+- **todo's server e2e tests read the old layout:** `e2e/server-sync.spec.ts` and `e2e/server-hub.spec.ts` in todo read `<dir>/apps/todo/…`, which a server built from `main` keeps in `<dir>/WSS-Data/apps/todo/…` since 2026-11-13 (D12). They pass against `v1.0.0-rc.1`, which todo's CI checks out; run locally against `../workspace-server`, they fail until todo moves to the new server.
+- **The installed server ignores data in the old layout:** a server updated from before 2026-11-13 finds no data in `<data folder>/apps/` (nothing migrates, D12); move it into `WSS-Data/apps/` by hand, or start over.
 - **Docker:** an image for a NAS is a later step; it needs host networking for UDP and mDNS.

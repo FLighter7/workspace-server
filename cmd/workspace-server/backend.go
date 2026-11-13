@@ -33,7 +33,7 @@ func (s *server) Status() web.Status {
 		HTTPPort:    s.cfg.HTTPPort,
 		Program:     program,
 		ServerDir:   s.serverDir,
-		DataDir:     s.dataDir,
+		DataDir:     s.dataWSS,
 		MainServer:  isMainServer(s.serverDir),
 		LastError:   s.lastErr,
 		Role:        s.link.Role(),

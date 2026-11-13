@@ -133,7 +133,7 @@ test('edits on both sides while the two servers cannot meet converge', async () 
 	await expect.poll(() => notesOf(a), { timeout: 15_000 }).toEqual(all);
 	await expect.poll(() => notesOf(b), { timeout: 15_000 }).toEqual(all);
 
-	const history = join(laptop.dir, 'apps', 'todo', 'history');
+	const history = join(laptop.dir, 'WSS-Data', 'apps', 'todo', 'history');
 	const kept = readdirSync(history).map((name) => readFileSync(join(history, name), 'utf8'));
 	expect(kept.some((doc) => doc.includes('laptop-side') && !doc.includes('desk-side'))).toBe(true);
 });

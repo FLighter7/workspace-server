@@ -259,6 +259,9 @@ async function changeDataDir(): Promise<void> {
 	}
 
 	const target = check.path;
+	// The status names the WSS-Data folder the server keeps in the chosen
+	// one; once the server is back, it is another folder.
+	const before = status.value.dataDir;
 	const say = (message: Message): void => {
 		dataMessage.value = message;
 	};
@@ -268,7 +271,7 @@ async function changeDataDir(): Promise<void> {
 			say(info('saved')); // the current folder
 			return;
 		}
-		void waitRestart(say, (st) => st.dataDir === target || st.lastError !== '');
+		void waitRestart(say, (st) => st.dataDir !== before || st.lastError !== '');
 	};
 	const run = async (): Promise<void> => {
 		try {
@@ -348,9 +351,7 @@ async function wipeFacts(withFolders: boolean): Promise<{ status: Status; facts:
 	];
 	if (withFolders) {
 		facts.push({ kind: 'path', label: 'serverDirFact', path: st.serverDir });
-		if (st.dataDir !== st.serverDir) {
-			facts.push({ kind: 'path', label: 'dataDirFact', path: st.dataDir });
-		}
+		facts.push({ kind: 'path', label: 'dataDirFact', path: st.dataDir });
 		if (st.mainServer && st.program) {
 			facts.push({ kind: 'path', label: 'programFact', path: st.program });
 		}

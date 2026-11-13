@@ -276,15 +276,18 @@ func TestMoveDataToANewFolder(t *testing.T) {
 	if code, body := ts.send(t, http.MethodPut, "/api/config", dataDirBody(target, "create")); code != http.StatusAccepted {
 		t.Fatalf("PUT dataDir = %d %s", code, body)
 	}
-	st := ts.waitStatus(t, func(st web.Status) bool { return st.DataDir == target })
+	st := ts.waitStatus(t, func(st web.Status) bool { return st.DataDir == filepath.Join(target, "WSS-Data") })
 	if st.LastError != "" {
 		t.Errorf("lastError %q", st.LastError)
 	}
 	if code, body := ts.send(t, http.MethodGet, "/api/apps/todo/document", ""); code != http.StatusOK || body != `{"a":1}` {
 		t.Errorf("the document after the move: %d %q", code, body)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "apps")); !errors.Is(err, os.ErrNotExist) {
-		t.Error("the old apps folder is still there")
+	if _, err := os.Stat(filepath.Join(dir, "WSS-Data")); !errors.Is(err, os.ErrNotExist) {
+		t.Error("the old WSS-Data folder is still there")
+	}
+	if b, err := os.ReadFile(filepath.Join(target, "WSS-Data", "README.txt")); err != nil || string(b) != readmeText {
+		t.Errorf("README.txt in the new folder: %q, %v", b, err)
 	}
 	if got := readConfig(t, dir).DataDir; got != target {
 		t.Errorf("config.json dataDir %q, want %q", got, target)
@@ -300,7 +303,7 @@ func TestMoveDataBackToTheServerFolderStoresNoPath(t *testing.T) {
 	putData(t, other, "todo", `{"a":1}`, 0)
 	ts := startServer(t, dir, 0, port)
 	ts.send(t, http.MethodPut, "/api/config", dataDirBody(dir, "move"))
-	ts.waitStatus(t, func(st web.Status) bool { return st.DataDir == dir })
+	ts.waitStatus(t, func(st web.Status) bool { return st.DataDir == filepath.Join(dir, "WSS-Data") })
 	if got := readConfig(t, dir).DataDir; got != "" {
 		t.Errorf("config.json dataDir %q, want empty for the server folder", got)
 	}
@@ -319,7 +322,7 @@ func TestAdoptDataListsItsApps(t *testing.T) {
 	if code, body := ts.send(t, http.MethodPut, "/api/config", dataDirBody(target, "adopt")); code != http.StatusAccepted {
 		t.Fatalf("PUT dataDir = %d %s", code, body)
 	}
-	ts.waitStatus(t, func(st web.Status) bool { return st.DataDir == target })
+	ts.waitStatus(t, func(st web.Status) bool { return st.DataDir == filepath.Join(target, "WSS-Data") })
 	_, body := ts.send(t, http.MethodGet, "/api/apps", "")
 	if !strings.Contains(body, `"id":"notes"`) || !strings.Contains(body, `"id":"todo"`) {
 		t.Errorf("apps after adopting: %s, want notes added to todo", body)
@@ -346,10 +349,10 @@ func TestMoveDataRefusesAConflict(t *testing.T) {
 		t.Errorf("the answer says it %d times: %s", n, body)
 	}
 	time.Sleep(200 * time.Millisecond)
-	if st := ts.status(t); st.ServerID != before.ServerID || st.DataDir != dir {
+	if st := ts.status(t); st.ServerID != before.ServerID || st.DataDir != filepath.Join(dir, "WSS-Data") {
 		t.Errorf("the server changed: %+v", st)
 	}
-	if b, _ := os.ReadFile(filepath.Join(target, "apps", "todo", "data.json")); string(b) != `{"b":2}` {
+	if b, _ := os.ReadFile(filepath.Join(target, "WSS-Data", "apps", "todo", "data.json")); string(b) != `{"b":2}` {
 		t.Errorf("the target's data changed: %q", b)
 	}
 }
@@ -368,7 +371,7 @@ func TestMoveDataFailureKeepsTheOldFolder(t *testing.T) {
 		t.Fatalf("PUT dataDir = %d %s", code, body)
 	}
 	st := ts.waitStatus(t, func(st web.Status) bool { return st.LastError != "" })
-	if st.DataDir != dir || !strings.Contains(st.LastError, "disk full") {
+	if st.DataDir != filepath.Join(dir, "WSS-Data") || !strings.Contains(st.LastError, "disk full") {
 		t.Errorf("after a failed move: dataDir %q, lastError %q", st.DataDir, st.LastError)
 	}
 	if code, _ := ts.send(t, http.MethodGet, "/api/apps/todo/document", ""); code != http.StatusOK {
@@ -400,7 +403,7 @@ func TestStatusNamesTheFolders(t *testing.T) {
 	recordExits(t, dir, true)
 	udp, port := freePorts(t)
 	st := startServer(t, dir, udp, port).status(t)
-	if st.ServerDir != dir || st.DataDir != dir || st.Program != "/opt/ws/workspace-server" || !st.MainServer || st.LastError != "" {
+	if st.ServerDir != dir || st.DataDir != filepath.Join(dir, "WSS-Data") || st.Program != "/opt/ws/workspace-server" || !st.MainServer || st.LastError != "" {
 		t.Errorf("status %+v", st)
 	}
 }
@@ -558,7 +561,7 @@ func TestMoveDataChecksAgainAfterTheStop(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, configFile)); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("config.json was written (%v)", err)
 		}
-		if _, err := os.Stat(filepath.Join(dir, "apps", "todo", "data.json")); err != nil {
+		if _, err := os.Stat(filepath.Join(dir, "WSS-Data", "apps", "todo", "data.json")); err != nil {
 			t.Errorf("the data moved: %v", err)
 		}
 	})
@@ -587,7 +590,7 @@ func TestMoveDataRemovesTheEmptiedOldFolder(t *testing.T) {
 	if code, body := ts.send(t, http.MethodPut, "/api/config", dataDirBody(target, "move")); code != http.StatusAccepted {
 		t.Fatalf("PUT dataDir = %d %s", code, body)
 	}
-	ts.waitStatus(t, func(st web.Status) bool { return st.DataDir == target })
+	ts.waitStatus(t, func(st web.Status) bool { return st.DataDir == filepath.Join(target, "WSS-Data") })
 	if _, err := os.Stat(old); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the emptied old folder is still there: %v", err)
 	}
@@ -602,15 +605,18 @@ func TestMoveDataLeavesForeignFilesInTheOldFolder(t *testing.T) {
 	udp, port := freePorts(t)
 	writeConfig(t, dir, config.Config{Name: "Desk", UDPPort: udp, HTTPPort: port, DataDir: old})
 	putData(t, old, "todo", `{"a":1}`, 0)
-	writeFileAll(t, filepath.Join(old, "apps", "MyTool", "notes.txt"), "the user's")
+	writeFileAll(t, filepath.Join(old, "WSS-Data", "apps", "MyTool", "notes.txt"), "the user's")
 	ts := startServer(t, dir, 0, port)
 	target := t.TempDir()
 	ts.send(t, http.MethodPut, "/api/config", dataDirBody(target, "move"))
-	ts.waitStatus(t, func(st web.Status) bool { return st.DataDir == target })
-	if _, err := os.Stat(filepath.Join(old, "apps", "MyTool", "notes.txt")); err != nil {
+	ts.waitStatus(t, func(st web.Status) bool { return st.DataDir == filepath.Join(target, "WSS-Data") })
+	if _, err := os.Stat(filepath.Join(old, "WSS-Data", "apps", "MyTool", "notes.txt")); err != nil {
 		t.Errorf("the move deleted the user's file: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(old, "apps", "todo")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(old, "WSS-Data", "README.txt")); err != nil {
+		t.Errorf("README.txt went from a WSS-Data folder that still holds files: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(old, "WSS-Data", "apps", "todo")); !errors.Is(err, os.ErrNotExist) {
 		t.Error("the old copy of todo is still there")
 	}
 }

@@ -167,7 +167,7 @@ The page `internal/web` serves: Vue 3, Vuetify 4 and vue-i18n, built with Vite. 
 4. `serveOnce`: load or create, in this order:
    - `identity.json`;
    - `config.json`, whose default name is the host name, trimmed and cut to 64 runes, with fallback `workspace-server`;
-   - the **data folder**: `dataDir` from `config.json`, or the server folder. A missing data folder is created when its parent exists; otherwise the server does not start (`cannot start: the data folder … is not available` in the log). Creating it under a missing parent would show an empty server where the user's data used to be, on an unmounted disk;
+   - the **data folder**: `dataDir` from `config.json`, or the server folder. A missing data folder is created when its parent exists; otherwise the server does not start (`cannot start: the data folder … is not available` in the log). Creating it under a missing parent would show an empty server where the user's data used to be, on an unmounted disk. Then its `WSS-Data` folder, and `README.txt` in it when it is missing;
    - `apps.json` (a first start writes the `todo` entry), plus the apps found in an adopted data folder;
    - `devices.json`;
    - `upstream.json`, the link to an upstream server, when there is one (see "Server modes and the link"), or else `family.json`, a main's term (see "Switching the main").
@@ -177,7 +177,7 @@ The page `internal/web` serves: Vue 3, Vuetify 4 and vue-i18n, built with Vite. 
    - Interactive mode's `OnReady` (open the browser) runs once, after the first start.
 7. Run the watchers until a signal arrives (Ctrl+C, SIGTERM, SIGHUP, a closed console window on Windows) or the page asks the server to stop, reset or move its data.
 8. Stop everything and log `stopping` and `stopped`. Then, with the lock and the log still held:
-   - **reset:** delete `identity.json`, `apps.json`, `devices.json`, `upstream.json`, `family.json` and the data folder's `apps/`; keep `config.json`, `server.log` and the lock; go to step 4;
+   - **reset:** delete `identity.json`, `apps.json`, `devices.json`, `upstream.json`, `family.json` and the server's app folders in the data folder's `WSS-Data` (with `README.txt` and `WSS-Data` when nothing else is left in it; step 4 makes them again); keep `config.json`, `server.log` and the lock; go to step 4;
    - **move:** copy the data to the new folder, save `config.json`, delete the old copy (see "Changing the data folder"); go to step 4;
    - **stop or delete:** close the log, release the lock, then perform the removals (see "Stopping and removing the server").
 
@@ -210,27 +210,27 @@ A restart that cannot start (a port taken in the gap, say) is retried every 2 s 
 
 ### Changing the data folder
 
-The page asks `GET /api/data-dir?path=P` first; the server answers a verdict and the apps' data on each side.
+The page asks `GET /api/data-dir?path=P` first; the server answers a verdict and the apps' data on each side. P is the folder the user chose; every verdict looks at its `WSS-Data` folder (see "The server folder and the data folder").
 
-- **The server's app folders** are the folders under `apps/` with a valid app id that hold `data.json` or `history/`. `apps` is a common folder name and the user may pick a folder that already has one, so nothing else under `apps/` is data, and nothing else is ever moved or deleted: a reset, a move and `delete` remove only the server's app folders (and empty ones with a valid id), and `apps/` itself only when it is then empty.
+- **The server's app folders** are the folders under `WSS-Data/apps/` with a valid app id that hold `data.json` or `history/`. Someone may put other things there, and a `WSS-Data` folder chosen itself may have held an `apps` of its own, so nothing else under `apps/` is data, and nothing else is ever moved or deleted: a reset, a move and `delete` remove only the server's app folders (and empty ones with a valid id), `apps/` only when it is then empty, and `README.txt` and `WSS-Data` only when nothing else is left in `WSS-Data`.
 - **"Has data"** means a regular file in one of the server's app folders (a document or a history version).
 
 | Verdict | When | `PUT /api/config {"dataDir": P, "verdict": V}` |
 | --- | --- | --- |
-| `same` | the current folder | 204, nothing |
+| `same` | the current folder, or one whose `WSS-Data` is the current one (the current `WSS-Data` itself, or its parent when the current data folder is a `WSS-Data` chosen itself) | 204, nothing |
 | `create` | missing, its parent exists | create it, move the data if any |
 | `move` | exists without data; the current one has data | move the data |
 | `switch` | neither has data | switch only |
 | `adopt` | only P has data | switch, and add every `apps/<id>` with a valid id to the app list |
 | `conflict` | both have data | 409 `dataExists` |
-| `unavailable` | relative, not a folder, not writable, inside the current `apps/`, or its parent is missing | 400 `invalid` |
+| `unavailable` | relative, not a folder, not writable, inside the current `WSS-Data`, its `WSS-Data` is a file or not writable, or its parent is missing | 400 `invalid` |
 
 - **`PUT` carries the verdict the page showed** (`verdict`, required with `dataDir` and allowed only with it) and checks the folders again, since they may have changed: `conflict` and `unavailable` are refused as in the table, and any other verdict that differs from the page's is 409 `changed`, so the user never gets a move they were not shown. Otherwise it answers 202; the handler flushes the answer and only then restarts the server.
 - **One change at a time:** a `PUT` while a change waits for its restart, or while the server stops, is 409 `busy`.
 - **The move checks a third time,** once the server has stopped: a verdict that changed since the `PUT` (data appeared in the current folder for a `switch`, say, which would stay behind unseen) changes nothing and goes to `lastError`.
-- **The move** is copy, then switch, then delete: copy the server's app folders to `P/apps.partial` (each file fsynced), put them in place (rename `apps.partial` to `apps`, or each app into an existing `P/apps`), save `config.json`, delete the old app folders, and then the old folder itself if it is empty and is not the server folder. A crash before the save leaves the old folder current; after it, the new one current and a stale copy behind. A failed copy removes `apps.partial` and keeps the old folder.
+- **The move** is copy, then switch, then delete: copy the server's app folders to `P/WSS-Data/apps.partial` (each file fsynced), put them in place (rename `apps.partial` to `apps`, or each app into an existing `WSS-Data/apps`), write `README.txt` if it is missing, save `config.json`, delete the old app folders, the old `README.txt` and `WSS-Data` if nothing else is left in it, and then the old folder itself if it is empty and is not the server folder. A crash before the save leaves the old folder current; after it, the new one current and a stale copy behind. A failed copy removes `apps.partial`, and the `WSS-Data` it made if that is empty, and keeps the old folder.
 - A data folder equal to the server folder is saved as an empty `dataDir`.
-- The data folder holds only `apps/`; the log stays in the server folder, so it can say why an unreachable data folder stopped the server.
+- The data folder holds only `WSS-Data`; the log stays in the server folder, so it can say why an unreachable data folder stopped the server.
 
 ## The UDP listener and sessions (`internal/rtc`, `internal/protocol`, `internal/hub`)
 
@@ -546,6 +546,12 @@ Two risks of the road decide whether a device reaches the laptop's server at all
 
 `-dir <dir>` names another server folder (for tests and a second server). The commands make it absolute and clean first, so a relative or trailing-separator `-dir` still matches the default folder (the main server) and the paths the page compares. The data folder is `config.json`'s `dataDir`, or the server folder when it is empty.
 
+- **The data is in `WSS-Data`,** a folder the server keeps in the data folder (`wssDir`, `appsRoot` in `datafolder.go`), so that a person finds it and its `README.txt` tells them to leave it alone. `dataDir` keeps the folder the user chose; the server adds `WSS-Data` itself, the default data folder (the server folder) included.
+- **A `WSS-Data` folder chosen itself** is used as is, with no `WSS-Data/WSS-Data`: a folder named exactly `WSS-Data` that holds `apps` or `README.txt`, or nothing at all. The last case, beyond holding `apps` or `README.txt`, keeps one folder across a deletion: a reset that empties a chosen `WSS-Data` removes it, and the restart that recreates it must not then nest a second one in it; a missing `WSS-Data` chosen for `create` is the data's folder for the same reason. A `WSS-Data` holding only other files gets a `WSS-Data` inside.
+- **`README.txt`** (`readmeText` in `datafolder.go`) is written when `WSS-Data` is made, and again at every start (`ensureDataDir`) and after a move if it is missing; an existing one is never written over. Deleting data removes `README.txt` and `WSS-Data` only when nothing else is left in `WSS-Data`.
+- **No old layout is read:** an `apps/` straight in the data folder (before 2026-11-13) is neither data nor moved; there were no users to migrate.
+- **`/api/status`'s `dataDir`** is the `WSS-Data` folder, which the page shows; `PUT /api/config`'s `dataDir` and `GET /api/data-dir`'s `path` are the folder the user chose.
+
 ```
 server folder:
 identity.json          0600, created once, never changed (a reset deletes it)
@@ -558,8 +564,9 @@ server.log             the log; never above 1 MiB
 server.lock            one server per server folder
 
 data folder:
-apps/<id>/data.json    the app's current document
-apps/<id>/history/     previous documents
+WSS-Data/README.txt              what the folder is, for a person (English)
+WSS-Data/apps/<id>/data.json     the app's current document
+WSS-Data/apps/<id>/history/      previous documents
 ```
 
 ### The files
@@ -647,7 +654,7 @@ apps/<id>/history/     previous documents
 | `delete [-dir] [--yes] [--pause]` | Shows what goes (folders, counts, the program file), asks `[y/N]` (Enter is no; without a terminal and without `--yes`, exit 2), stops like `stop`, then removes the data (when the data folder is another one), the server folder, and, for the main server, the Apps entry and the program file. `--pause` waits for Enter (the Windows uninstaller's window). A signal, or the console window closing, ends the question and the pause at once with nothing deleted. A side server whose folder does not exist has nothing to delete; for the main server it lists only the program file and autostart. |
 
 - **The main server** is the one on the default server folder. Autostart, the program file and the Apps entry belong to it; `-dir` with another folder touches none of them.
-- **A development build** (version `dev`: built without the ldflag, as every `go build` and `go run` is) never uses the installed server's folders (`devguard.go`, D11). Protected are the default server folder and the data folder its `config.json` names, and every folder inside either; paths compare with `filepath.Rel` (case-insensitive on Windows) and `os.SameFile`.
+- **A development build** (version `dev`: built without the ldflag, as every `go build` and `go run` is) never uses the installed server's folders (`devguard.go`, D11). Protected are the default server folder and the data folder its `config.json` names, and every folder inside either; paths compare with `filepath.Rel` (case-insensitive on Windows) and `os.SameFile`. A folder checked is refused also when its `WSS-Data` is protected: the parent of an installed data folder that is a `WSS-Data` chosen itself would otherwise share it.
   - `run` and interactive mode refuse in `runOwned`, before the folder is created, locked or logged in, when the server folder or the data folder its own `config.json` names is protected.
   - The page's data-folder check (`checkDataDir`) gives `unavailable` for a protected target, so a move or an adopt cannot reach it.
   - `start` refuses before anything else, so the installed server keeps running and autostart stays.
@@ -694,7 +701,7 @@ apps/<id>/history/     previous documents
 
 After a requested stop, once the log is closed and the lock released (on Windows an open file blocks deleting its folder):
 
-1. **Delete** only: delete the data (the server's app folders in a data folder other than the server folder; `apps/` and the folder itself only if then empty, since the user may have chosen a folder holding other files).
+1. **Delete** only: delete the data (the server's app folders in a data folder other than the server folder; `apps/`, then `README.txt` with `WSS-Data`, then the folder itself, each only if nothing else is left in it, since the user may have chosen a folder holding other files).
 2. **Delete** only: delete the server folder. `removeServerDir` refuses a folder holding none of `identity.json`, `config.json`, `apps.json`, `server.lock` (a mistyped `-dir`), and a folder another process has locked; it deletes everything but `server.lock` while holding the lock, then the lock file and the folder.
 3. **Delete**, main server: remove the Windows Apps & features entry (`HKCU\…\Uninstall\workspace-server`; a fixed key, so at most one entry).
 4. **Delete**, main server: delete the program file: `program.Remove` deletes one regular file, never a folder or a symlink. Unix unlinks it at once. Windows cannot delete a running program's file, so a hidden PowerShell helper retries `Remove-Item -LiteralPath` every 0.5 s for 10 s after the process exits.
@@ -803,11 +810,11 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 - **D4, Windows `start` starts the server itself,** detached and without a window, not with `schtasks /Run`, which would flash the console. (Verified on Windows, 2026-11-10.)
 - **D5, `install`/`uninstall` are gone,** without aliases: there has been no release.
 - **D6, the page's Stop also removes autostart,** like `stop`.
-- **D7, two folders:** a fixed server folder (settings, identity, registries, log, lock) and a data folder (`apps/`) the page can move, stored as `dataDir`. `-data` became `-dir` (the server folder). Autostart, the program file and the Apps entry belong to the default server folder only.
-  - Cost: two servers with different server folders but one `dataDir` would share `apps/`; nothing prevents it, since a lock in the data folder would add a file the user did not ask for.
+- **D7, two folders:** a fixed server folder (settings, identity, registries, log, lock) and a data folder (`WSS-Data` in it since 2026-11-13, D12) the page can move, stored as `dataDir`. `-data` became `-dir` (the server folder). Autostart, the program file and the Apps entry belong to the default server folder only.
+  - Cost: two servers with different server folders but one `dataDir` would share `WSS-Data`; nothing prevents it, since a lock in the data folder would add a file the user did not ask for.
 - **D8, the Windows Apps & features entry** is one fixed key: written by every `start`, kept by `stop`, removed by `delete`.
 - **D9, the log** is cut to 512 KiB (half the limit) when a line would take it past 1 MiB; one file.
-- **D10, the data folder:** a missing folder whose parent exists is created silently; both folders holding data is refused; only the target holding data adopts it and lists its apps; deleting a data folder removes only `apps/`, and the folder only if then empty; an unreachable data folder at start stops the server with a log line in the server folder.
+- **D10, the data folder:** a missing folder whose parent exists is created silently; both folders holding data is refused; only the target holding data adopts it and lists its apps; deleting a data folder removes only the server's data in `WSS-Data`, and `WSS-Data` and the folder only if then empty; an unreachable data folder at start stops the server with a log line in the server folder.
 - **Moving data copies, then switches, then deletes** (never a rename across the switch), so a crash leaves a consistent state. Cost: the data is copied, not renamed, even on one volume.
 - **The CLI's stop request is always `{}`;** the CLI removes autostart itself after the server is gone (otherwise a dying server could unregister what `start` just registered). `stop` and `delete` end by waiting until the page is gone and the lock is free, since the OS-level stop is asynchronous.
 - **`checkDataDir` writes a probe file** to test that a folder is writable. Cost: a GET touches the folder briefly.
@@ -904,6 +911,10 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
   - Why not the alternatives discussed: a read-only data folder stops the installed server's own writes, so sync stops while it is on, and the folder's read-only attribute does not cover the files in it on Windows; a write freeze on the page does not bind another process; snapshots beside the history were left for later.
   - Cost: a check of `start`, autostart or `delete` on the real default folder needs a build with a version. Two release builds can still share a data folder (D7).
 
+### The data's folder (the user's choice, 2026-11-13)
+
+- **D12, `WSS-Data`:** the data sits in a `WSS-Data` folder with a `README.txt` that tells a person not to touch it, so it is easy to find and hard to mistake for something else. `dataDir` keeps the user's choice and the server adds `WSS-Data`, everywhere, the default included; a `WSS-Data` chosen itself is used as is. Cost: the verdicts depend on what the chosen folder holds (whether it is taken for a `WSS-Data`), not on its path alone.
+
 ### Process
 
 - **Development (R10):** the Go rewrite was developed directly on `main`, one reviewed task at a time. Every commit carries the orchestrator's attribution line.
@@ -914,7 +925,7 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 - No code signing.
 - On Windows, a logon-started server may flash a console window for an instant before it lets go of it (see "Commands, autostart and removal"; none was seen at a real logon on 2026-11-10). A process without a console gets no console events, so at logoff Windows ends it hard. That is safe: writes are atomic, and the OS releases the lock.
 - A server started with `-http-port` that is not in `config.json` is not found by `probeServer`; opening the file then runs into the lock and exits 1, and `stop` falls back to the OS-level stop.
-- Two servers whose `dataDir` is the same folder share `apps/` unprotected.
+- Two servers whose `dataDir` is the same folder share `WSS-Data` unprotected.
 - Deleting the program file by hand on Windows leaves its Apps & features entry; Windows does not clean it up.
 - The mDNS responder:
   - guesses the arrival interface on Windows, by subnet;
@@ -994,7 +1005,7 @@ pnpm --dir client run test:e2e   # builds the server with Go, two Chromium devic
 - The program entry's values and the PowerShell helper's quoting; deleting the program file on Unix.
 - On Windows only: the detached start (no console window, the system folder as working folder), the entry written to and deleted from a scratch registry key, and the helper deleting a file whose name holds spaces, quotes, `$` and a backtick, and one that is open for a while. The task list parser is pure and runs everywhere.
 - `runServer`: start, restart, the lock, the address change; stop, reset, data move and adopt, deletion and its order, main and side servers.
-- The data folders: every verdict, the copy, reset and the safe deletions.
+- The data folders: every verdict, the copy, reset and the safe deletions; `WSS-Data` (where it is, a `WSS-Data` chosen itself, `README.txt` written, restored and never written over, and removed only with nothing else left).
 - The log cap, under concurrent writers.
 - The commands with fakes: interactive, `run`, `start`, `stop`, `delete`.
 - A development build (D11): the protected folders (a folder inside one, the moved data folder, a path differing only in case on Windows), `runServer` refusing the default folder with nothing created in it and a side folder naming the installed data, `checkDataDir` refusing both as a target, `start` refusing with nothing called, `delete` refusing the installed server directly and through a side folder, a side server deleted and `stop` working.

@@ -30,8 +30,8 @@ test.beforeAll(async () => {
 	mkdirSync(SCRATCH, { recursive: true });
 	tmp = mkdtempSync(join(SCRATCH, 'page-e2e-switch-'));
 	const binary = buildServer(tmp);
-	mkdirSync(join(tmp, 'desk', 'apps', 'todo'), { recursive: true });
-	writeFileSync(join(tmp, 'desk', 'apps', 'todo', 'data.json'), '{"v":1}');
+	mkdirSync(join(tmp, 'desk', 'WSS-Data', 'apps', 'todo'), { recursive: true });
+	writeFileSync(join(tmp, 'desk', 'WSS-Data', 'apps', 'todo', 'data.json'), '{"v":1}');
 	desk = await Server.start(binary, join(tmp, 'desk'));
 	laptop = await Server.start(binary, join(tmp, 'laptop'));
 	await desk.api('PUT', '/api/config', { name: 'Desk' });

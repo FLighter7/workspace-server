@@ -16,7 +16,7 @@ const status: Status = {
 	httpPort: 47801,
 	program: 'C:\\ws\\workspace-server.exe',
 	serverDir: 'C:\\ws',
-	dataDir: 'C:\\ws',
+	dataDir: 'C:\\ws\\WSS-Data',
 	mainServer: true,
 	lastError: '',
 	role: 'main',
@@ -74,7 +74,7 @@ describe('ServerSection: changing the data folder', () => {
 			'Home',
 			'47800',
 			'47801',
-			'C:\\ws',
+			'C:\\ws\\WSS-Data',
 		]);
 	});
 
@@ -129,5 +129,21 @@ describe('ServerSection: changing the data folder', () => {
 
 		expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Move the data?');
 		expect(setDataDir).not.toHaveBeenCalled();
+	});
+});
+
+describe('ServerSection: deleting the server', () => {
+	it('names the WSS-Data folder with the data, even inside the server folder', async () => {
+		vi.spyOn(serverApi, 'apps').mockResolvedValue([]);
+		vi.spyOn(serverApi, 'devices').mockResolvedValue([]);
+		mountPage(ServerSection);
+		await settle();
+		button('Delete the server and all data').click();
+		await settle();
+
+		const dialog = document.querySelector('[role="dialog"]')?.textContent ?? '';
+		expect(dialog).toContain('Server folder');
+		expect(dialog).toContain('Data folder');
+		expect(dialog).toContain('C:\\ws\\WSS-Data');
 	});
 });

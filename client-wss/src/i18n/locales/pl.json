@@ -75,7 +75,7 @@
 	"addIt": "Dodać ją?",
 	"addedRetry": "Dodano. Teraz sparuj urządzenie ponownie.",
 	"dataDirLabel": "Folder danych",
-	"dataDirHint": "Gdzie przechowywane są dokumenty i wersje aplikacji. Folder, którego jeszcze nie ma, zostanie utworzony.",
+	"dataDirHint": "Serwer przechowuje dane aplikacji w folderze WSS-Data wewnątrz wybranego folderu, a jeśli wybierzesz sam folder WSS-Data — w nim. Folder, którego jeszcze nie ma, zostanie utworzony.",
 	"dataDirChange": "Zmień",
 	"moveTitle": "Przenieść dane?",
 	"moveText": "Bieżące dane poniższych aplikacji zostaną przeniesione do nowego folderu, a serwer uruchomi się ponownie.",

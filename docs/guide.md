@@ -191,7 +191,7 @@ Run `delete`, or press **Delete the server and all data** on the web page, or, o
 
 - It shows what goes, including the path of the program file, and asks `Delete all of this? [y/N]`. Only `y` deletes; Enter keeps everything.
 - It stops the server, stops it starting at login, and deletes the server's folder, the apps' data, and the program file.
-- If you chose your own data folder, only the server's data in it is deleted. The folder itself goes only if nothing else is left in it.
+- If you chose your own data folder, only the server's data in it is deleted: its `WSS-Data` folder goes only if nothing else is left in it, and the folder you chose only if it is then empty.
 - **This deletes the server's copy of every app's data and all pairings.**
   - The devices keep their own copies; turn sync off in each app.
   - Download a document from the Apps page first if you want to keep it.
@@ -221,17 +221,21 @@ server.log             the log; it never grows past 1 MiB
 server.lock            keeps a second server off this folder
 ```
 
-The apps' data is in the **data folder**, which is the server folder unless you choose another one:
+The apps' data is in a folder named `WSS-Data` in the **data folder**, which is the server folder unless you choose another one:
 
 ```
-apps/<id>/data.json    the app's current data
-apps/<id>/history/     previous versions (10 by default)
+WSS-Data/README.txt                 what the folder is
+WSS-Data/apps/<id>/data.json        the app's current data
+WSS-Data/apps/<id>/history/         previous versions (10 by default)
 ```
 
+- **Leave `WSS-Data` as it is.** Do not change, move, rename or delete it or anything in it, or the apps' data can be lost; its `README.txt` says the same. To move the data, change the data folder on the page.
 - **Choosing the data folder:** on the web page, under Server → Data folder, type or paste the path of a folder and press Change.
+  - The server makes a `WSS-Data` folder inside the folder you choose. If you choose a `WSS-Data` folder itself, it is used as it is, with no second `WSS-Data` inside it.
+  - The page shows the path of the `WSS-Data` folder.
   - A folder that does not exist yet is created.
   - If there is data now, the page tells you it will be moved there, and the server restarts. Devices stay paired.
-  - If the new folder already holds a server's data and the current one holds none, the page offers to use that data, and adds its apps to the list.
+  - If the new folder's `WSS-Data` already holds a server's data and the current one holds none, the page offers to use that data, and adds its apps to the list.
   - If both hold data, the change is refused.
   - If the folder is on a disk that is not connected when the server starts, the server does not start. `server.log` in the server folder says why.
 - **Each app's data** is stored exactly as the app sent it, as a plain JSON file.
