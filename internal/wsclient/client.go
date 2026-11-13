@@ -820,7 +820,7 @@ func (c *Client) Diverged(ctx context.Context, app string, since *time.Time) err
 	}
 	frame := map[string]any{"t": "diverged", "app": app, "since": nil}
 	if since != nil {
-		frame["since"] = since.UTC().Format(time.RFC3339)
+		frame["since"] = since.UTC().Format(time.RFC3339Nano)
 	}
 	return c.send(ctx, frame, nil)
 }

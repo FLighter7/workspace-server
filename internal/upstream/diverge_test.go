@@ -541,3 +541,22 @@ func TestPlannedSwitchWaitsForTheFamily(t *testing.T) {
 	waitFor(t, "the tablet to hear it ended", func() bool { return !tablet.link.anyDivergence() })
 	waitFor(t, "the desk to forget it", func() bool { return len(desk.hub.Divergences("todo")) == 0 })
 }
+
+// Two divergences that begin within one second are named apart: since goes
+// to the nanosecond, in diverged.json and on the wire, and reads back the
+// same.
+func TestSinceNamesADivergence(t *testing.T) {
+	at := time.Date(2026, 11, 13, 9, 30, 0, 0, time.UTC)
+	a, b := sinceText(at.Add(time.Millisecond)), sinceText(at.Add(2*time.Millisecond))
+	if a == b {
+		t.Fatalf("two divergences a millisecond apart are both %s", a)
+	}
+	raw, err := json.Marshal(divergence{Since: at.Add(123456789), Reason: reasonChanged, Main: mainRef{ServerID: "Ab3dEf6hIj9k"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back divergence
+	if err := json.Unmarshal(raw, &back); err != nil || sinceText(back.Since) != "2026-11-13T09:30:00.123456789Z" {
+		t.Errorf("diverged.json gives back %s (%v)", sinceText(back.Since), err)
+	}
+}

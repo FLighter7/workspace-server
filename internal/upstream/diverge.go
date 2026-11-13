@@ -81,8 +81,10 @@ func (d *divergence) clone() *divergence {
 	return &c
 }
 
-// sinceText is a divergence's since as the frames carry it.
-func sinceText(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+// sinceText is a divergence's since as the frames carry it, to the
+// nanosecond: it names the divergence, so two that begin within one second
+// must not read alike.
+func sinceText(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
 // valid reports whether a diverged.json read from disk makes sense.
 func (d *divergence) valid() bool {
@@ -185,7 +187,7 @@ func (l *Link) isPaused(app string) bool {
 // lists it to this server's sessions of the app, and the link session tells
 // the main.
 func (l *Link) diverged(app string, main mainRef, lk *appLink, p plan, here, upSet map[string]string) error {
-	d := &divergence{Since: l.d.Now().UTC().Truncate(time.Second), Reason: reasonChanged, Main: main}
+	d := &divergence{Since: l.d.Now().UTC(), Reason: reasonChanged, Main: main}
 	if p.firstLink {
 		d.Reason = reasonFirstLink
 	}

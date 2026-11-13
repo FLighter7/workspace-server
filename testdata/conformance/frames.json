@@ -3279,12 +3279,12 @@
 			"call": {
 				"method": "diverged",
 				"app": "todo",
-				"since": "2026-11-13T09:30:00Z"
+				"since": "2026-11-13T09:30:00.123456789Z"
 			},
 			"client": {
 				"t": "diverged",
 				"app": "todo",
-				"since": "2026-11-13T09:30:00Z"
+				"since": "2026-11-13T09:30:00.123456789Z"
 			},
 			"server": [],
 			"result": null
@@ -3402,20 +3402,20 @@
 			"pushResolve": {
 				"app": "todo",
 				"keep": "subordinate",
-				"since": "2026-11-13T09:30:00Z"
+				"since": "2026-11-13T09:30:00.123456789Z"
 			},
 			"server": [
 				{
 					"t": "resolve",
 					"app": "todo",
 					"keep": "subordinate",
-					"since": "2026-11-13T09:30:00Z"
+					"since": "2026-11-13T09:30:00.123456789Z"
 				}
 			],
 			"result": {
 				"app": "todo",
 				"keep": "subordinate",
-				"since": "2026-11-13T09:30:00Z"
+				"since": "2026-11-13T09:30:00.123456789Z"
 			}
 		},
 		{

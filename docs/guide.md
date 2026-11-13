@@ -166,7 +166,8 @@ If the same data of an app changed on both servers while they were apart, or the
 
 - the laptop keeps its own copy, and the main its own; the app stops syncing between the two servers until you choose, while your devices go on syncing with whichever server they reach, and other apps sync as usual;
 - the app on every device, on either server, asks which copy to keep: the main's or the laptop's. The first answer counts, for all of the app's data; a later one changes nothing;
-- the copy you keep replaces the other on the other server, all of it, and the app syncs again. Your devices then merge what they hold with it, as they always do, so a change made only in the other copy comes back from the device that made it.
+- the copy you keep replaces the other on the other server, all of it, and the app syncs again. Your devices then merge what they hold with it, as they always do, so a change made only in the other copy comes back from the device that made it;
+- a choice made while the two servers cannot reach each other takes effect when they next meet, however much later, and the copy you did not keep is replaced as it is then, with whatever was written to it after you chose: a device that still holds such a change brings it back, one that has been wiped or is never opened again does not.
 
 While an app's copies have diverged, the laptop cannot be made the main in the planned way: choose first.
 
