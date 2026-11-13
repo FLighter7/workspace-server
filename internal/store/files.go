@@ -112,7 +112,7 @@ func removeEmptyDirs(dir, root string) {
 func (s *Store) reconcile(app string, a *appState) (bool, error) {
 	root := s.dir(app)
 	seen := make(map[string]bool, len(a.idx.Docs))
-	var unread []string // folders that could not be read, as key prefixes
+	var unread []string // what could not be read: keys, and folders as "<folder>/"
 	dirty := false
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		rel, rerr := filepath.Rel(root, path)
@@ -161,6 +161,7 @@ func (s *Store) reconcile(app string, a *appState) (bool, error) {
 		unreadable := func(err error) error {
 			s.logf("app %q: reconcile: cannot read %s, left as the index holds it: %v", app, ks, err)
 			seen[ks] = have
+			unread = append(unread, ks)
 			return nil
 		}
 		fi, err := d.Info()
@@ -196,6 +197,7 @@ func (s *Store) reconcile(app string, a *appState) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	a.unread = unread
 	now := s.now()
 next:
 	for ks := range a.idx.Docs {
@@ -203,7 +205,7 @@ next:
 			continue
 		}
 		for _, prefix := range unread {
-			if strings.HasPrefix(ks, prefix) {
+			if strings.HasSuffix(prefix, "/") && strings.HasPrefix(ks, prefix) || prefix == "" {
 				continue next // in a folder that could not be read
 			}
 		}

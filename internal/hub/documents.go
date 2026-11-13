@@ -12,13 +12,15 @@ import (
 )
 
 // The documents of an app session, answered from the store (see
-// docs/architecture.md, "Storage"). Everything that can move the set's
-// revision runs under the app's lock: a commit, the link's included, a
-// reconcile, and a get, whose open reconciles a file changed by hand. Each
-// compares the revision before and after (watch), and tells the app's
-// sessions and Deps.Changed when it moved, so that every session's changed
-// frames follow the order of the revisions and the last one names the
-// newest. Begin, put, delete and abort run under it too, so that none
+// docs/architecture.md, "Storage"). The hub keeps, per app, the revision it
+// last announced; whenever it finds the store's another (announceLocked),
+// it tells the app's sessions and Deps.Changed, so that every session's
+// changed frames follow the order of the revisions and the last one names
+// the newest. A commit (the link's included), a reconcile and a get, whose
+// open reconciles a file changed by hand, announce under the app's lock as
+// they finish; any other move the store reports (Store.SetOnMove: a journal
+// applied again, by whatever operation came next) is announced by
+// storeMoved. Begin, put, delete and abort run under it too, so that none
 // recreates an app's staging while RemoveApp deletes the app; a body is
 // written outside it. Head and list only read the index.
 
@@ -74,14 +76,13 @@ func (h *Hub) Get(app string, k protocol.Key, etag *string) (protocol.Doc, *prot
 		info store.DocInfo
 		err  error
 	)
-	watch := h.watch(app)
 	if etag != nil {
 		file, info, err = h.d.Store.Open(app, storeKey(k), *etag)
 	} else {
 		file, info, err = h.d.Store.OpenLatest(app, storeKey(k))
 	}
 	// The open may have reconciled a file changed by hand.
-	after := watch(nil)
+	after := h.announceLocked(app, nil)
 	unlock()
 	after()
 	if err == nil {
@@ -216,42 +217,63 @@ func (h *Hub) Commit(from *protocol.Session, app, device, tx string) *protocol.E
 	if !h.admitted(device, app) {
 		return errRemoved()
 	}
-	watch := h.watch(app)
 	c, err := h.d.Store.Commit(app, device, tx)
 	var conflict *store.ConflictError
 	switch {
 	case err == nil:
 		from.AnswerCommitted(protocol.Committed{Revision: c.Revision, Docs: wireDocs(c.Docs)})
-		after = watch(from) // the committed frame names the revision
+		after = h.announceLocked(app, from) // the committed frame names the revision
 		return nil
 	case errors.As(err, &conflict):
 		from.AnswerConflict(protocol.Conflict{Revision: conflict.Revision, Docs: wireDocs(conflict.Docs)})
-		after = watch(from) // so does the conflict frame
+		after = h.announceLocked(app, from) // so does the conflict frame
 		return nil
 	case refusal(err):
-		after = watch(nil)
+		after = h.announceLocked(app, nil)
 		return h.storeError(err)
 	}
-	after = watch(nil)
+	after = h.announceLocked(app, nil)
 	return h.errInternal(err)
 }
 
-// watch reads app's revision, and returns the function that reads it again
-// and, if it moved, tells every session of the app but except, and returns
-// the function that tells Deps.Changed. The caller holds the app's lock for
-// both reads and the pushes, and calls the last function once it has
-// released it. A revision that cannot be read (a journal waiting) is not
-// compared.
-func (h *Hub) watch(app string) func(except *protocol.Session) func() {
-	before, berr := h.d.Store.Head(app)
-	return func(except *protocol.Session) func() {
-		now, err := h.d.Store.Head(app)
-		if berr != nil || err != nil || sameRevision(before, now) {
-			return func() {}
-		}
-		h.pushLocked(app, now, except)
-		return func() { h.changed(app, now) }
+// announceLocked reads app's revision and, when it is not the one last
+// announced, tells every session of the app but except and makes it the one
+// announced. It returns the function that tells Deps.Changed, which the
+// caller calls once it has released the app's lock, which it holds for this
+// call. Every revision a session hears goes through here, under the app's
+// lock, so the pushes follow the order of the revisions, whatever moved
+// them. A revision that cannot be read (a journal waiting) is announced
+// later, by the operation that applies the journal (Store.SetOnMove).
+func (h *Hub) announceLocked(app string, except *protocol.Session) func() {
+	now, err := h.d.Store.Head(app)
+	if err != nil {
+		return func() {}
 	}
+	h.annMu.Lock()
+	last := h.announced[app]
+	h.announced[app] = now
+	h.annMu.Unlock()
+	if sameRevision(last, now) {
+		return func() {}
+	}
+	h.pushLocked(app, now, except)
+	return func() { h.changed(app, now) }
+}
+
+// storeMoved is the store's report that an operation moved app's revision
+// (Store.SetOnMove). It may come from inside a call that holds the app's
+// lock, so the announcement runs on a goroutine of its own; by then the
+// revision may have moved again, and announceLocked tells the newest.
+func (h *Hub) storeMoved(app string) {
+	go func() {
+		_, unlock, ok := h.lockListed(app)
+		if !ok {
+			return
+		}
+		after := h.announceLocked(app, nil)
+		unlock()
+		after()
+	}()
 }
 
 func wireDocs(list []store.DocEtag) []protocol.DocEtag {
@@ -278,14 +300,10 @@ func (h *Hub) Reconcile(app string) error {
 	if !ok {
 		return fmt.Errorf("%w: %q", apps.ErrNotFound, app)
 	}
-	changed, rev, err := h.d.Store.Reconcile(app)
-	if changed {
-		h.pushLocked(app, rev, nil)
-	}
+	_, _, err := h.d.Store.Reconcile(app)
+	after := h.announceLocked(app, nil)
 	unlock()
-	if changed {
-		h.changed(app, rev)
-	}
+	after()
 	return err
 }
 
@@ -379,10 +397,9 @@ func (t *LinkTx) Commit() (store.Committed, error) {
 	if !ok {
 		return store.Committed{}, fmt.Errorf("%w: %q", apps.ErrNotFound, t.app)
 	}
-	watch := h.watch(t.app)
 	c, err := h.d.Store.Commit(t.app, LinkDevice, t.tx)
 	// Whatever the outcome: its reconcile may have taken in a hand edit.
-	after := watch(nil)
+	after := h.announceLocked(t.app, nil)
 	unlock()
 	after()
 	return c, err

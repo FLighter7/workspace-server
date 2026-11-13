@@ -105,6 +105,17 @@ func (s *Store) Commit(app, device, tx string) (Committed, error) {
 		if _, err := s.reconcile(app, a); err != nil {
 			return err
 		}
+		// A document the reconcile could not read may have been changed by
+		// hand: its etag in the index is not to be trusted, and a rename over
+		// it would be blocked after the commit point anyway. Refused before
+		// it, so that no journal is ever left to write over such an edit.
+		for _, op := range t.rec.Ops {
+			if a.unreadable(op.Key) {
+				t.rec.Active = s.now()
+				_ = s.persistTx(t)
+				return fmt.Errorf("%w: %s", ErrUnreadable, op.Key)
+			}
+		}
 		var conflicts []DocEtag
 		for _, op := range t.rec.Ops {
 			cur, ok := a.idx.Docs[op.Key]

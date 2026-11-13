@@ -3,11 +3,13 @@ package hub
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/FLighter7/workspace-server/internal/apps"
+	"github.com/FLighter7/workspace-server/internal/devices"
 	"github.com/FLighter7/workspace-server/internal/protocol"
 	"github.com/FLighter7/workspace-server/internal/store"
 )
@@ -227,4 +229,122 @@ func TestRemoveDeviceDiscardsItsTransactions(t *testing.T) {
 			return len(entries) == 0
 		})
 	}
+}
+
+// A commit over a document changed by hand that the server cannot read (held
+// unshared) is refused before the store's commit point, as internal: the
+// transaction stays open, and once the file can be read the same commit
+// conflicts with the edit, which nothing ever wrote over.
+func TestCommitOverAnUnreadableHandEdit(t *testing.T) {
+	e := newEnv(t)
+	idA, tokA := e.device(t, "todo")
+	e.writeDoc(t, "todo", "data.json", `{}`)
+	etag := store.Etag([]byte(`{}`))
+	a, fa := e.login(t, "192.168.1.9:5000", "todo", idA, tokA)
+	path := filepath.Join(e.dir, "apps", "todo", "data.json")
+	e.handEdit(t, "todo", `{"by":"hand!"}`)
+	release := holdUnshared(t, path)
+
+	tx := newTx()
+	a.HandleText(frame(obj{"t": "begin", "tx": tx}))
+	a.HandleText(frame(obj{"t": "put", "tx": tx, "path": "", "id": "data", "type": "json", "ifEtag": etag, "bytes": 7, "offset": 0}))
+	a.HandleBinary([]byte(`{"v":2}`))
+	a.HandleText(frame(obj{"t": "commit", "tx": tx}))
+	f := waitFrames(t, fa, "committed", 1, "conflict", "error")[0]
+	expectError(t, f, protocol.CodeInternal)
+
+	release()
+	a.HandleText(frame(obj{"t": "commit", "tx": tx}))
+	f = waitFrames(t, fa, "committed", 1, "conflict")[0]
+	if f["t"] != "conflict" || committedEtag(f) != store.Etag([]byte(`{"by":"hand!"}`)) {
+		t.Errorf("the commit once readable answered %v, want a conflict naming the hand edit", f)
+	}
+	if b, _ := os.ReadFile(path); string(b) != `{"by":"hand!"}` {
+		t.Errorf("data.json holds %q, want the hand edit", b)
+	}
+}
+
+// A revision the store moves outside the hub's own calls (here a commit
+// straight into the store; a journal applied again by any operation is
+// reported the same way) is announced: the app's sessions get changed, and
+// Deps.Changed hears it.
+func TestStoreMovesAreAnnounced(t *testing.T) {
+	e := newEnv(t)
+	id, tok := e.device(t, "todo")
+	s, fc := e.login(t, "192.168.1.9:5000", "todo", id, tok)
+	tx := newTx()
+	if _, err := e.store.Begin("todo", "elsewhere", tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.Delete("todo", "elsewhere", tx, keyOf("gone.md"), nil); err != nil {
+		t.Fatal(err)
+	}
+	sink, err := e.store.Put("todo", "elsewhere", tx, keyOf("new.md"), nil, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = sink.Write([]byte("n"))
+	if _, err := e.store.Commit("todo", "elsewhere", tx); err != nil {
+		t.Fatal(err)
+	}
+	rev := e.revisionOf(t, "todo")
+	if c := waitFrames(t, fc, "changed", 1); c[0]["revision"] != rev {
+		t.Errorf("changed %v, want %v", c, rev)
+	}
+	waitFor(t, "Deps.Changed", func() bool { return slices.Contains(e.changesHeard(), "todo "+rev.(string)) })
+	if n := countType(settle(t, s, fc), "changed"); n != 1 {
+		t.Errorf("%d changed frames, want 1", n)
+	}
+}
+
+// A device the main's registry drops (Replicate), one a merged registry
+// drops (Adopt), and an own device handed over that the main does not admit
+// (ClearDevices) lose their open transactions with their sessions.
+func TestDroppedDevicesLoseTheirTransactions(t *testing.T) {
+	staging := func(e *env) int {
+		entries, _ := os.ReadDir(filepath.Join(e.dir, "apps", "todo", ".wss", "staging"))
+		return len(entries)
+	}
+	open := func(t *testing.T, e *env, id, token string) {
+		t.Helper()
+		s, fc := e.login(t, "192.168.1.9:5000", "todo", id, token)
+		tx := newTx()
+		s.HandleText(frame(obj{"t": "begin", "tx": tx}))
+		waitFrames(t, fc, "began", 1)
+		if staging(e) != 1 {
+			t.Fatalf("staging holds %d, want the transaction", staging(e))
+		}
+	}
+	t.Run("Replicate", func(t *testing.T) {
+		e := newEnv(t)
+		e.hub.d.Role = func() string { return protocol.RoleSubordinate }
+		e.hub.Replicate([]devices.Entry{{ID: "Dev0123456789ab", App: "todo", TokenHash: hashOf("tok-main")}})
+		open(t, e, "Dev0123456789ab", "tok-main")
+		e.hub.Replicate(nil)
+		if staging(e) != 0 {
+			t.Errorf("staging holds %d after the main dropped the device", staging(e))
+		}
+	})
+	t.Run("Adopt", func(t *testing.T) {
+		e := newEnv(t)
+		id, token := e.device(t, "todo")
+		open(t, e, id, token)
+		if _, err := e.hub.Adopt(nil, []devices.Tombstone{{ID: id, At: e.clock.Now()}}, devices.Self{ServerID: "srv-1"}); err != nil {
+			t.Fatal(err)
+		}
+		if staging(e) != 0 {
+			t.Errorf("staging holds %d after the merged registry removed the device", staging(e))
+		}
+	})
+	t.Run("ClearDevices", func(t *testing.T) {
+		e := newEnv(t)
+		id, token := e.device(t, "todo")
+		open(t, e, id, token)
+		if err := e.hub.ClearDevices(); err != nil {
+			t.Fatal(err)
+		}
+		if staging(e) != 0 {
+			t.Errorf("staging holds %d after the device was handed over and not admitted", staging(e))
+		}
+	})
 }

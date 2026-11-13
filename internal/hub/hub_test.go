@@ -1090,8 +1090,13 @@ func write(s *protocol.Session, ks string, ifEtag *string, body []byte) {
 
 // writeDoc writes body as the document ks of app straight into the store,
 // and returns the set's revision after it.
+//
+// The hub announces the write as it does any move of the store's (sessions
+// get changed, Deps.Changed hears it); writeDoc waits for that, and leaves
+// it out of what Deps.Changed heard, so that a test counts only its own.
 func (e *env) writeDoc(t *testing.T, app, ks, body string) string {
 	t.Helper()
+	prev := e.revisionOf(t, app)
 	tx := newTx()
 	if _, err := e.store.Begin(app, "test-writer", tx); err != nil {
 		t.Fatal(err)
@@ -1107,6 +1112,13 @@ func (e *env) writeDoc(t *testing.T, app, ks, body string) string {
 	c, err := e.store.Commit(app, "test-writer", tx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if prev != *c.Revision {
+		heard := app + " " + *c.Revision
+		waitFor(t, "the write's announcement", func() bool { return slices.Contains(e.changesHeard(), heard) })
+		e.hookMu.Lock()
+		e.heard = slices.DeleteFunc(e.heard, func(h string) bool { return h == heard })
+		e.hookMu.Unlock()
 	}
 	return *c.Revision
 }

@@ -138,6 +138,9 @@ type Hub struct {
 
 	mu       sync.Mutex
 	sessions map[*protocol.Session]member
+
+	annMu     sync.Mutex         // guards announced; taken under an app's lock
+	announced map[string]*string // per app, the revision last told its sessions
 }
 
 var _ protocol.Backend = (*Hub)(nil)
@@ -147,12 +150,22 @@ func New(d Deps) *Hub {
 	if d.Logf == nil {
 		d.Logf = func(string, ...any) {}
 	}
-	return &Hub{
-		d:        d,
-		limit:    limiter{failures: map[string][]time.Time{}, until: map[string]time.Time{}},
-		locks:    map[string]*sync.Mutex{},
-		sessions: map[*protocol.Session]member{},
+	h := &Hub{
+		d:         d,
+		limit:     limiter{failures: map[string][]time.Time{}, until: map[string]time.Time{}},
+		locks:     map[string]*sync.Mutex{},
+		sessions:  map[*protocol.Session]member{},
+		announced: map[string]*string{},
 	}
+	// What the apps hold now is what their sessions will be welcomed with;
+	// an app added later starts from an empty set.
+	for _, a := range d.Apps.List() {
+		if rev, err := d.Store.Head(a.ID); err == nil {
+			h.announced[a.ID] = rev
+		}
+	}
+	d.Store.SetOnMove(h.storeMoved)
+	return h
 }
 
 // Hello authenticates a known device of a listed app and registers s. With
@@ -586,8 +599,44 @@ func (h *Hub) Replicate(list []devices.Entry) {
 		}
 	}
 	targets := h.registered(func(m member) bool { return (!m.server || m.family) && gone[m.device] })
+	var aborts []droppedDevice
+	for _, e := range before {
+		if gone[e.ID] {
+			aborts = append(aborts, droppedDevice{e.ID, e.App, e.IsServer()})
+		}
+	}
 	h.servers.Unlock()
 	closeAll(targets)
+	h.abortDropped(aborts)
+}
+
+// droppedDevice is a device this server no longer admits, whose open
+// transactions go with it.
+type droppedDevice struct {
+	id, app string
+	server  bool // its transactions may be on any app
+}
+
+// abortDropped discards the open transactions of devices no longer
+// admitted (abortDevice), on their app, or on every listed app for a
+// server-kind one, taking each app's lock in turn. The caller holds none of
+// the hub's locks.
+func (h *Hub) abortDropped(list []droppedDevice) {
+	for _, d := range list {
+		ids := []string{d.app}
+		if d.server {
+			ids = ids[:0]
+			for _, a := range h.d.Apps.List() {
+				ids = append(ids, a.ID)
+			}
+		}
+		for _, app := range ids {
+			if _, unlock, ok := h.lockListed(app); ok {
+				h.abortDevice(app, d.id)
+				unlock()
+			}
+		}
+	}
 }
 
 func admission(e devices.Entry) [4]string { return [4]string{e.ID, e.App, e.Kind, e.TokenHash} }
@@ -601,19 +650,22 @@ func admission(e devices.Entry) [4]string { return [4]string{e.ID, e.App, e.Kind
 func (h *Hub) Adopt(list []devices.Entry, removed []devices.Tombstone, self devices.Self) (bool, error) {
 	h.servers.Lock()
 	before := len(h.d.Devices.Entries()) + len(h.d.Devices.Removed())
-	dropped, err := h.d.Devices.Merge(list, removed, self)
+	drops, err := h.d.Devices.Merge(list, removed, self)
 	after := len(h.d.Devices.Entries()) + len(h.d.Devices.Removed())
 	gone := map[string]bool{}
-	for _, d := range dropped {
+	var aborts []droppedDevice
+	for _, d := range drops {
 		gone[d.ID] = true
+		aborts = append(aborts, droppedDevice{d.ID, d.App, d.IsServer()})
 	}
 	targets := h.registered(func(m member) bool { return gone[m.device] })
 	h.servers.Unlock()
 	closeAll(targets)
+	h.abortDropped(aborts)
 	if err != nil {
 		return false, err
 	}
-	changed := before != after || len(dropped) > 0
+	changed := before != after || len(drops) > 0
 	if changed {
 		h.DevicesChanged()
 	}
@@ -625,13 +677,22 @@ func (h *Hub) Adopt(list []devices.Entry, removed []devices.Tombstone, self devi
 // sessions of those this server no longer admits on the main's word either.
 func (h *Hub) ClearDevices() error {
 	h.servers.Lock()
+	own := h.d.Devices.List()
 	err := h.d.Devices.Clear()
 	targets := h.registered(func(m member) bool {
 		_, ok := h.d.Devices.Get(m.device)
 		return !ok
 	})
+	// A device the main's registry still admits keeps its transactions.
+	var aborts []droppedDevice
+	for _, d := range own {
+		if _, ok := h.d.Devices.Get(d.ID); !ok {
+			aborts = append(aborts, droppedDevice{d.ID, d.App, d.IsServer()})
+		}
+	}
 	h.servers.Unlock()
 	closeAll(targets)
+	h.abortDropped(aborts)
 	return err
 }
 
@@ -811,6 +872,12 @@ func (h *Hub) RemoveApp(id string) error {
 	err := h.d.Store.DeleteApp(id)
 	if err == nil {
 		err = h.d.Apps.Remove(id)
+	}
+	if err == nil {
+		// An app of that id added later starts from an empty set.
+		h.annMu.Lock()
+		delete(h.announced, id)
+		h.annMu.Unlock()
 	}
 	targets := h.registered(func(m member) bool { return m.app == id })
 	unlock()

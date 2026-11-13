@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,6 +77,12 @@ var (
 	// ErrBadBody: a put's size or offset does not fit what is staged, or
 	// its body runs past the size it announced.
 	ErrBadBody = errors.New("store: the body does not fit its announced size or offset")
+	// ErrUnreadable: Commit refused a transaction that touches a document
+	// the store cannot read now (another program holds it unshared, or its
+	// permissions refuse the server): one changed by hand there would be
+	// written over unseen. The transaction stays open; a commit once the
+	// file can be read goes through, or conflicts.
+	ErrUnreadable = errors.New("store: a document of the transaction cannot be read now")
 )
 
 // ConflictError is returned by Commit when a document's etag is not the one
@@ -154,6 +161,20 @@ type Store struct {
 	apps map[string]*appState
 
 	logFn func(format string, args ...any) // set by SetLogf before use
+
+	onMove func(app string) // set by SetOnMove; guarded by mu
+}
+
+// SetOnMove makes the store call f with an app whenever an operation on it
+// moved the revision of its set, whatever moved it: a commit, a reconcile
+// that took in a file changed by hand, a journal applied again. f is called
+// once the app's lock is released, from the goroutine of the operation, and
+// must not block nor call back into the store on that goroutine. The first
+// operation on an app, which loads it, reports nothing.
+func (s *Store) SetOnMove(f func(app string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onMove = f
 }
 
 // SetLogf makes the store log what it does on its own, such as a change of
@@ -179,6 +200,21 @@ type appState struct {
 	// failing is when applying the journal first failed for a reason that
 	// may pass; zero while nothing failed.
 	failing time.Time
+	// unread is what the last reconcile could not read: keys, folders as
+	// "<folder>/", and "" for the app's folder itself. What the index holds
+	// of them may be older than the disk, so no commit touches them.
+	unread []string
+}
+
+// unreadable reports whether the key ks lies in what the last reconcile
+// could not read.
+func (a *appState) unreadable(ks string) bool {
+	for _, u := range a.unread {
+		if u == ks || u == "" || strings.HasSuffix(u, "/") && strings.HasPrefix(ks, u) {
+			return true
+		}
+	}
+	return false
 }
 
 // failingSince returns when applying a's journal began to fail, starting
@@ -276,16 +312,34 @@ func (s *Store) prepare(app string, a *appState) error {
 }
 
 // do runs f on app's state, prepared, under the app's lock.
+//
+// An operation that moved the revision of an app already loaded is reported
+// to the onMove callback, once the lock is released.
 func (s *Store) do(app string, f func(a *appState) error) error {
 	a, unlock, err := s.lock(app)
 	if err != nil {
 		return err
 	}
-	defer unlock()
-	if err := s.prepare(app, a); err != nil {
-		return err
+	known := a.loaded
+	var before *string
+	if known {
+		before = cloneEtag(a.idx.Revision)
 	}
-	return f(a)
+	err = s.prepare(app, a)
+	if err == nil {
+		err = f(a)
+	}
+	moved := known && a.loaded && a.idx != nil && !sameEtag(before, a.idx.Revision)
+	unlock()
+	if moved {
+		s.mu.Lock()
+		cb := s.onMove
+		s.mu.Unlock()
+		if cb != nil {
+			cb(app)
+		}
+	}
+	return err
 }
 
 // Recover loads every app folder under the root that has a .wss folder:
@@ -460,6 +514,6 @@ func (s *Store) DeleteApp(app string) error {
 		t.kill()
 	}
 	// Loaded again from disk at the next operation.
-	a.loaded, a.idx, a.onDisk, a.txs, a.journal, a.unsaved = false, nil, false, nil, false, false
+	a.loaded, a.idx, a.onDisk, a.txs, a.journal, a.unsaved, a.unread = false, nil, false, nil, false, false, nil
 	return os.RemoveAll(s.dir(app))
 }
