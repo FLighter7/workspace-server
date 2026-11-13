@@ -404,13 +404,13 @@ func TestCloseDropsQueuedFrames(t *testing.T) {
 
 func TestPutWithoutValidBytesIsProtocolError(t *testing.T) {
 	for _, frame := range []string{
-		`{"t":"put","tx":"t","ifEtag":null}`,
-		`{"t":"put","tx":"t","ifEtag":null,"bytes":-1}`,
-		`{"t":"put","tx":"t","ifEtag":null,"bytes":1.5}`,
-		`{"t":"put","tx":"t","ifEtag":null,"bytes":"10"}`,
-		`{"t":"put","tx":"t","ifEtag":null,"bytes":10,"offset":-1}`,
-		`{"t":"put","tx":"t","ifEtag":null,"bytes":10,"offset":11}`,
-		`{"t":"put","tx":"t","ifEtag":null,"bytes":10,"offset":"1"}`,
+		`{"t":"put","tx":"tx-0123456789abcdef","ifEtag":null}`,
+		`{"t":"put","tx":"tx-0123456789abcdef","ifEtag":null,"bytes":-1}`,
+		`{"t":"put","tx":"tx-0123456789abcdef","ifEtag":null,"bytes":1.5}`,
+		`{"t":"put","tx":"tx-0123456789abcdef","ifEtag":null,"bytes":"10"}`,
+		`{"t":"put","tx":"tx-0123456789abcdef","ifEtag":null,"bytes":10,"offset":-1}`,
+		`{"t":"put","tx":"tx-0123456789abcdef","ifEtag":null,"bytes":10,"offset":11}`,
+		`{"t":"put","tx":"tx-0123456789abcdef","ifEtag":null,"bytes":10,"offset":"1"}`,
 	} {
 		t.Run(frame, func(t *testing.T) {
 			b := newFakeBackend()
@@ -436,7 +436,7 @@ func TestBinaryWithoutPutIsProtocolError(t *testing.T) {
 		b := newFakeBackend()
 		s, fc := newSession(t, b, Options{})
 		authenticate(t, s, fc)
-		s.HandleText(`{"t":"put","tx":"t","ifEtag":null,"bytes":2}`)
+		s.HandleText(`{"t":"put","tx":"tx-0123456789abcdef","ifEtag":null,"bytes":2}`)
 		s.HandleBinary([]byte("{}"))
 		s.HandleBinary([]byte("{}"))
 		expectClosedWithError(t, fc, CodeProtocol)
@@ -447,7 +447,7 @@ func TestBinaryWithoutPutIsProtocolError(t *testing.T) {
 	t.Run("after a refused put before hello", func(t *testing.T) {
 		b := newFakeBackend()
 		s, fc := newSession(t, b, Options{})
-		s.HandleText(`{"t":"put","tx":"t","ifEtag":null,"bytes":2}`)
+		s.HandleText(`{"t":"put","tx":"tx-0123456789abcdef","ifEtag":null,"bytes":2}`)
 		expectError(t, fc.waitTexts(t, 1)[0], CodeNotAuthenticated)
 		s.HandleBinary([]byte("{}"))
 		expectClosedWithError(t, fc, CodeProtocol)
@@ -463,7 +463,7 @@ func TestOverrunIsProtocolError(t *testing.T) {
 		b := newFakeBackend()
 		s, fc := newSession(t, b, Options{})
 		authenticate(t, s, fc)
-		s.HandleText(`{"t":"put","tx":"t","ifEtag":null,"bytes":10}`)
+		s.HandleText(`{"t":"put","tx":"tx-0123456789abcdef","ifEtag":null,"bytes":10}`)
 		s.HandleBinary(body(6))
 		s.HandleBinary(body(6))
 		expectClosedWithError(t, fc, CodeProtocol)
@@ -480,7 +480,7 @@ func TestOverrunIsProtocolError(t *testing.T) {
 		b.putErr = &Error{CodeQuota, "too big"}
 		s, fc := newSession(t, b, Options{})
 		authenticate(t, s, fc)
-		s.HandleText(`{"t":"put","tx":"t","ifEtag":null,"bytes":10}`)
+		s.HandleText(`{"t":"put","tx":"tx-0123456789abcdef","ifEtag":null,"bytes":10}`)
 		s.HandleBinary(body(11))
 		expectClosedWithError(t, fc, CodeProtocol)
 	})
@@ -490,7 +490,7 @@ func TestTextDuringPutBodyIsProtocolError(t *testing.T) {
 	b := newFakeBackend()
 	s, fc := newSession(t, b, Options{})
 	authenticate(t, s, fc)
-	s.HandleText(`{"t":"put","tx":"t","ifEtag":null,"bytes":100}`)
+	s.HandleText(`{"t":"put","tx":"tx-0123456789abcdef","ifEtag":null,"bytes":100}`)
 	s.HandleBinary(body(10))
 	s.HandleText(`{"t":"head"}`)
 	expectClosedWithError(t, fc, CodeProtocol)

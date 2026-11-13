@@ -344,9 +344,12 @@ type Backend interface {
 	// Delete stages the removal of k in device's transaction tx.
 	Delete(app, device, tx string, k Key, ifEtag *string) *Error
 	// Commit applies device's transaction tx, all of it or nothing, and
-	// tells every other session of the app the new revision. A *Conflict
-	// leaves the transaction open.
-	Commit(from *Session, app, device, tx string) (Committed, *Conflict, *Error)
+	// tells every other session of the app the new revision. It answers
+	// itself, with from.AnswerCommitted or, on a conflict, which leaves the
+	// transaction open, from.AnswerConflict, under the lock that orders its
+	// pushes of changed: the session's frames then follow the order of the
+	// revisions. An error is answered by the session.
+	Commit(from *Session, app, device, tx string) *Error
 	// Abort discards device's transaction tx.
 	Abort(app, device, tx string) *Error
 	// Resolve settles a divergence of the app's servers: server is the

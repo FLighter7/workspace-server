@@ -1464,9 +1464,12 @@ func TestCommitFromARemovedDevice(t *testing.T) {
 	if !e.hub.RemoveDevice(id) {
 		t.Fatal("RemoveDevice = false")
 	}
-	_, conflict, perr := e.hub.Commit(s, "todo", id, tx)
-	if perr == nil || perr.Code != protocol.CodeBadToken || conflict != nil {
-		t.Errorf("Commit after RemoveDevice = conflict %v, error %v; want error %q", conflict, perr, protocol.CodeBadToken)
+	if perr := e.hub.Commit(s, "todo", id, tx); perr == nil || perr.Code != protocol.CodeBadToken {
+		t.Errorf("Commit after RemoveDevice = %v; want error %q", perr, protocol.CodeBadToken)
+	}
+	// Its transaction is discarded with it, staging and all.
+	if entries, _ := os.ReadDir(filepath.Join(e.dir, "apps", "todo", ".wss", "staging")); len(entries) != 0 {
+		t.Errorf("staging holds %d entries after the device's removal", len(entries))
 	}
 	if rev := e.revisionOf(t, "todo"); rev != nil {
 		t.Errorf("revision %v, want nothing committed", rev)

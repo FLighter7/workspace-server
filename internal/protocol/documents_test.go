@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -254,10 +255,10 @@ func TestPutResumes(t *testing.T) {
 	b := newFakeBackend()
 	s, fc := newSession(t, b, Options{})
 	authenticate(t, s, fc)
-	s.HandleText(`{"t":"put","tx":"t","path":"notes","id":"n1","type":"json","ifEtag":null,"bytes":10,"offset":6}`)
+	s.HandleText(`{"t":"put","tx":"tx-0123456789abcdef","path":"notes","id":"n1","type":"json","ifEtag":null,"bytes":10,"offset":6}`)
 	s.HandleBinary(body(4))
 	// Only the etag the complete body expects changes: no body follows.
-	s.HandleText(`{"t":"put","tx":"t","path":"notes","id":"n1","type":"json","ifEtag":"e2","bytes":10,"offset":10}`)
+	s.HandleText(`{"t":"put","tx":"tx-0123456789abcdef","path":"notes","id":"n1","type":"json","ifEtag":"e2","bytes":10,"offset":10}`)
 	staged := obj{"t": "staged", "path": "notes", "id": "n1", "type": "json", "received": float64(10)}
 	expectMessages(t, barrier(t, s, fc)[1:], staged, staged)
 	puts := b.putCalls()
@@ -279,7 +280,7 @@ func TestPutRefusedDiscardsTheBody(t *testing.T) {
 			b.head = ptr("r1")
 			s, fc := newSession(t, b, Options{})
 			authenticate(t, s, fc)
-			s.HandleText(`{"t":"put","tx":"t","path":"notes","id":"n1","type":"json","ifEtag":null,"bytes":5000}`)
+			s.HandleText(`{"t":"put","tx":"tx-0123456789abcdef","path":"notes","id":"n1","type":"json","ifEtag":null,"bytes":5000}`)
 			s.HandleBinary(body(4999))
 			if msgs := barrier(t, s, fc); len(msgs) != 1 {
 				t.Fatalf("sent %s before the body was consumed", describe(msgs))
@@ -298,7 +299,7 @@ func TestPutRefusedDiscardsTheBody(t *testing.T) {
 		b.putErr = &Error{CodeProtocol, "the offset does not fit"}
 		s, fc := newSession(t, b, Options{})
 		authenticate(t, s, fc)
-		s.HandleText(`{"t":"put","tx":"t","path":"notes","id":"n1","type":"json","ifEtag":null,"bytes":10,"offset":5}`)
+		s.HandleText(`{"t":"put","tx":"tx-0123456789abcdef","path":"notes","id":"n1","type":"json","ifEtag":null,"bytes":10,"offset":5}`)
 		expectClosedWithError(t, fc, CodeProtocol)
 	})
 }
@@ -318,7 +319,7 @@ func TestPutSinkFailure(t *testing.T) {
 			b.sink = func() *fakeSink { return &fakeSink{failAt: 20000, failErr: tc.err} }
 			s, fc := newSession(t, b, Options{})
 			authenticate(t, s, fc)
-			s.HandleText(`{"t":"put","tx":"t","path":"notes","id":"n1","type":"json","ifEtag":null,"bytes":40000}`)
+			s.HandleText(`{"t":"put","tx":"tx-0123456789abcdef","path":"notes","id":"n1","type":"json","ifEtag":null,"bytes":40000}`)
 			doc := body(40000)
 			for off := 0; off < len(doc); off += ChunkBytes {
 				s.HandleBinary(doc[off:min(off+ChunkBytes, len(doc))])
@@ -339,7 +340,7 @@ func TestPutSinkFailure(t *testing.T) {
 		b.sink = func() *fakeSink { return &fakeSink{closeErr: errors.New("sync failed")} }
 		s, fc := newSession(t, b, Options{})
 		authenticate(t, s, fc)
-		s.HandleText(`{"t":"put","tx":"t","path":"notes","id":"n1","type":"json","ifEtag":null,"bytes":3}`)
+		s.HandleText(`{"t":"put","tx":"tx-0123456789abcdef","path":"notes","id":"n1","type":"json","ifEtag":null,"bytes":3}`)
 		s.HandleBinary([]byte("abc"))
 		expectError(t, lastText(t, s, fc), CodeInternal)
 	})
@@ -351,7 +352,7 @@ func TestCloseDuringPutClosesTheSink(t *testing.T) {
 	b := newFakeBackend()
 	s, fc := newSession(t, b, Options{})
 	authenticate(t, s, fc)
-	s.HandleText(`{"t":"put","tx":"t","path":"notes","id":"n1","type":"json","ifEtag":null,"bytes":100}`)
+	s.HandleText(`{"t":"put","tx":"tx-0123456789abcdef","path":"notes","id":"n1","type":"json","ifEtag":null,"bytes":100}`)
 	s.HandleBinary(body(30))
 	s.Close()
 	data, _, closes := b.putCalls()[0].sink.state()
@@ -370,9 +371,9 @@ func TestDeleteCommitAbortResolve(t *testing.T) {
 	b.committed = Committed{Revision: ptr("r2"), Docs: []DocEtag{{Key: docKey, Etag: ptr("e2")}, {Key: Key{ID: "x", Type: "md"}}}}
 	s, fc := newSession(t, b, Options{})
 	authenticate(t, s, fc)
-	s.HandleText(`{"t":"delete","tx":"t","path":"","id":"x","type":"md","ifEtag":"e3"}`)
-	s.HandleText(`{"t":"commit","tx":"t"}`)
-	s.HandleText(`{"t":"abort","tx":"t"}`)
+	s.HandleText(`{"t":"delete","tx":"tx-0123456789abcdef","path":"","id":"x","type":"md","ifEtag":"e3"}`)
+	s.HandleText(`{"t":"commit","tx":"tx-0123456789abcdef"}`)
+	s.HandleText(`{"t":"abort","tx":"tx-0123456789abcdef"}`)
 	s.HandleText(`{"t":"resolve","server":"Lp7tOp0123ab","keep":"subordinate"}`)
 	expectMessages(t, barrier(t, s, fc)[1:],
 		obj{"t": "staged", "path": "", "id": "x", "type": "md", "received": float64(0)},
@@ -380,10 +381,10 @@ func TestDeleteCommitAbortResolve(t *testing.T) {
 			obj{"path": "notes", "id": "n1", "type": "json", "etag": "e2"},
 			obj{"path": "", "id": "x", "type": "md", "etag": nil},
 		}},
-		obj{"t": "aborted", "tx": "t"},
+		obj{"t": "aborted", "tx": "tx-0123456789abcdef"},
 		obj{"t": "resolved", "server": "Lp7tOp0123ab"},
 	)
-	if d := b.deletes[0]; d.key != (Key{ID: "x", Type: "md"}) || *d.ifEtag != "e3" || d.tx != "t" {
+	if d := b.deletes[0]; d.key != (Key{ID: "x", Type: "md"}) || *d.ifEtag != "e3" || d.tx != "tx-0123456789abcdef" {
 		t.Errorf("backend Delete got %+v", d)
 	}
 	if b.resolves[0] != [4]string{"todo", "d1", "Lp7tOp0123ab", KeepSubordinate} {
@@ -393,14 +394,14 @@ func TestDeleteCommitAbortResolve(t *testing.T) {
 	b.mu.Lock()
 	b.conflict = &Conflict{Revision: ptr("r3"), Docs: []DocEtag{{Key: docKey}}}
 	b.mu.Unlock()
-	s.HandleText(`{"t":"commit","tx":"t"}`)
+	s.HandleText(`{"t":"commit","tx":"tx-0123456789abcdef"}`)
 	if f := lastText(t, s, fc); f["t"] != "conflict" || f["revision"] != "r3" {
 		t.Errorf("sent %v, want a conflict", f)
 	}
 	b.mu.Lock()
 	b.commitErr = &Error{CodeIncomplete, "a body is missing"}
 	b.mu.Unlock()
-	s.HandleText(`{"t":"commit","tx":"t"}`)
+	s.HandleText(`{"t":"commit","tx":"tx-0123456789abcdef"}`)
 	expectError(t, lastText(t, s, fc), CodeIncomplete)
 	if fc.isClosed() {
 		t.Error("channel closed")
@@ -428,9 +429,9 @@ func TestResolveRefusals(t *testing.T) {
 
 func TestDocumentFramesBeforeHelloAndOnALinkSession(t *testing.T) {
 	frames := []string{
-		`{"t":"list"}`, getFrame, `{"t":"begin","tx":"t"}`,
-		`{"t":"delete","tx":"t","path":"","id":"x","type":"md","ifEtag":null}`,
-		`{"t":"commit","tx":"t"}`, `{"t":"abort","tx":"t"}`, `{"t":"resolve","server":"S","keep":"main"}`,
+		`{"t":"list"}`, getFrame, `{"t":"begin","tx":"tx-0123456789abcdef"}`,
+		`{"t":"delete","tx":"tx-0123456789abcdef","path":"","id":"x","type":"md","ifEtag":null}`,
+		`{"t":"commit","tx":"tx-0123456789abcdef"}`, `{"t":"abort","tx":"tx-0123456789abcdef"}`, `{"t":"resolve","server":"S","keep":"main"}`,
 	}
 	t.Run("before hello", func(t *testing.T) {
 		b := newFakeBackend()
@@ -502,4 +503,112 @@ func TestDivergedAndResolvedPushes(t *testing.T) {
 	s.PushResolved("x")
 	time.Sleep(10 * time.Millisecond)
 	expectNoLateSends(t, fc)
+}
+
+// Every frame that names a transaction is refused, and the session closed,
+// when the id is not 16 to 64 of [A-Za-z0-9_-]: the backend never sees it.
+func TestInvalidTransactionIDs(t *testing.T) {
+	for _, tx := range []string{"short", "", "tx-0123456789abc/ef", strings.Repeat("x", 65)} {
+		for _, frame := range []string{
+			`{"t":"begin","tx":%q}`,
+			`{"t":"put","tx":%q,"path":"","id":"a","type":"md","ifEtag":null,"bytes":2,"offset":0}`,
+			`{"t":"delete","tx":%q,"path":"","id":"a","type":"md","ifEtag":null}`,
+			`{"t":"commit","tx":%q}`,
+			`{"t":"abort","tx":%q}`,
+		} {
+			f := fmt.Sprintf(frame, tx)
+			t.Run(f, func(t *testing.T) {
+				b := newFakeBackend()
+				s, fc := newSession(t, b, Options{})
+				authenticate(t, s, fc)
+				s.HandleText(f)
+				expectClosedWithError(t, fc, CodeProtocol)
+				for _, c := range b.callLog() {
+					if c != "hello" && c != "hello returned" && c != "closed" {
+						t.Errorf("the backend was asked: %v", b.callLog())
+					}
+				}
+			})
+		}
+	}
+	if !ValidTx("tx-0123456789abcdef") || !ValidTx(strings.Repeat("A_-9", 16)) {
+		t.Error("ValidTx refuses a valid id")
+	}
+}
+
+// A cursor must name an entry of the listing at the revision it names.
+func TestForgedCursorIsProtocolError(t *testing.T) {
+	for _, cursor := range []string{"d:zzzzzz", "d:d/x9999.bin", "r:r/y0000.bin.x", "d:", "r:"} {
+		t.Run(cursor, func(t *testing.T) {
+			b := newFakeBackend()
+			b.listing = listingOf(ptr("r1"), 3, 2)
+			s, fc := newSession(t, b, Options{})
+			authenticate(t, s, fc)
+			s.HandleText(fmt.Sprintf(`{"t":"list","revision":"r1","cursor":%q}`, cursor))
+			expectClosedWithError(t, fc, CodeProtocol)
+		})
+	}
+	// The cursors the server gives work, the last document's included.
+	b := newFakeBackend()
+	b.listing = listingOf(ptr("r1"), 3, 2)
+	s, fc := newSession(t, b, Options{})
+	authenticate(t, s, fc)
+	s.HandleText(`{"t":"list","revision":"r1","cursor":"d:d/x0002.bin"}`)
+	if f := lastText(t, s, fc); len(f["docs"].([]any)) != 0 || len(f["removed"].([]any)) != 2 {
+		t.Errorf("after the last document: %v", f)
+	}
+	s.HandleText(`{"t":"list","revision":"r1","cursor":"r:r/y0000.bin"}`)
+	if f := lastText(t, s, fc); len(f["removed"].([]any)) != 1 || f["cursor"] != nil {
+		t.Errorf("after the first tombstone: %v", f)
+	}
+}
+
+// The session closes (a device removed, the queue overflowing) while the
+// backend's Put is deciding: the Sink it then returns is closed all the
+// same, so that what it took stays staged.
+func TestCloseDuringBackendPutClosesTheSink(t *testing.T) {
+	b := newFakeBackend()
+	s, fc := newSession(t, b, Options{})
+	authenticate(t, s, fc)
+	var made *fakeSink
+	b.sink = func() *fakeSink {
+		s.Close() // finishClose runs here, before the Sink exists
+		made = &fakeSink{}
+		return made
+	}
+	s.HandleText(`{"t":"put","tx":"tx-0123456789abcdef","path":"notes","id":"n1","type":"json","ifEtag":null,"bytes":100}`)
+	if !fc.isClosed() {
+		t.Fatal("the session did not close")
+	}
+	if _, _, closes := made.state(); closes == 0 {
+		t.Error("the Sink was never closed")
+	}
+}
+
+// A Sink's protocol error closes the session, as every protocol error does.
+func TestSinkProtocolErrorCloses(t *testing.T) {
+	b := newFakeBackend()
+	b.sink = func() *fakeSink {
+		return &fakeSink{failAt: 1, failErr: &Error{CodeProtocol, "the body runs past what is staged"}}
+	}
+	s, fc := newSession(t, b, Options{})
+	authenticate(t, s, fc)
+	s.HandleText(`{"t":"put","tx":"tx-0123456789abcdef","path":"notes","id":"n1","type":"json","ifEtag":null,"bytes":3}`)
+	s.HandleBinary([]byte("abc"))
+	expectClosedWithError(t, fc, CodeProtocol)
+}
+
+// The backend answers a commit itself: a changed it pushes after the answer
+// follows it, and nothing is answered twice.
+func TestCommitIsAnsweredByTheBackend(t *testing.T) {
+	b := newFakeBackend()
+	b.committed = Committed{Revision: ptr("r2"), Docs: []DocEtag{}}
+	s, fc := newSession(t, b, Options{})
+	authenticate(t, s, fc)
+	s.HandleText(`{"t":"commit","tx":"tx-0123456789abcdef"}`)
+	s.PushChanged(ptr("r3"))
+	expectMessages(t, barrier(t, s, fc)[1:],
+		obj{"t": "committed", "revision": "r2", "docs": []any{}},
+		obj{"t": "changed", "revision": "r3"},
+	)
 }

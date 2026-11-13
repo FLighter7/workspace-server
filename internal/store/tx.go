@@ -560,6 +560,24 @@ func (s *Store) Delete(app, device, tx string, k Key, ifEtag *string) error {
 	})
 }
 
+// AbortDevice discards every open transaction of device on app, the
+// device's removal: none of them can be committed any more, and their
+// staging would otherwise stay on disk until it expires. An app that has no
+// folder is left as it is.
+func (s *Store) AbortDevice(app, device string) error {
+	return s.do(app, func(a *appState) error {
+		var errs []error
+		for _, t := range a.txs {
+			if t.rec.Device == device {
+				if err := s.discard(a, t); err != nil {
+					errs = append(errs, err)
+				}
+			}
+		}
+		return errors.Join(errs...)
+	})
+}
+
 // Abort discards device's transaction tx.
 func (s *Store) Abort(app, device, tx string) error {
 	return s.do(app, func(a *appState) error {

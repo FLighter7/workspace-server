@@ -465,20 +465,26 @@ func (b *fakeBackend) Begin(app, device, tx string) ([]Staged, *Error) {
 	return b.began, b.beginErr
 }
 
+// Put makes the Sink outside the backend's lock: a test's maker may close
+// the session, which tells the backend.
 func (b *fakeBackend) Put(app, device, tx string, k Key, ifEtag *string, size, offset int64) (Sink, *Error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.calls = append(b.calls, "put")
 	c := putCall{app: app, device: device, tx: tx, key: k, ifEtag: ifEtag, size: size, offset: offset}
-	if b.putErr != nil {
-		b.puts = append(b.puts, c)
-		return nil, b.putErr
+	maker, err := b.sink, b.putErr
+	b.mu.Unlock()
+	if err == nil {
+		c.sink = &fakeSink{}
+		if maker != nil {
+			c.sink = maker()
+		}
 	}
-	c.sink = &fakeSink{}
-	if b.sink != nil {
-		c.sink = b.sink()
-	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.puts = append(b.puts, c)
+	if err != nil {
+		return nil, err
+	}
 	return c.sink, nil
 }
 
@@ -490,12 +496,22 @@ func (b *fakeBackend) Delete(app, device, tx string, k Key, ifEtag *string) *Err
 	return b.deleteErr
 }
 
-func (b *fakeBackend) Commit(from *Session, app, device, tx string) (Committed, *Conflict, *Error) {
+// Commit answers through the session, under the backend's lock, as the hub
+// does under the app's lock.
+func (b *fakeBackend) Commit(from *Session, app, device, tx string) *Error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.calls = append(b.calls, "commit")
 	b.commits = append(b.commits, [3]string{app, device, tx})
-	return b.committed, b.conflict, b.commitErr
+	switch {
+	case b.commitErr != nil:
+		return b.commitErr
+	case b.conflict != nil:
+		from.AnswerConflict(*b.conflict)
+	default:
+		from.AnswerCommitted(b.committed)
+	}
+	return nil
 }
 
 func (b *fakeBackend) Abort(app, device, tx string) *Error {

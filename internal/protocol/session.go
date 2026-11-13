@@ -160,6 +160,25 @@ func (f *textFrame) serverInfo() (*ServerInfo, error) {
 	return si, err
 }
 
+// txFrames are the frames that name a transaction, whose id the session
+// checks before the backend sees it.
+var txFrames = map[string]bool{"begin": true, "put": true, "delete": true, "commit": true, "abort": true}
+
+// ValidTx reports whether tx is a valid transaction id: 16 to 64 characters
+// of [A-Za-z0-9_-], chosen by the client (store.ValidTx, which the protocol
+// does not import).
+func ValidTx(tx string) bool {
+	if len(tx) < 16 || len(tx) > 64 {
+		return false
+	}
+	for i := 0; i < len(tx); i++ {
+		if c := tx[i]; !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
 // documentFrames are the frames of an app session's documents, which a link
 // session does not have.
 var documentFrames = map[string]bool{
@@ -216,6 +235,10 @@ func (s *Session) HandleText(msg string) {
 		s.fail(CodeProtocol, "a link session has no documents; say hello for an app")
 		return
 	}
+	if txFrames[f.T] && !ValidTx(f.Tx) {
+		s.fail(CodeProtocol, "a transaction id is 16 to 64 of [A-Za-z0-9_-]")
+		return
+	}
 
 	switch f.T {
 	case "head":
@@ -249,14 +272,9 @@ func (s *Session) HandleText(msg string) {
 		}
 		s.queueFrame(stagedFrame{"staged", k, 0})
 	case "commit":
-		c, conflict, e := s.b.Commit(s, app, device, f.Tx)
-		switch {
-		case e != nil:
+		// The backend answers itself (AnswerCommitted, AnswerConflict).
+		if e := s.b.Commit(s, app, device, f.Tx); e != nil {
 			s.answer(e)
-		case conflict != nil:
-			s.queueFrame(txResultFrame{"conflict", conflict.Revision, docEtags(conflict.Docs)})
-		default:
-			s.queueFrame(txResultFrame{"committed", c.Revision, docEtags(c.Docs)})
 		}
 	case "abort":
 		if e := s.b.Abort(app, device, f.Tx); e != nil {
@@ -375,19 +393,27 @@ const (
 // page returns the page of l that follows cursor (the first page when it is
 // nil): the documents first, then the tombstones, at most listPage entries,
 // and the cursor of the next page, empty after the last. ok is false for a
-// cursor the server never gave.
+// cursor the server never gave: one that does not name an entry of l, which
+// the revision the client names pins.
 func page(l Listing, cursor *string) (docs []DocInfo, removed []Removed, next string, ok bool) {
 	d, r := 0, 0
 	if cursor != nil {
 		c := *cursor
 		switch {
 		case strings.HasPrefix(c, cursorDoc):
-			after := c[len(cursorDoc):]
-			d = sort.Search(len(l.Docs), func(i int) bool { return l.Docs[i].Key.String() > after })
+			key := c[len(cursorDoc):]
+			i := sort.Search(len(l.Docs), func(i int) bool { return l.Docs[i].Key.String() >= key })
+			if i == len(l.Docs) || l.Docs[i].Key.String() != key {
+				return nil, nil, "", false
+			}
+			d = i + 1
 		case strings.HasPrefix(c, cursorRemoved):
-			after := c[len(cursorRemoved):]
-			d = len(l.Docs)
-			r = sort.Search(len(l.Removed), func(i int) bool { return l.Removed[i].Key.String() > after })
+			key := c[len(cursorRemoved):]
+			i := sort.Search(len(l.Removed), func(i int) bool { return l.Removed[i].Key.String() >= key })
+			if i == len(l.Removed) || l.Removed[i].Key.String() != key {
+				return nil, nil, "", false
+			}
+			d, r = len(l.Docs), i+1
 		default:
 			return nil, nil, "", false
 		}
@@ -486,9 +512,18 @@ func (s *Session) startPut(app, device string, f *textFrame) {
 	s.put = putState{active: true, key: k, remaining: size - offset, received: offset, refusal: e}
 	if e == nil {
 		s.put.sink = sink
+		// A session that closed while the backend was deciding has run
+		// finishClose already, which closes only the Sink it finds: this one
+		// is closed here, so that what it took stays staged.
 		s.mu.Lock()
-		s.sink = sink
+		closed := s.closed
+		if !closed {
+			s.sink = sink
+		}
 		s.mu.Unlock()
+		if closed {
+			_ = sink.Close()
+		}
 	}
 	if s.put.remaining == 0 {
 		s.finishPut()
@@ -535,7 +570,7 @@ func (s *Session) finishPut() {
 	p := s.put
 	s.put = putState{}
 	if p.refusal != nil {
-		s.reply(p.refusal)
+		s.answer(p.refusal)
 		return
 	}
 	s.queueFrame(stagedFrame{"staged", p.key, p.received})
@@ -674,6 +709,20 @@ func (s *Session) PushChanged(revision *string) {
 	default:
 		s.queueLocked(outgoing{text: encode(revisionFrame{"changed", revision})})
 	}
+}
+
+// AnswerCommitted queues committed, the answer to the session's commit. The
+// backend calls it from inside its Commit, under the lock that orders its
+// pushes of changed, so that no changed of an older revision follows it. It
+// never blocks; on a closed session it does nothing.
+func (s *Session) AnswerCommitted(c Committed) {
+	s.queueFrame(txResultFrame{"committed", c.Revision, docEtags(c.Docs)})
+}
+
+// AnswerConflict queues conflict, the answer to the session's commit, as
+// AnswerCommitted does.
+func (s *Session) AnswerConflict(c Conflict) {
+	s.queueFrame(txResultFrame{"conflict", c.Revision, docEtags(c.Docs)})
 }
 
 // PushDiverged tells the client the servers whose copy of the app diverged

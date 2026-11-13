@@ -12,13 +12,18 @@ import (
 )
 
 // The documents of an app session, answered from the store (see
-// docs/architecture.md, "Storage"). Reads need no hub lock: the store orders
-// them itself. A commit, the link's included, and a reconcile that changed
-// the set run under the app's lock, so that every session's changed frames
-// follow the order of the revisions, and the last one names the newest.
+// docs/architecture.md, "Storage"). Everything that can move the set's
+// revision runs under the app's lock: a commit, the link's included, a
+// reconcile, and a get, whose open reconciles a file changed by hand. Each
+// compares the revision before and after (watch), and tells the app's
+// sessions and Deps.Changed when it moved, so that every session's changed
+// frames follow the order of the revisions and the last one names the
+// newest. Begin, put, delete and abort run under it too, so that none
+// recreates an app's staging while RemoveApp deletes the app; a body is
+// written outside it. Head and list only read the index.
 
 // LinkDevice is the device the link's transactions are staged under. A
-// device id is 16 characters of [A-Za-z0-9], so it never is one.
+// device id is made of [A-Za-z0-9_-], so it never is one.
 const LinkDevice = "~link"
 
 // Head returns the revision of app's set, nil for an empty set.
@@ -60,19 +65,25 @@ func (h *Hub) List(app string) (protocol.Listing, *protocol.Error) {
 // reads the file without any lock and closes it; a commit meanwhile does not
 // change what it reads (store.Open).
 func (h *Hub) Get(app string, k protocol.Key, etag *string) (protocol.Doc, *protocol.Stale, *protocol.Error) {
-	if e := h.serves(app); e != nil {
-		return protocol.Doc{}, nil, e
+	_, unlock, ok := h.lockListed(app)
+	if !ok {
+		return protocol.Doc{}, nil, errNoLongerServed(app)
 	}
 	var (
 		file *os.File
 		info store.DocInfo
 		err  error
 	)
+	watch := h.watch(app)
 	if etag != nil {
 		file, info, err = h.d.Store.Open(app, storeKey(k), *etag)
 	} else {
 		file, info, err = h.d.Store.OpenLatest(app, storeKey(k))
 	}
+	// The open may have reconciled a file changed by hand.
+	after := watch(nil)
+	unlock()
+	after()
 	if err == nil {
 		return protocol.Doc{DocInfo: protocol.DocInfo{Key: k, Etag: info.Etag, Bytes: info.Bytes}, Body: file}, nil, nil
 	}
@@ -88,10 +99,14 @@ func (h *Hub) Get(app string, k protocol.Key, etag *string) (protocol.Doc, *prot
 
 // Begin opens device's transaction tx on app, or returns to it.
 func (h *Hub) Begin(app, device, tx string) ([]protocol.Staged, *protocol.Error) {
-	if e := h.mayWrite(app, device); e != nil {
+	var staged []store.Staged
+	e, err := h.writing(app, device, func() (err error) {
+		staged, err = h.d.Store.Begin(app, device, tx)
+		return err
+	})
+	if e != nil {
 		return nil, e
 	}
-	staged, err := h.d.Store.Begin(app, device, tx)
 	if err != nil {
 		return nil, h.storeError(err)
 	}
@@ -106,10 +121,14 @@ func (h *Hub) Begin(app, device, tx string) ([]protocol.Staged, *protocol.Error)
 // into the Sink returned, which writes it straight into the transaction's
 // staging folder.
 func (h *Hub) Put(app, device, tx string, k protocol.Key, ifEtag *string, size, offset int64) (protocol.Sink, *protocol.Error) {
-	if e := h.mayWrite(app, device); e != nil {
+	var s *store.Sink
+	e, err := h.writing(app, device, func() (err error) {
+		s, err = h.d.Store.Put(app, device, tx, storeKey(k), ifEtag, size, offset)
+		return err
+	})
+	if e != nil {
 		return nil, e
 	}
-	s, err := h.d.Store.Put(app, device, tx, storeKey(k), ifEtag, size, offset)
 	if err != nil {
 		return nil, h.storeError(err)
 	}
@@ -139,10 +158,13 @@ func (k sink) Close() error {
 
 // Delete stages the removal of k in device's transaction tx.
 func (h *Hub) Delete(app, device, tx string, k protocol.Key, ifEtag *string) *protocol.Error {
-	if e := h.mayWrite(app, device); e != nil {
+	e, err := h.writing(app, device, func() error {
+		return h.d.Store.Delete(app, device, tx, storeKey(k), ifEtag)
+	})
+	if e != nil {
 		return e
 	}
-	if err := h.d.Store.Delete(app, device, tx, storeKey(k), ifEtag); err != nil {
+	if err != nil {
 		return h.storeError(err)
 	}
 	return nil
@@ -151,74 +173,93 @@ func (h *Hub) Delete(app, device, tx string, k protocol.Key, ifEtag *string) *pr
 // Abort discards device's transaction tx. A transaction that is gone
 // already is aborted as far as the device is concerned.
 func (h *Hub) Abort(app, device, tx string) *protocol.Error {
-	if e := h.serves(app); e != nil {
-		return e
+	_, unlock, ok := h.lockListed(app)
+	if !ok {
+		return errNoLongerServed(app)
 	}
-	if err := h.d.Store.Abort(app, device, tx); err != nil && !errors.Is(err, store.ErrNoTransaction) {
+	err := h.d.Store.Abort(app, device, tx)
+	unlock()
+	if err != nil && !errors.Is(err, store.ErrNoTransaction) {
 		return h.storeError(err)
 	}
 	return nil
 }
 
-// Commit applies device's transaction tx and tells every other session of
-// the app the new revision, and Deps.Changed. A device removed meanwhile
-// commits nothing. A failure that is none of the store's own refusals is
-// internal, and may have come after the store's commit point, with the
-// commit applied in part (docs/architecture.md, "Storage"): the store has
-// ended the transaction there, so a commit of it again is noTransaction,
-// and every session of the app, the committing one included, is told the
-// revision if it moved. The client lists again; a begin of the same id
-// tells it whether the transaction is still open (a failure before the
-// commit point), with what it staged.
-func (h *Hub) Commit(from *protocol.Session, app, device, tx string) (protocol.Committed, *protocol.Conflict, *protocol.Error) {
+// Commit applies device's transaction tx, answers the session (committed,
+// or conflict, which leaves the transaction open) and tells every other
+// session of the app the new revision, and Deps.Changed. The answer is
+// queued under the app's lock, so no changed of a later commit can reach
+// the session before it. A device removed meanwhile commits nothing. The
+// commit's own reconcile may take in a file changed by hand: the revision
+// is compared before and after whatever the outcome, and the sessions are
+// told when it moved (after a refusal or a failure, the committing session
+// too).
+//
+// A failure that is none of the store's own refusals is internal, and may
+// have come after the store's commit point, with the commit applied in part
+// (docs/architecture.md, "Storage"): the store has ended the transaction
+// there, so a commit of it again is noTransaction. The client lists again; a
+// begin of the same id tells it whether the transaction is still open (a
+// failure before the commit point), with what it staged.
+func (h *Hub) Commit(from *protocol.Session, app, device, tx string) *protocol.Error {
 	_, unlock, ok := h.lockListed(app)
 	if !ok {
-		return protocol.Committed{}, nil, errNoLongerServed(app)
+		return errNoLongerServed(app)
 	}
-	var changed *string
-	moved := false
-	defer func() { // deferred first, so it runs after the locks are released
-		if moved {
-			h.changed(app, changed)
-		}
-	}()
+	after := func() {}
+	defer func() { after() }() // deferred first, so it runs after the locks are released
 	defer unlock()
 	// Under the app's lock, which RemoveDevice takes too, and the servers
 	// lock, which the removal of a server-kind device takes.
 	h.servers.RLock()
 	defer h.servers.RUnlock()
 	if !h.admitted(device, app) {
-		return protocol.Committed{}, nil, errRemoved()
+		return errRemoved()
 	}
-	before, _ := h.d.Store.Head(app)
+	watch := h.watch(app)
 	c, err := h.d.Store.Commit(app, device, tx)
 	var conflict *store.ConflictError
 	switch {
 	case err == nil:
-		if moved = !sameRevision(before, c.Revision); moved {
-			changed = c.Revision
-			h.pushLocked(app, c.Revision, from)
-		}
-		docs := make([]protocol.DocEtag, 0, len(c.Docs))
-		for _, d := range c.Docs {
-			docs = append(docs, protocol.DocEtag{Key: wireKey(d.Key), Etag: d.Etag})
-		}
-		return protocol.Committed{Revision: c.Revision, Docs: docs}, nil, nil
+		from.AnswerCommitted(protocol.Committed{Revision: c.Revision, Docs: wireDocs(c.Docs)})
+		after = watch(from) // the committed frame names the revision
+		return nil
 	case errors.As(err, &conflict):
-		docs := make([]protocol.DocEtag, 0, len(conflict.Docs))
-		for _, d := range conflict.Docs {
-			docs = append(docs, protocol.DocEtag{Key: wireKey(d.Key), Etag: d.Etag})
-		}
-		return protocol.Committed{}, &protocol.Conflict{Revision: conflict.Revision, Docs: docs}, nil
+		from.AnswerConflict(protocol.Conflict{Revision: conflict.Revision, Docs: wireDocs(conflict.Docs)})
+		after = watch(from) // so does the conflict frame
+		return nil
 	case refusal(err):
-		return protocol.Committed{}, nil, h.storeError(err)
+		after = watch(nil)
+		return h.storeError(err)
 	}
-	e := h.errInternal(err)
-	if after, herr := h.d.Store.Head(app); herr == nil && !sameRevision(before, after) {
-		moved, changed = true, after
-		h.pushLocked(app, after, nil)
+	after = watch(nil)
+	return h.errInternal(err)
+}
+
+// watch reads app's revision, and returns the function that reads it again
+// and, if it moved, tells every session of the app but except, and returns
+// the function that tells Deps.Changed. The caller holds the app's lock for
+// both reads and the pushes, and calls the last function once it has
+// released it. A revision that cannot be read (a journal waiting) is not
+// compared.
+func (h *Hub) watch(app string) func(except *protocol.Session) func() {
+	before, berr := h.d.Store.Head(app)
+	return func(except *protocol.Session) func() {
+		now, err := h.d.Store.Head(app)
+		if berr != nil || err != nil || sameRevision(before, now) {
+			return func() {}
+		}
+		h.pushLocked(app, now, except)
+		return func() { h.changed(app, now) }
 	}
-	return protocol.Committed{}, nil, e
+}
+
+func wireDocs(list []store.DocEtag) []protocol.DocEtag {
+	docs := make([]protocol.DocEtag, 0, len(list))
+	for _, d := range list {
+		docs = append(docs, protocol.DocEtag{Key: wireKey(d.Key), Etag: d.Etag})
+	}
+	return docs
 }
 
 // Resolve settles a divergence of the app's servers. Stage 3 of the files
@@ -284,10 +325,11 @@ type LinkTx struct {
 // is 16 to 64 of [A-Za-z0-9_-], chosen by the link. An app that is not
 // listed is an error wrapping apps.ErrNotFound.
 func (h *Hub) BeginLink(app, tx string) (*LinkTx, []store.Staged, error) {
-	if _, ok := h.d.Apps.Get(app); !ok {
-		return nil, nil, fmt.Errorf("%w: %q", apps.ErrNotFound, app)
-	}
-	staged, err := h.d.Store.Begin(app, LinkDevice, tx)
+	var staged []store.Staged
+	err := h.locked(app, func() (err error) {
+		staged, err = h.d.Store.Begin(app, LinkDevice, tx)
+		return err
+	})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -303,18 +345,23 @@ func (t *LinkTx) Tx() string  { return t.tx }
 // it. ifEtag is the etag k must have here at the commit, nil if it must not
 // exist.
 func (t *LinkTx) Put(k store.Key, ifEtag *string, size, offset int64) (*store.Sink, error) {
-	return t.h.d.Store.Put(t.app, LinkDevice, t.tx, k, ifEtag, size, offset)
+	var s *store.Sink
+	err := t.h.locked(t.app, func() (err error) {
+		s, err = t.h.d.Store.Put(t.app, LinkDevice, t.tx, k, ifEtag, size, offset)
+		return err
+	})
+	return s, err
 }
 
 // Delete stages the removal of k, which must have ifEtag here at the
 // commit.
 func (t *LinkTx) Delete(k store.Key, ifEtag *string) error {
-	return t.h.d.Store.Delete(t.app, LinkDevice, t.tx, k, ifEtag)
+	return t.h.locked(t.app, func() error { return t.h.d.Store.Delete(t.app, LinkDevice, t.tx, k, ifEtag) })
 }
 
 // Abort discards the transaction.
 func (t *LinkTx) Abort() error {
-	return t.h.d.Store.Abort(t.app, LinkDevice, t.tx)
+	return t.h.locked(t.app, func() error { return t.h.d.Store.Abort(t.app, LinkDevice, t.tx) })
 }
 
 // Commit applies the transaction, all of it or nothing, and tells every
@@ -332,25 +379,12 @@ func (t *LinkTx) Commit() (store.Committed, error) {
 	if !ok {
 		return store.Committed{}, fmt.Errorf("%w: %q", apps.ErrNotFound, t.app)
 	}
-	before, _ := h.d.Store.Head(t.app)
+	watch := h.watch(t.app)
 	c, err := h.d.Store.Commit(t.app, LinkDevice, t.tx)
-	after := c.Revision
-	if err != nil {
-		after = before
-		if !refusal(err) && !errors.As(err, new(*store.ConflictError)) {
-			if rev, herr := h.d.Store.Head(t.app); herr == nil {
-				after = rev
-			}
-		}
-	}
-	moved := !sameRevision(before, after)
-	if moved {
-		h.pushLocked(t.app, after, nil)
-	}
+	// Whatever the outcome: its reconcile may have taken in a hand edit.
+	after := watch(nil)
 	unlock()
-	if moved {
-		h.changed(t.app, after)
-	}
+	after()
 	return c, err
 }
 
@@ -369,16 +403,34 @@ func (h *Hub) serves(app string) *protocol.Error {
 	return nil
 }
 
-// mayWrite refuses an app that is not listed and a device removed
-// meanwhile. The commit checks again, under the app's lock.
-func (h *Hub) mayWrite(app, device string) *protocol.Error {
-	if e := h.serves(app); e != nil {
-		return e
+// writing runs op, a store call on device's transaction, under the app's
+// lock and the servers lock: an app or a device removed meanwhile (both
+// removals take these locks) is refused, and op never recreates the staging
+// of an app that RemoveApp deleted. The protocol error is a refusal; err is
+// op's.
+func (h *Hub) writing(app, device string, op func() error) (*protocol.Error, error) {
+	_, unlock, ok := h.lockListed(app)
+	if !ok {
+		return errNoLongerServed(app), nil
 	}
+	defer unlock()
+	h.servers.RLock()
+	defer h.servers.RUnlock()
 	if !h.admitted(device, app) {
-		return errRemoved()
+		return errRemoved(), nil
 	}
-	return nil
+	return nil, op()
+}
+
+// locked runs op under the app's lock, for the link's transactions. An app
+// that is not listed is an error wrapping apps.ErrNotFound.
+func (h *Hub) locked(app string, op func() error) error {
+	_, unlock, ok := h.lockListed(app)
+	if !ok {
+		return fmt.Errorf("%w: %q", apps.ErrNotFound, app)
+	}
+	defer unlock()
+	return op()
 }
 
 // storeError is the answer to an error of the store. The store's own

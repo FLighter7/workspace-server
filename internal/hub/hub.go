@@ -299,12 +299,14 @@ func (h *Hub) pairServer(s *protocol.Session, ip, secret, name string) (string, 
 func (h *Hub) welcome(s *protocol.Session, app string) (protocol.Welcome, *protocol.Error) {
 	var rev *string
 	if app != "" {
-		if err := h.Reconcile(app); err != nil {
+		// A reconcile that fails (the folder cannot be read) does not keep
+		// the device out: it is logged, and the welcome names the revision
+		// the index holds.
+		if err := h.Reconcile(app); errors.Is(err, apps.ErrNotFound) {
 			h.Closed(s)
-			if errors.Is(err, apps.ErrNotFound) {
-				return protocol.Welcome{}, errUnknownApp(app)
-			}
-			return protocol.Welcome{}, h.errInternal(err)
+			return protocol.Welcome{}, errUnknownApp(app)
+		} else if err != nil {
+			h.d.Logf("app %q: reconcile its files at a hello: %v", app, err)
 		}
 		var e *protocol.Error
 		if rev, e = h.Head(app); e != nil {
@@ -759,6 +761,13 @@ func (h *Hub) RemoveDevice(id string) bool {
 		h.servers.Unlock()
 		closeAll(targets)
 		if removed {
+			// It may have a transaction open on any app.
+			for _, a := range h.d.Apps.List() {
+				l := h.appLock(a.ID)
+				l.Lock()
+				h.abortDevice(a.ID, id)
+				l.Unlock()
+			}
 			h.DevicesChanged()
 		}
 		return removed
@@ -766,6 +775,9 @@ func (h *Hub) RemoveDevice(id string) bool {
 	l := h.appLock(d.App)
 	l.Lock()
 	removed := h.d.Devices.Remove(id)
+	if removed {
+		h.abortDevice(d.App, id)
+	}
 	targets := h.registered(func(m member) bool { return m.device == id })
 	l.Unlock()
 	closeAll(targets)
@@ -773,6 +785,16 @@ func (h *Hub) RemoveDevice(id string) bool {
 		h.DevicesChanged()
 	}
 	return removed
+}
+
+// abortDevice discards the open transactions of a removed device on app,
+// which it can never commit; their staging would otherwise stay on disk
+// until it expires. A failure is logged: sweep removes what is left. The
+// caller holds the app's lock.
+func (h *Hub) abortDevice(app, device string) {
+	if err := h.d.Store.AbortDevice(app, device); err != nil {
+		h.d.Logf("discard the transactions of the removed device %s on %s: %v", device, app, err)
+	}
 }
 
 // RemoveApp deletes a listed app: its devices, its documents and its entry in

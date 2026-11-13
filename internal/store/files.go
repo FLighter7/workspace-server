@@ -104,25 +104,41 @@ func removeEmptyDirs(dir, root string) {
 // reports whether the revision changed. A file whose path is not a valid key,
 // and anything that is not a regular file, is left out and left alone, and so
 // is the .wss folder. A file that vanishes during the walk counts as removed.
+//
+// A file or a folder that cannot be read (another program holds it without
+// sharing, or its permissions refuse the server) is logged and skipped: what
+// the index holds of it stays as it was, and a file the index does not hold
+// yet waits for a later reconcile. One such file never stops the app.
 func (s *Store) reconcile(app string, a *appState) (bool, error) {
 	root := s.dir(app)
 	seen := make(map[string]bool, len(a.idx.Docs))
+	var unread []string // folders that could not be read, as key prefixes
 	dirty := false
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return rerr
+		}
+		rel = filepath.ToSlash(rel)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil // the folder or an entry vanished meanwhile
 			}
-			return err
+			s.logf("app %q: reconcile: cannot read %s, left as the index holds it: %v", app, rel, err)
+			switch {
+			case path == root:
+				unread = append(unread, "")
+			case d == nil || d.IsDir():
+				unread = append(unread, rel+"/")
+			}
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if path == root {
 			return nil
 		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
 			// No key can lie below a folder that is not a valid one,
 			// .wss included, nor below anything but a plain folder.
@@ -139,14 +155,21 @@ func (s *Store) reconcile(app string, a *appState) (bool, error) {
 			return nil
 		}
 		ks := k.String()
+		e, have := a.idx.Docs[ks]
+		// unreadable keeps what the index holds of a file that cannot be
+		// read, and logs it.
+		unreadable := func(err error) error {
+			s.logf("app %q: reconcile: cannot read %s, left as the index holds it: %v", app, ks, err)
+			seen[ks] = have
+			return nil
+		}
 		fi, err := d.Info()
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		if err != nil {
-			return err
+			return unreadable(err)
 		}
-		e, have := a.idx.Docs[ks]
 		if have && !e.Racy && e.Bytes == fi.Size() && e.Mtime == fi.ModTime().UnixNano() {
 			seen[ks] = true
 			return nil
@@ -156,7 +179,7 @@ func (s *Store) reconcile(app string, a *appState) (bool, error) {
 			return nil
 		}
 		if err != nil {
-			return err
+			return unreadable(err)
 		}
 		seen[ks] = true
 		// A file hashed within racyWindow of its mtime may change again
@@ -174,11 +197,18 @@ func (s *Store) reconcile(app string, a *appState) (bool, error) {
 		return false, err
 	}
 	now := s.now()
+next:
 	for ks := range a.idx.Docs {
-		if !seen[ks] {
-			a.idx.remove(ks, now)
-			dirty = true
+		if seen[ks] {
+			continue
 		}
+		for _, prefix := range unread {
+			if strings.HasPrefix(ks, prefix) {
+				continue next // in a folder that could not be read
+			}
+		}
+		a.idx.remove(ks, now)
+		dirty = true
 	}
 	if !dirty {
 		return false, nil

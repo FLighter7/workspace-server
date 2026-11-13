@@ -141,7 +141,7 @@ An app holds a **set** of documents, kept by the server as plain files in the ap
 - **`etag`** is the lowercase hex SHA-256 of a document's bytes, so two identical writes agree, on every server.
 - **`revision`** names the whole set: the lowercase hex SHA-256 of the lines `<canonical key>\0<etag>\n`, sorted by key byte for byte, or `null` for an empty set. Servers holding the same files have the same revision, so a client compares sets by it alone.
 - **Tombstones:** the set lists the documents deleted from it, with when (`at`, RFC 3339 UTC), the newest 1,000. A document created again drops its tombstone.
-- **Files changed by hand:** the server checks the app's folder at every `hello` for the app, and takes in what changed there: a changed file gets a new etag, a new file with a valid name becomes a document, a vanished one a tombstone. The set then has a new revision, and every session of the app gets `changed`. A file whose name is not a key is not a document, and is never shown or touched.
+- **Files changed by hand:** the server checks the app's folder at every `hello` for the app, and takes in what changed there: a changed file gets a new etag, a new file with a valid name becomes a document, a vanished one a tombstone. A `get` or a `commit` that finds a file changed since the server last saw it takes it in the same way. The set then has a new revision, and every session of the app gets `changed`. A file whose name is not a key is not a document, and is never shown or touched. A file the server cannot read (another program holds it, or its permissions refuse the server) is left as the set last held it, and taken in once it can be read; it keeps no device out.
 
 ## Messages
 
@@ -211,6 +211,7 @@ Every write is a transaction: `begin`, then `put`s and `delete`s, then `commit`,
 
 - **`begin {tx}`** opens the transaction `tx`, or returns to it. The answer `began {tx, staged}` lists what it holds, for resuming: `staged: [{path, id, type, delete?, ifEtag, bytes, received}]` (`delete: true` for a removal), `[]` for a new transaction.
   - A device has at most one open transaction per app: `begin` with another id discards the one it had.
+  - An id that another device's open transaction holds is `noTransaction`: choose another (ids are random enough never to meet).
   - A transaction lives 24 hours after its last activity, and survives a restart of the server.
 - **`put {tx, path, id, type, ifEtag, bytes, offset}`** and the body stage a document of `bytes` bytes. The answer, once the whole body has arrived, is `staged {path, id, type, received}`: how many bytes of it the server holds.
   - **`ifEtag`** is the etag the document must have at the commit; `null` (or absent) means it must not exist. It is checked at the commit, not at the `put`.
@@ -236,10 +237,10 @@ Every write is a transaction: `begin`, then `put`s and `delete`s, then `commit`,
 
 - **`changed {revision}`** tells a session that the app's set has a new revision. It goes:
   - to every other session of the app after a `commit` (the committing session has the revision in `committed`);
-  - to every session of the app when the server changes the set itself: a subordinate writing what it took from its main, files changed by hand taken in at a `hello`, or a `commit` that failed after its commit point.
+  - to every session of the app when the server changes the set itself: a subordinate writing what it took from its main, files changed by hand taken in at a `hello`, a `get` or a `commit` (the committing session included when its answer is not `committed` or `conflict`, which name the revision), or a `commit` that failed after its commit point.
 
   It is never sent before that session's `welcome`: one that comes earlier is held, the newest kept, and sent right after the `welcome` unless the `welcome` names the same revision.
-  - Pushes may come out of order: `welcome(r3)` can be followed by `changed(r2)` and then `changed(r3)`. The last frame always carries the newest revision. Act on the latest revision, not on each push in turn; comparing it with the revision last synced tells whether anything is left to do.
+  - Pushes may come out of order: `welcome(r3)` can be followed by `changed(r2)` and then `changed(r3)`. The last frame always carries the newest revision; a `committed` or `conflict` counts among them, and is never followed by a `changed` of an older revision. Act on the latest revision, not on each push in turn; comparing it with the revision last synced tells whether anything is left to do.
 - **`diverged`** and **`resolved`** are pushes too (see "Divergence").
 
 ### Divergence
