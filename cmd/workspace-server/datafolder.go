@@ -89,10 +89,23 @@ func wssDir(dataDir string) string {
 // isWSSName reports whether name is WSS-Data, ignoring case on Windows and
 // macOS, whose file systems do.
 func isWSSName(name string) bool {
-	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+	if foldCase {
 		return strings.EqualFold(name, wssDirName)
 	}
 	return name == wssDirName
+}
+
+// foldCase is true where the file systems ignore case in names: Windows and
+// macOS. A variable so that a test can check the macOS path elsewhere.
+var foldCase = runtime.GOOS == "windows" || runtime.GOOS == "darwin"
+
+// foldPath returns path in lower case where foldCase is set, for comparing
+// paths; filepath.Rel ignores case on Windows only.
+func foldPath(path string) string {
+	if foldCase {
+		return strings.ToLower(path)
+	}
+	return path
 }
 
 // systemFiles are the files Windows and macOS leave in a folder someone
@@ -150,11 +163,11 @@ func ensureWSS(wss string) error {
 	return fsutil.WriteFileAtomic(path, []byte(readmeText), 0o644)
 }
 
-// removeWSSIfEmpty deletes the WSS-Data folder wss and its README.txt when
-// nothing else is left in it. A WSS-Data that is a link (a symbolic link, or
-// a junction on Windows) loses only its README.txt: the link is the user's,
-// and a restart would make a local folder in its place. A missing folder is
-// nothing to do.
+// removeWSSIfEmpty deletes the WSS-Data folder wss, with its README.txt and
+// the systemFiles, when nothing else is left in it. A WSS-Data that is a
+// link (a symbolic link, or a junction on Windows) loses only its
+// README.txt: the link is the user's, and a restart would make a local
+// folder in its place. A missing folder is nothing to do.
 func removeWSSIfEmpty(wss string) error {
 	entries, err := os.ReadDir(wss)
 	if errors.Is(err, os.ErrNotExist) {
@@ -164,7 +177,7 @@ func removeWSSIfEmpty(wss string) error {
 		return err
 	}
 	for _, e := range entries {
-		if e.Name() != readmeFile {
+		if e.Name() != readmeFile && !isSystemFile(e.Name()) {
 			return nil
 		}
 	}
@@ -173,6 +186,13 @@ func removeWSSIfEmpty(wss string) error {
 	}
 	if isLink(wss) {
 		return nil
+	}
+	for _, e := range entries {
+		if isSystemFile(e.Name()) {
+			if err := os.Remove(filepath.Join(wss, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
 	}
 	return os.Remove(wss)
 }
@@ -272,16 +292,17 @@ func checkDataDir(current, target string) (dataCheck, error) {
 	return c, nil
 }
 
-// within reports whether path is dir or inside it.
+// within reports whether path is dir or inside it, ignoring case where
+// foldCase is set.
 func within(dir, path string) bool {
-	rel, err := filepath.Rel(dir, path)
+	rel, err := filepath.Rel(foldPath(dir), foldPath(path))
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // samePath reports whether a and b are one path, ignoring case where
 // filepath.Rel does (Windows).
 func samePath(a, b string) bool {
-	rel, err := filepath.Rel(a, b)
+	rel, err := filepath.Rel(foldPath(a), foldPath(b))
 	return err == nil && rel == "."
 }
 

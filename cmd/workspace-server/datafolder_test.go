@@ -737,3 +737,103 @@ func TestRemoveAppsKeepsALinkedWSSData(t *testing.T) {
 		t.Errorf("the linked folder holds %v (%v), want nothing", entries, err)
 	}
 }
+
+// A move whose config.json cannot be saved takes back only what it added:
+// a WSS-Data the user made in the target, empty, stays.
+func TestMoveDataDirSaveFailureKeepsTheUsersWSSData(t *testing.T) {
+	logger := log.New(io.Discard, "", 0)
+	for _, made := range []bool{true, false} {
+		serverDir := t.TempDir()
+		putData(t, serverDir, "todo", `{"a":1}`, 0)
+		// config.json a folder: it can be neither read nor saved.
+		if err := os.Mkdir(filepath.Join(serverDir, configFile), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mine := t.TempDir()
+		if made {
+			if err := os.MkdirAll(filepath.Join(mine, "WSS-Data"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		c, err := checkDataDir(serverDir, mine)
+		if err != nil || c.Verdict != verdictMove {
+			t.Fatalf("checkDataDir = %s %q, %v; want move", c.Verdict, c.Message, err)
+		}
+		if _, err := moveDataDir(serverDir, serverDir, action{kind: actMoveData, dataDir: mine, verdict: verdictMove}, logger); err == nil {
+			t.Fatal("moveDataDir = nil, want the configuration's error")
+		}
+		if made {
+			entries, err := os.ReadDir(filepath.Join(mine, "WSS-Data"))
+			if err != nil || len(entries) != 0 {
+				t.Errorf("the user's WSS-Data: %v, %v; want it there and empty", entries, err)
+			}
+		} else if entries, _ := os.ReadDir(mine); len(entries) != 0 {
+			t.Errorf("the target holds %v after a failed move", entries)
+		}
+		if b, _ := os.ReadFile(filepath.Join(serverDir, "WSS-Data", "apps", "todo", "data.json")); string(b) != `{"a":1}` {
+			t.Errorf("the data: %q", b)
+		}
+	}
+}
+
+// The systems' own files do not keep README.txt and WSS-Data when the data
+// goes; anything else keeps all of them.
+func TestRemoveDataTakesTheSystemsFilesAlong(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	if err := ensureDataDir(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	putData(t, dataDir, "todo", `{"a":1}`, 0)
+	for _, name := range []string{".DS_Store", "desktop.ini", "Thumbs.db"} {
+		writeFile(t, filepath.Join(dataDir, "WSS-Data", name), "x")
+	}
+	if err := removeData(dataDir); err != nil {
+		t.Fatalf("removeData = %v", err)
+	}
+	if _, err := os.Stat(dataDir); !errors.Is(err, os.ErrNotExist) {
+		entries, _ := os.ReadDir(filepath.Join(dataDir, "WSS-Data"))
+		t.Errorf("the data folder stays (%v), WSS-Data holding %v", err, entries)
+	}
+
+	if err := ensureDataDir(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dataDir, "WSS-Data", "desktop.ini"), "x")
+	writeFile(t, filepath.Join(dataDir, "WSS-Data", "notes.txt"), "the user's")
+	if err := removeData(dataDir); err != nil {
+		t.Fatalf("removeData = %v", err)
+	}
+	for _, keep := range []string{"README.txt", "desktop.ini", "notes.txt"} {
+		if _, err := os.Stat(filepath.Join(dataDir, "WSS-Data", keep)); err != nil {
+			t.Errorf("%s went: %v", keep, err)
+		}
+	}
+}
+
+// Where the file system ignores case (Windows, and macOS, whose path is
+// forced here), a target inside the current WSS-Data named in another case
+// is refused as overlapping.
+func TestOverlapIgnoresCaseWhereTheSystemDoes(t *testing.T) {
+	if want := runtime.GOOS == "windows" || runtime.GOOS == "darwin"; foldCase != want {
+		t.Errorf("foldCase = %v on %s, want %v", foldCase, runtime.GOOS, want)
+	}
+	saved := foldCase
+	foldCase = true
+	t.Cleanup(func() { foldCase = saved })
+	root := string(filepath.Separator) + "x"
+	if !within(filepath.Join(root, "WSS-Data"), filepath.Join(root, "wss-data", "foo")) {
+		t.Error("within ignores no case")
+	}
+	if !samePath(filepath.Join(root, "WSS-Data"), filepath.Join(root, "wss-data")) {
+		t.Error("samePath ignores no case")
+	}
+	cur := t.TempDir()
+	if err := ensureDataDir(cur); err != nil {
+		t.Fatal(err)
+	}
+	putData(t, cur, "todo", `{"a":1}`, 0)
+	target := filepath.Join(cur, "wss-data", "foo")
+	if c, _ := checkDataDir(cur, target); c.Verdict != verdictUnavailable {
+		t.Errorf("checkDataDir(%s) = %s %q, want unavailable", target, c.Verdict, c.Message)
+	}
+}

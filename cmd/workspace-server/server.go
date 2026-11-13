@@ -327,7 +327,14 @@ func moveDataDir(serverDir, current string, act action, logger *log.Logger) (ado
 		}
 	}
 	moved := false
+	var undoCopy func()
 	if act.verdict == verdictMove || act.verdict == verdictCreate && c.curData {
+		ids, err := appDirs(curWSS)
+		if err != nil {
+			undo()
+			return nil, err
+		}
+		undoCopy = copyUndoer(tgtWSS, ids)
 		// moveData fails, rather than leaving the data behind, when the
 		// source holds none now.
 		if err := moveDataFn(curWSS, tgtWSS); err != nil {
@@ -336,26 +343,27 @@ func moveDataDir(serverDir, current string, act action, logger *log.Logger) (ado
 		}
 		moved = true
 	}
+	// A failure from here on takes back the copy, and only what the move
+	// added: a WSS-Data or apps folder that was there stays.
+	fail := func(err error) ([]string, error) {
+		if moved {
+			undoCopy()
+		}
+		undo()
+		return nil, err
+	}
 	cfgPath := filepath.Join(serverDir, configFile)
 	host, _ := os.Hostname()
 	cfg, err := config.Load(cfgPath, defaultName(host))
 	if err != nil {
-		if moved {
-			_ = removeApps(tgtWSS)
-		}
-		undo()
-		return nil, err
+		return fail(err)
 	}
 	cfg.DataDir = to
 	if filepath.Clean(to) == filepath.Clean(serverDir) {
 		cfg.DataDir = ""
 	}
 	if err := cfg.Save(cfgPath); err != nil {
-		if moved {
-			_ = removeApps(tgtWSS)
-		}
-		undo()
-		return nil, fmt.Errorf("save %s: %w", cfgPath, err)
+		return fail(fmt.Errorf("save %s: %w", cfgPath, err))
 	}
 	// The start that follows writes it too; a failure here is only logged.
 	if err := ensureWSS(tgtWSS); err != nil {
@@ -379,6 +387,28 @@ func moveDataDir(serverDir, current string, act action, logger *log.Logger) (ado
 		adopt = adoptableApps(tgtWSS)
 	}
 	return adopt, nil
+}
+
+// copyUndoer returns what takes back a copy of the apps ids into the
+// WSS-Data folder wss: it removes their folders, then apps and wss only if
+// they were missing before the copy (it looks now) and are empty then.
+func copyUndoer(wss string, ids []string) func() {
+	root := filepath.Join(wss, storeDir)
+	_, err := os.Stat(wss)
+	madeWSS := errors.Is(err, os.ErrNotExist)
+	_, err = os.Stat(root)
+	madeApps := errors.Is(err, os.ErrNotExist)
+	return func() {
+		for _, id := range ids {
+			_ = os.RemoveAll(filepath.Join(root, id))
+		}
+		if madeApps {
+			_ = os.Remove(root) // only while it is empty
+		}
+		if madeWSS {
+			_ = os.Remove(wss)
+		}
+	}
 }
 
 // exit performs what a requested stop asked for, after the server's files
