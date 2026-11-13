@@ -136,8 +136,6 @@ If a device asks for an app the server does not serve yet, the page offers to ad
 
 ## A laptop as a second server
 
-**Not available yet:** devices sync through the laptop's server, and follow a new main by themselves, only once their app has an update that is not released yet. Everything the servers do, described below, works now: linking the laptop, pairing its browser, unlinking, and making the laptop the main.
-
 ![How the PC's main server, the laptop's server and the devices connect: at home, away, and when the laptop becomes the main](images/connections.svg)
 
 The PC runs the main server, and a laptop can run a second one that keeps a copy of every app's data on its own disk. At home your devices sync with the PC; away from home they sync with the laptop's server without pairing again, and the two servers exchange the changes when the laptop is back.
