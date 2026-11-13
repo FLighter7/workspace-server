@@ -66,28 +66,46 @@ type appLink struct {
 	Push *pendingTx `json:"push,omitempty"`
 }
 
-// pendingTx is a transaction in flight: its id, and per document it puts,
-// the etag of the body it sends, by which a resume knows that a body staged
-// before is the same one.
+// pendingTx is a transaction in flight: its id, per document it puts the
+// etag of the body it sends, by which a resume knows that a body staged
+// before is the same one, and the documents it deletes. Both also tell, once
+// the transaction may have committed without its base being saved, what the
+// other side then holds (effectiveBase).
 type pendingTx struct {
 	Tx    string            `json:"tx"`
 	Etags map[string]string `json:"etags"`
+	Gone  []string          `json:"gone,omitempty"`
 }
 
 func (a *appLink) clone() *appLink {
 	c := *a
 	c.Base = maps.Clone(a.Base)
-	if a.Pull != nil {
-		p := *a.Pull
-		p.Etags = maps.Clone(a.Pull.Etags)
-		c.Pull = &p
-	}
-	if a.Push != nil {
-		p := *a.Push
-		p.Etags = maps.Clone(a.Push.Etags)
-		c.Push = &p
-	}
+	c.Pull, c.Push = a.Pull.clone(), a.Push.clone()
 	return &c
+}
+
+func (p *pendingTx) clone() *pendingTx {
+	if p == nil {
+		return nil
+	}
+	c := *p
+	c.Etags = maps.Clone(p.Etags)
+	c.Gone = slices.Clone(p.Gone)
+	return &c
+}
+
+// targetsOf returns what cs writes: the etag of each body it puts, and the
+// keys it deletes.
+func targetsOf(cs []change) (map[string]string, []string) {
+	puts, gone := map[string]string{}, []string(nil)
+	for _, c := range cs {
+		if c.to != nil {
+			puts[c.key] = *c.to
+		} else {
+			gone = append(gone, c.key)
+		}
+	}
+	return puts, gone
 }
 
 // valid reports whether a link.json read from disk makes sense: valid keys,
@@ -99,8 +117,21 @@ func (a *appLink) valid() bool {
 		}
 	}
 	for _, p := range []*pendingTx{a.Pull, a.Push} {
-		if p != nil && !store.ValidTx(p.Tx) {
+		if p == nil {
+			continue
+		}
+		if !store.ValidTx(p.Tx) {
 			return false
+		}
+		for ks, etag := range p.Etags {
+			if _, ok := store.ParseKey(ks); !ok || !etagPattern.MatchString(etag) {
+				return false
+			}
+		}
+		for _, ks := range p.Gone {
+			if _, ok := store.ParseKey(ks); !ok {
+				return false
+			}
 		}
 	}
 	return true
@@ -310,7 +341,7 @@ func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app, mainID string
 			return up, err
 		}
 		if lk.Base != nil && lk.Pull == nil && lk.Push == nil {
-			if base := store.RevisionOf(lk.Base); same(local, base) && same(up, base) {
+			if base := store.RevisionOf(lk.Base); same(local, base) && same(l.comparable(app, up), base) {
 				return up, nil // in step: nothing to read on either side
 			}
 		}
@@ -328,8 +359,10 @@ func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app, mainID string
 		for _, d := range main.Docs {
 			sizes[d.Key.String()] = d.Bytes
 		}
+		l.setComparable(app, up, mainSet, len(main.Docs))
 
-		p := compare(lk.Base, hereSet, mainSet)
+		base := effectiveBase(lk, hereSet, mainSet)
+		p := compare(base, hereSet, mainSet)
 		if len(p.diverged) > 0 {
 			l.logDivergence(app, lk, p, hereSet, mainSet)
 			p = diverge(p, hereSet, mainSet)
@@ -342,30 +375,73 @@ func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app, mainID string
 			}
 			return up, nil
 		}
-		lk.Base = nextBase(lk.Base, p.agree, union(hereSet, mainSet))
+		// The base the writes settle into, saved only once one commits: a
+		// base saved before would tell the next sync that what neither
+		// side's commit has written yet was agreed.
+		next := nextBase(base, p.agree, union(hereSet, mainSet))
 
+		var pullErr error
 		if len(p.pulls) > 0 {
-			err := l.pull(ctx, cl, app, lk, p, sizes)
+			err := l.pull(ctx, cl, app, lk, next, p, sizes)
 			if errors.Is(err, errRedecide) {
 				continue
 			}
-			if err != nil {
-				return up, err
-			}
+			// A pull that fails (one this server's quota refuses, say) does
+			// not hold this server's own changes back: they are pushed all
+			// the same, and the error then ends the session, which is tried
+			// again after its backoff.
+			pullErr = err
 		}
 		if len(p.pushes) > 0 {
-			rev, err := l.push(ctx, cl, app, lk, p.pushes)
-			if errors.Is(err, errRedecide) {
+			rev, err := l.push(ctx, cl, app, lk, next, p.pushes)
+			if errors.Is(err, errRedecide) && pullErr == nil {
 				continue
 			}
-			if err != nil {
+			if err != nil && !errors.Is(err, errRedecide) {
 				return up, err
 			}
-			up = rev
-			l.setUp(app, up)
+			if err == nil {
+				up = rev
+				l.setUp(app, up)
+			}
+		}
+		if pullErr != nil {
+			return up, pullErr
 		}
 	}
 	return up, nil
+}
+
+// effectiveBase is lk's base, with what a transaction lk still records shows
+// to have landed on the side it writes: a document that side holds at the
+// etag the transaction puts, or lacks when the transaction deletes it, has
+// that as its base. A commit whose base was not saved after it (a crash, a
+// save that failed) then leaves nothing that looks changed on both sides,
+// which would be a divergence. A record of a transaction that never
+// committed changes nothing this way that the two do not already agree on.
+func effectiveBase(lk *appLink, here, main map[string]string) map[string]string {
+	base := maps.Clone(lk.Base)
+	apply := func(p *pendingTx, side map[string]string) {
+		if p == nil {
+			return
+		}
+		for ks, etag := range p.Etags {
+			if e, ok := side[ks]; ok && e == etag {
+				if base == nil {
+					base = map[string]string{}
+				}
+				base[ks] = etag
+			}
+		}
+		for _, ks := range p.Gone {
+			if _, ok := side[ks]; !ok && base != nil {
+				delete(base, ks)
+			}
+		}
+	}
+	apply(lk.Push, main)
+	apply(lk.Pull, here)
+	return base
 }
 
 // setOf returns a store listing's documents as etags by key.
@@ -379,7 +455,8 @@ func setOf(list store.Listing) map[string]string {
 
 // mainSet returns the main's listing as etags by key. A key that is not a
 // valid one here is left out, and logged: it can be neither written nor
-// compared.
+// compared. The revision of what is left is what the link compares the base
+// with (setComparable).
 func (l *Link) mainSet(app string, list wsclient.Listing) map[string]string {
 	set := make(map[string]string, len(list.Docs))
 	for _, d := range list.Docs {
@@ -408,15 +485,30 @@ func nextBase(base, agree map[string]string, keys []string) map[string]string {
 	return out
 }
 
-// settle records in lk's base that the changes cs are now on both sides.
-func settle(lk *appLink, cs []change) {
+// settle records in base what a commit reports it wrote: each document at
+// the etag the committing side gives it now, or gone. It is the commit's
+// word, never what the link meant to write, so a body that is not the one
+// meant (a resume gone wrong) shows as a difference the next sync settles,
+// instead of hiding behind the base. It returns the documents whose etag is
+// not the one cs meant.
+func settle(base map[string]string, cs []change, written map[string]*string) []string {
+	var odd []string
 	for _, c := range cs {
-		if c.to == nil {
-			delete(lk.Base, c.key)
-		} else {
-			lk.Base[c.key] = *c.to
+		etag, ok := written[c.key]
+		switch {
+		case !ok:
+			odd = append(odd, c.key) // not reported: the base keeps what it said
+			continue
+		case etag == nil:
+			delete(base, c.key)
+		default:
+			base[c.key] = *etag
+		}
+		if !same(etag, c.to) {
+			odd = append(odd, c.key)
 		}
 	}
+	return odd
 }
 
 // logDivergence says why app diverged, and what the old rule does about it.
@@ -466,14 +558,8 @@ func (l *Link) abortPending(ctx context.Context, cl *wsclient.Client, app string
 // the bodies read from the main: what a transaction cut off before staged is
 // resumed from where it stopped. A device here that wrote first, or a main's
 // document that changed under the read, is errRedecide.
-func (l *Link) pull(ctx context.Context, cl *wsclient.Client, app string, lk *appLink, p plan, sizes map[string]int64) error {
-	targets := map[string]string{}
-	for _, c := range p.pulls {
-		if c.to != nil {
-			targets[c.key] = *c.to
-		}
-	}
-	tx, staged, err := l.beginPull(app, lk, p.pulls, targets)
+func (l *Link) pull(ctx context.Context, cl *wsclient.Client, app string, lk *appLink, next map[string]string, p plan, sizes map[string]int64) error {
+	tx, staged, err := l.beginPull(app, lk, p.pulls)
 	if err != nil {
 		return err
 	}
@@ -517,7 +603,8 @@ func (l *Link) pull(ctx context.Context, cl *wsclient.Client, app string, lk *ap
 			return fmt.Errorf("stage %s: %w", c.key, cerr)
 		}
 	}
-	if _, err := tx.Commit(); err != nil {
+	c, err := tx.Commit()
+	if err != nil {
 		var conflict *store.ConflictError
 		if errors.As(err, &conflict) {
 			l.d.Logf("app %q: a device here wrote before the main's documents were taken in; deciding again", app)
@@ -533,23 +620,37 @@ func (l *Link) pull(ctx context.Context, cl *wsclient.Client, app string, lk *ap
 		how += fmt.Sprintf(" (resumed, %d bytes were staged already)", resumed)
 	}
 	l.moved(app, "%s", how)
+	written := map[string]*string{}
+	for _, d := range c.Docs {
+		written[d.Key.String()] = d.Etag
+	}
+	l.settled(app, lk, next, p.pulls, written, "here")
 	lk.Pull = nil
-	settle(lk, p.pulls)
 	return l.saveLink(app, lk)
+}
+
+// settled records a commit's writes in next, which becomes lk's base, and
+// logs the documents the commit did not write as meant.
+func (l *Link) settled(app string, lk *appLink, next map[string]string, cs []change, written map[string]*string, where string) {
+	if odd := settle(next, cs, written); len(odd) > 0 {
+		l.d.Logf("app %q: the commit %s wrote %s otherwise than meant; the next sync settles it", app, where, keyList(odd))
+	}
+	lk.Base = next
 }
 
 // beginPull opens the transaction here that takes the changes cs: the one
 // link.json records, when everything it staged is still wanted, or a new
 // one. It returns what that transaction staged before, by key, for the
 // bodies whose etag is still the one wanted.
-func (l *Link) beginPull(app string, lk *appLink, cs []change, targets map[string]string) (*hub.LinkTx, map[string]store.Staged, error) {
+func (l *Link) beginPull(app string, lk *appLink, cs []change) (*hub.LinkTx, map[string]store.Staged, error) {
+	targets, gone := targetsOf(cs)
 	if lk.Pull != nil {
 		tx, staged, err := l.d.Writer.BeginLink(app, lk.Pull.Tx)
 		if err != nil {
 			return nil, nil, err
 		}
 		if keep := reusable(staged, lk.Pull.Etags, cs, targets); keep != nil {
-			lk.Pull.Etags = targets
+			lk.Pull.Etags, lk.Pull.Gone = targets, gone
 			if err := l.saveLink(app, lk); err != nil {
 				return nil, nil, err
 			}
@@ -557,7 +658,7 @@ func (l *Link) beginPull(app string, lk *appLink, cs []change, targets map[strin
 		}
 		_ = tx.Abort()
 	}
-	lk.Pull = &pendingTx{Tx: newTx(), Etags: targets}
+	lk.Pull = &pendingTx{Tx: newTx(), Etags: targets, Gone: gone}
 	if err := l.saveLink(app, lk); err != nil {
 		return nil, nil, err
 	}
@@ -565,10 +666,13 @@ func (l *Link) beginPull(app string, lk *appLink, cs []change, targets map[strin
 	return tx, map[string]store.Staged{}, err
 }
 
-// reusable returns what a transaction staged, by key, when every change it
-// staged is one of cs: the bodies whose etag (as was recorded) is the one
-// targets wants now. It returns nil when the transaction staged a change
-// that is no longer wanted, which only a new transaction can drop.
+// reusable returns the bodies a transaction staged, by key, when the
+// transaction may go on with cs: every change it staged is one of cs, and
+// every body it staged is recorded (was) at the etag cs puts there now. It
+// returns nil otherwise, and a new transaction starts: a body staged for
+// another etag is never resumed, and never left in a transaction whose
+// record names the new etag, where a cut before it is staged again would
+// resume it as the new body, mixing the two.
 func reusable(staged []store.Staged, was map[string]string, cs []change, targets map[string]string) map[string]store.Staged {
 	want := map[string]bool{}
 	for _, c := range cs {
@@ -580,9 +684,13 @@ func reusable(staged []store.Staged, was map[string]string, cs []change, targets
 		if !want[ks] {
 			return nil
 		}
-		if !s.Delete && was[ks] != "" && was[ks] == targets[ks] {
-			keep[ks] = s
+		if s.Delete {
+			continue
 		}
+		if was[ks] == "" || was[ks] != targets[ks] {
+			return nil
+		}
+		keep[ks] = s
 	}
 	return keep
 }
@@ -591,19 +699,14 @@ func reusable(staged []store.Staged, was map[string]string, cs []change, targets
 // the bodies read from this server's files: what a transaction cut off
 // before staged is resumed from where it stopped. It returns the main's new
 // revision. A device here that wrote meanwhile, or a main whose documents
-// are no longer the ones cs expects, is errRedecide. Each push counts
-// against the write guard.
-func (l *Link) push(ctx context.Context, cl *wsclient.Client, app string, lk *appLink, cs []change) (*string, error) {
-	if !l.allowPush(app) {
+// are no longer the ones cs expects, is errRedecide. Each push the main
+// commits counts against the write guard, which refuses one past it before
+// it starts.
+func (l *Link) push(ctx context.Context, cl *wsclient.Client, app string, lk *appLink, next map[string]string, cs []change) (*string, error) {
+	if !l.mayPush(app) {
 		return nil, errTooManyWrites
 	}
-	targets := map[string]string{}
-	for _, c := range cs {
-		if c.to != nil {
-			targets[c.key] = *c.to
-		}
-	}
-	tx, staged, err := l.beginPush(ctx, cl, app, lk, cs, targets)
+	tx, staged, err := l.beginPush(ctx, cl, app, lk, cs)
 	if err != nil {
 		return nil, err
 	}
@@ -646,19 +749,25 @@ func (l *Link) push(ctx context.Context, cl *wsclient.Client, app string, lk *ap
 		l.d.Logf("app %q: the main's documents changed before this server's reached it (it is at %s now); deciding again", app, short(r.Revision))
 		return nil, errRedecide
 	}
+	l.countPush(app)
 	how := fmt.Sprintf("pushed to the main: %s", describe(cs))
 	if resumed > 0 {
 		how += fmt.Sprintf(" (resumed, %d bytes were staged already)", resumed)
 	}
 	l.moved(app, "%s", how)
+	written := map[string]*string{}
+	for _, d := range r.Docs {
+		written[d.Key.String()] = d.Etag
+	}
+	l.settled(app, lk, next, cs, written, "on the main")
 	lk.Push = nil
-	settle(lk, cs)
 	return r.Revision, l.saveLink(app, lk)
 }
 
 // beginPush opens the transaction on the main that takes the changes cs, as
 // beginPull does here.
-func (l *Link) beginPush(ctx context.Context, cl *wsclient.Client, app string, lk *appLink, cs []change, targets map[string]string) (string, map[string]store.Staged, error) {
+func (l *Link) beginPush(ctx context.Context, cl *wsclient.Client, app string, lk *appLink, cs []change) (string, map[string]store.Staged, error) {
+	targets, gone := targetsOf(cs)
 	if lk.Push != nil {
 		b, err := cl.Begin(ctx, lk.Push.Tx)
 		if err != nil {
@@ -674,7 +783,7 @@ func (l *Link) beginPush(ctx context.Context, cl *wsclient.Client, app string, l
 			staged = append(staged, store.Staged{Key: k, Delete: s.Delete, IfEtag: s.IfEtag, Bytes: s.Bytes, Received: s.Received})
 		}
 		if keep := reusable(staged, lk.Push.Etags, cs, targets); staged != nil && keep != nil {
-			lk.Push.Etags = targets
+			lk.Push.Etags, lk.Push.Gone = targets, gone
 			if err := l.saveLink(app, lk); err != nil {
 				return "", nil, err
 			}
@@ -682,7 +791,7 @@ func (l *Link) beginPush(ctx context.Context, cl *wsclient.Client, app string, l
 		}
 		// A begin of another id discards this one on the main.
 	}
-	lk.Push = &pendingTx{Tx: newTx(), Etags: targets}
+	lk.Push = &pendingTx{Tx: newTx(), Etags: targets, Gone: gone}
 	if err := l.saveLink(app, lk); err != nil {
 		return "", nil, err
 	}

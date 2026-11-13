@@ -220,6 +220,7 @@ type Link struct {
 	resumes   map[string]chan struct{} // per app, poked by Resume; a stopped app's worker waits on it
 	up        map[string]*string       // per app, the main's revision as last heard
 	links     map[string]*appLink      // per app, link.json as last read or written
+	hidden    map[string][2]*string    // per app, a main's revision and that of its keys valid here, when they differ
 	cancel    context.CancelFunc
 	closed    bool
 
@@ -277,7 +278,7 @@ func Open(d Deps) (*Link, error) {
 		d: d, st: st, fam: fam, kick: make(chan struct{}, 1), watchKick: make(chan struct{}, 1),
 		announce: make(chan struct{}, 1), invites: make(chan inviteReq),
 		pushes: map[string][]time.Time{}, stopped: map[string]bool{}, resumes: map[string]chan struct{}{},
-		up: map[string]*string{}, links: map[string]*appLink{}, local: map[string]chan struct{}{},
+		up: map[string]*string{}, links: map[string]*appLink{}, hidden: map[string][2]*string{}, local: map[string]chan struct{}{},
 	}, nil
 }
 
@@ -932,7 +933,7 @@ func (l *Link) session(ctx context.Context) error {
 
 	sctx, cancel := context.WithCancel(ctx)
 	fatal := make(chan error, 1)
-	workers := map[string]context.CancelFunc{}
+	workers := map[string]appWorker{}
 	var wg sync.WaitGroup
 	defer func() {
 		cancel()
@@ -943,18 +944,24 @@ func (l *Link) session(ctx context.Context) error {
 		select {
 		case list := <-lists:
 			want := l.adopt(list)
-			for id, stop := range workers {
+			for id, w := range workers {
 				if !slices.Contains(want, id) {
-					stop()
+					w.stop()
+					<-w.done // a sync in flight must not save its base after it is forgotten
 					delete(workers, id)
 					l.d.Logf("app %q: the main no longer serves it; it stops syncing, and its data here stays", id)
 				}
 			}
+			l.forgetDropped(want)
 			for _, id := range want {
-				if workers[id] == nil {
+				if _, ok := workers[id]; !ok {
 					wctx, stop := context.WithCancel(sctx)
-					workers[id] = stop
-					wg.Go(func() { l.worker(wctx, id, fatal) })
+					w := appWorker{stop: stop, done: make(chan struct{})}
+					workers[id] = w
+					wg.Go(func() {
+						defer close(w.done)
+						l.worker(wctx, id, fatal)
+					})
 				}
 			}
 			l.setSyncing(want)
@@ -1031,8 +1038,7 @@ func (l *Link) replicate(reg wsclient.Registry) {
 }
 
 // adopt takes the main's app list: it adds the apps this server does not
-// serve yet to apps.json, forgets the base of the apps the main no longer
-// serves (a later return is a first link), and returns the ids to sync.
+// serve yet to apps.json, and returns the ids to sync.
 func (l *Link) adopt(list []wsclient.App) []string {
 	var want []string
 	added := false
@@ -1056,13 +1062,26 @@ func (l *Link) adopt(list []wsclient.App) []string {
 	if added {
 		l.d.Writer.AppsChanged()
 	}
+	slices.Sort(want)
+	return want
+}
+
+// forgetDropped forgets the base of the apps listed here that the main no
+// longer serves (want): a later return is a first link. Their workers have
+// stopped, so no sync saves link.json again after it.
+func (l *Link) forgetDropped(want []string) {
 	for _, a := range l.d.Apps.List() {
 		if !slices.Contains(want, a.ID) {
 			l.forgetLink(a.ID)
 		}
 	}
-	slices.Sort(want)
-	return want
+}
+
+// appWorker is the worker of one app: stop ends it, done closes once it
+// returned.
+type appWorker struct {
+	stop context.CancelFunc
+	done chan struct{}
 }
 
 // worker keeps app's session to the main up and syncs over it until ctx
@@ -1198,19 +1217,50 @@ func (l *Link) moved(app string, format string, args ...any) {
 	l.d.Logf("app %q: "+format, append([]any{app}, args...)...)
 }
 
-// allowPush counts a push of app, and refuses it when MaxPushesPerMinute
-// pushes of app happened within the last minute.
-func (l *Link) allowPush(app string) bool {
+// mayPush reports whether app may push: fewer than MaxPushesPerMinute of
+// its pushes were committed on the main within the last minute.
+func (l *Link) mayPush(app string) bool {
 	now := l.d.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	recent := slices.DeleteFunc(l.pushes[app], func(at time.Time) bool { return now.Sub(at) >= pushWindow })
-	if len(recent) >= MaxPushesPerMinute {
-		l.pushes[app] = recent
-		return false
+	l.pushes[app] = recent
+	return len(recent) < MaxPushesPerMinute
+}
+
+// countPush counts a push of app the main committed.
+func (l *Link) countPush(app string) {
+	now := l.d.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pushes[app] = append(l.pushes[app], now)
+}
+
+// setComparable records, when the main's listing at revision up held keys
+// that are not valid here (listed of them in all, kept of them valid), the
+// revision of what is left: the set the link can hold and compare, which is
+// what its base is the revision of. Without it, a main holding such a key
+// would never be in step with this server.
+func (l *Link) setComparable(app string, up *string, kept map[string]string, listed int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(kept) == listed {
+		delete(l.hidden, app)
+		return
 	}
-	l.pushes[app] = append(recent, now)
-	return true
+	l.hidden[app] = [2]*string{up, store.RevisionOf(kept)}
+}
+
+// comparable returns the main's revision up as the link compares it with
+// its base: without the keys not valid here, when the listing at up had any.
+// A revision the link has not listed is taken as it is.
+func (l *Link) comparable(app string, up *string) *string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if h, ok := l.hidden[app]; ok && same(h[0], up) {
+		return h[1]
+	}
+	return up
 }
 
 // stop records that the write guard stopped app.

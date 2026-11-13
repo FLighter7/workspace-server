@@ -148,7 +148,10 @@ func (n *node) open() {
 	if n.devices, err = devices.Open(filepath.Join(n.dir, "devices.json"), time.Now); err != nil {
 		t.Fatal(err)
 	}
-	n.store = store.New(filepath.Join(n.dir, "apps"), time.Now, nil)
+	n.store = store.New(filepath.Join(n.dir, "apps"), time.Now, func(app string) int64 {
+		a, _ := n.apps.Get(app)
+		return a.Quota
+	})
 	n.secrets = pairing.NewSecrets(time.Now)
 	n.hub = hub.New(hub.Deps{
 		ServerID: n.id.ServerID,
@@ -936,6 +939,12 @@ func TestConflictDuringPush(t *testing.T) {
 
 	merged := tab.put(t, &v2, `{"v":2,"laptop":true}`)
 	waitFor(t, "the merge to reach the main", func() bool { return main.etag("todo") == merged })
+	// The guard counts what the main committed: the merge, not the push
+	// the conflict refused.
+	waitFor(t, "the push to be logged", func() bool { return sub.logs.count(logPushed) == 1 })
+	if n := sub.link.pushCount("todo"); n != 1 {
+		t.Errorf("the guard counts %d pushes, want 1", n)
+	}
 }
 
 // Writes made on the subordinate while the main was out of reach are pushed
@@ -1185,23 +1194,33 @@ func TestWriteGuardWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	push := func(app string) bool {
+		if !l.mayPush(app) {
+			return false
+		}
+		l.countPush(app)
+		return true
+	}
+	if !l.mayPush("todo") || !l.mayPush("todo") {
+		t.Fatal("asking counts a push")
+	}
 	for i := range MaxPushesPerMinute {
-		if !l.allowPush("todo") {
+		if !push("todo") {
 			t.Fatalf("push %d refused", i+1)
 		}
 		now = now.Add(time.Second)
 	}
-	if l.allowPush("todo") {
+	if push("todo") {
 		t.Error("a push past the limit within a minute was allowed")
 	}
-	if !l.allowPush("notes") {
+	if !push("notes") {
 		t.Error("another app's push was refused")
 	}
 	now = start.Add(pushWindow)
-	if !l.allowPush("todo") {
+	if !push("todo") {
 		t.Error("a push was refused once the first one left the window")
 	}
-	if l.allowPush("todo") {
+	if push("todo") {
 		t.Error("a second push was allowed with ten still in the window")
 	}
 }

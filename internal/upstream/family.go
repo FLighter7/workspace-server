@@ -197,8 +197,10 @@ func (l *Link) setUp(app string, rev *string) {
 // inStep reports whether every app this server syncs holds the same set
 // here and on the main, as both last agreed: this server's revision and the
 // main's (as last heard) are both the base's, and no transaction of the
-// link is in flight. Apps the write guard stopped are left out: they are
-// settled by the sync rule at the next link.
+// link is in flight. The main's revision is taken without the documents it
+// holds under names not valid here, which the link leaves out (comparable).
+// Apps the write guard stopped are left out: they are settled by the sync
+// rule at the next link.
 func (l *Link) inStep() bool {
 	l.mu.Lock()
 	apps := slices.Clone(l.syncing)
@@ -222,7 +224,7 @@ func (l *Link) inStep() bool {
 		if lk.Base == nil || lk.Pull != nil || lk.Push != nil || !heard {
 			return false
 		}
-		if base := store.RevisionOf(lk.Base); !same(local, base) || !same(up, base) {
+		if base := store.RevisionOf(lk.Base); !same(local, base) || !same(l.comparable(app, up), base) {
 			return false
 		}
 	}
