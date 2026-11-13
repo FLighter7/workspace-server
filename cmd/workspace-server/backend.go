@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/FLighter7/workspace-server/internal/hub"
 	"github.com/FLighter7/workspace-server/internal/pairing"
 	"github.com/FLighter7/workspace-server/internal/rtc"
+	"github.com/FLighter7/workspace-server/internal/store"
 	"github.com/FLighter7/workspace-server/internal/upstream"
 	"github.com/FLighter7/workspace-server/internal/web"
 )
@@ -277,9 +279,17 @@ func (s *server) InviteUpstream(ctx context.Context) (string, time.Time, error) 
 	return inv.Code, inv.ExpiresAt, err
 }
 
+// Document returns the document data.json at the app's root, the one todo
+// keeps, for the page's download. Stage 4 of the files plan removes the
+// download.
 func (s *server) Document(id string) ([]byte, bool) {
-	body, etag, err := s.store.Read(id)
-	return body, err == nil && etag != nil
+	f, _, err := s.store.OpenLatest(id, store.Key{ID: "data", Type: "json"})
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	body, err := io.ReadAll(f)
+	return body, err == nil
 }
 
 func (s *server) Devices() []web.DeviceInfo {

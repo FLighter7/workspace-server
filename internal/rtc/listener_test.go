@@ -85,35 +85,45 @@ func TestPairPutAndChangedOverLoopback(t *testing.T) {
 		name string
 	}{{a, "Phone"}, {b, "Laptop"}} {
 		welcome := c.cl.pair(deadline, s.secrets, c.name)
-		if etag, ok := welcome["etag"]; !ok || etag != nil {
-			t.Fatalf("%s: welcome = %v, want etag null", c.name, welcome)
+		if rev, ok := welcome["revision"]; !ok || rev != nil {
+			t.Fatalf("%s: welcome = %v, want revision null", c.name, welcome)
 		}
 		if welcome["serverId"] != s.serverID {
 			t.Fatalf("%s: welcome serverId = %v, want %q", c.name, welcome["serverId"], s.serverID)
 		}
 	}
 
+	// b writes data.json in a transaction; a hears the new revision, and
+	// reads the document back.
 	body := jsonBody(t, 40000)
-	b.send(obj{"t": "put", "ifEtag": nil, "bytes": len(body)})
+	const tx = "loopback-tx-0001"
+	b.send(obj{"t": "begin", "tx": tx})
+	b.frame(deadline, "began")
+	b.send(obj{"t": "put", "tx": tx, "path": "", "id": "data", "type": "json", "ifEtag": nil, "bytes": len(body), "offset": 0})
 	for off := 0; off < len(body); off += protocol.ChunkBytes {
 		if err := b.dc.Send(body[off:min(off+protocol.ChunkBytes, len(body))]); err != nil {
 			t.Fatalf("send body: %v", err)
 		}
 	}
-	stored := b.frame(deadline, "stored")
-	etag, _ := stored["etag"].(string)
-	if etag != store.Etag(body) {
-		t.Fatalf("stored = %v, want etag %q", stored, store.Etag(body))
+	if staged := b.frame(deadline, "staged"); staged["received"] != float64(len(body)) {
+		t.Fatalf("staged = %v, want all %d bytes received", staged, len(body))
+	}
+	b.send(obj{"t": "commit", "tx": tx})
+	committed := b.frame(deadline, "committed")
+	rev, _ := committed["revision"].(string)
+	etag := store.Etag(body)
+	if want := store.RevisionOf(map[string]string{"data.json": etag}); rev != *want {
+		t.Fatalf("committed = %v, want revision %s", committed, *want)
 	}
 
-	if changed := a.frame(deadline, "changed"); changed["etag"] != etag {
-		t.Fatalf("changed = %v, want etag %q", changed, etag)
+	if changed := a.frame(deadline, "changed"); changed["revision"] != rev {
+		t.Fatalf("changed = %v, want revision %q", changed, rev)
 	}
 
-	a.send(obj{"t": "get"})
+	a.send(obj{"t": "get", "path": "", "id": "data", "type": "json", "etag": etag})
 	doc := a.frame(deadline, "doc")
-	if doc["etag"] != etag || doc["bytes"] != float64(len(body)) {
-		t.Fatalf("doc = %v, want etag %q and bytes %d", doc, etag, len(body))
+	if doc["etag"] != etag || doc["bytes"] != float64(len(body)) || doc["offset"] != float64(0) {
+		t.Fatalf("doc = %v, want etag %q and bytes %d from 0", doc, etag, len(body))
 	}
 	if got := a.body(deadline, len(body)); !bytes.Equal(got, body) {
 		t.Fatalf("get returned %d bytes that differ from the %d bytes put", len(got), len(body))

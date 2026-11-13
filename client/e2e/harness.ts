@@ -14,6 +14,7 @@ declare global {
 		harness: {
 			createDevice(notes: string[]): Device;
 			pairAs(app: string, code: string): Promise<string>;
+			documents(app: string, code: string, size: number): Promise<Record<string, unknown> | string>;
 		};
 		device: Device;
 	}

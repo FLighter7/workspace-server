@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"regexp"
 	"sync"
@@ -62,7 +63,8 @@ const (
 // (docs/protocol.md, "Errors"). Any other reads as CodeInternal.
 var ServerCodes = []string{
 	"protocol", "unknownApp", "badSecret", "badToken", "blocked",
-	"tooLarge", "notJson", "notAuthenticated", "internal", "notMain",
+	"badPath", "quota", "noTransaction", "incomplete",
+	"notAuthenticated", "internal", "notMain",
 }
 
 // Error is a failure this client reports: a server's error frame, or one of
@@ -96,22 +98,33 @@ type Channel interface {
 	Close() error
 }
 
-// Welcome is what a welcome tells the client. Etag is nil when there is no
-// document, and always on a link session. Role is empty when the server
-// named none: a server from before roles. Term is the family's term as the
-// server knows it, 0 when it names none. Subordinates is what a main lists:
-// nil when the welcome carries no list (a subordinate, or a main from
-// before subordinates were handed out, which takes no announce either), and
-// empty but not nil for a main without any. An entry this client cannot
-// read is left out.
+// Welcome is what a welcome tells the client. Revision is the revision of
+// the app's set, nil for an empty set, and always on a link session. Role is
+// empty when the server named none: a server from before roles. Term is the
+// family's term as the server knows it, 0 when it names none. Subordinates is
+// what a main lists: nil when the welcome carries no list (a subordinate, or a
+// main from before subordinates were handed out, which takes no announce
+// either), and empty but not nil for a main without any. An entry this client
+// cannot read is left out. Diverged lists the servers whose copy of the app
+// diverged from their main's and waits for a device's choice; nil when the
+// welcome names none.
 type Welcome struct {
-	ServerID     string   `json:"serverId"`
-	Name         string   `json:"name"`
-	Etag         *string  `json:"etag"`
-	Hosts        []string `json:"hosts"`
-	Role         string   `json:"role,omitempty"`
-	Term         int      `json:"term,omitempty"`
-	Subordinates []Server `json:"subordinates,omitempty"`
+	ServerID     string           `json:"serverId"`
+	Name         string           `json:"name"`
+	Revision     *string          `json:"revision"`
+	Hosts        []string         `json:"hosts"`
+	Role         string           `json:"role,omitempty"`
+	Term         int              `json:"term,omitempty"`
+	Subordinates []Server         `json:"subordinates,omitempty"`
+	Diverged     []DivergedServer `json:"diverged,omitempty"`
+}
+
+// DivergedServer is a server whose copy of an app diverged from its main's,
+// and since when (RFC 3339 UTC).
+type DivergedServer struct {
+	ServerID string `json:"serverId"`
+	Name     string `json:"name"`
+	Since    string `json:"since"`
 }
 
 // Server is how a device reaches a server: a pairing code without the
@@ -173,26 +186,30 @@ type App struct {
 	Name string `json:"name"`
 }
 
-// incoming is one frame as received, with the body it announced (nil when
-// it announced none).
+// incoming is one frame as received. A doc's body is not kept: it goes to
+// the writer of the get that asked for it as it arrives, and werr is what
+// that writer failed with, if it did.
 type incoming struct {
 	t     string
 	frame map[string]json.RawMessage
-	body  []byte
+	werr  error
 }
 
-// pending is the request waiting for its reply.
+// pending is the request waiting for its reply. sink takes the body of a
+// get's doc.
 type pending struct {
 	kind    string // the request's frame type
+	sink    io.Writer
 	replies chan incoming
 }
 
 // Client speaks the protocol over one data channel for one app, or for no
 // app: a link session. One request runs at a time; a later call waits for
-// the one before it. Pushes reach the listeners set with OnChanged and
-// OnApps, which run on the goroutine that calls Receive and must not block
-// or call the Client. A request given up through its context ends the
-// Client, whose replies would no longer pair up with requests.
+// the one before it. Pushes reach the listeners set with OnChanged,
+// OnDiverged, OnResolved, OnApps, OnDevices and OnTakeOver, which run on the
+// goroutine that calls Receive and must not block or call the Client. A
+// request given up through its context ends the Client, whose replies would
+// no longer pair up with requests.
 type Client struct {
 	ch  Channel
 	app string
@@ -203,7 +220,9 @@ type Client struct {
 	pending    *pending
 	body       *bodyState // the body arriving, if any
 	ended      error
-	onChanged  func(etag string)
+	onChanged  func(revision *string)
+	onDiverged func(list []DivergedServer)
+	onResolved func(server string)
 	onApps     func(list []App)
 	onDevices  func(reg Registry)
 	onTakeOver func()
@@ -212,10 +231,13 @@ type Client struct {
 	low  chan struct{} // the channel's buffer drained to BufferLow
 }
 
-// bodyState is a body being reassembled.
+// bodyState is a doc's body arriving: left bytes of it still to come, each
+// piece written to w as it arrives. Only the goroutine that calls Receive
+// touches it; the client's lock guards the pointer to it.
 type bodyState struct {
-	in       incoming
-	expected int
+	in   incoming
+	left int64
+	w    io.Writer
 }
 
 // NewClient returns a client speaking over ch for app; app "" makes it a
@@ -233,11 +255,28 @@ func NewClient(ch Channel, app string) *Client {
 	return c
 }
 
-// OnChanged sets the listener of changed pushes.
-func (c *Client) OnChanged(f func(etag string)) {
+// OnChanged sets the listener of changed pushes: the app's set has a new
+// revision, nil for an empty set.
+func (c *Client) OnChanged(f func(revision *string)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onChanged = f
+}
+
+// OnDiverged sets the listener of diverged pushes: the servers whose copy of
+// the app diverged from their main's, which wait for a device's choice.
+func (c *Client) OnDiverged(f func(list []DivergedServer)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onDiverged = f
+}
+
+// OnResolved sets the listener of resolved pushes: the divergence of the
+// server named has been settled, by a device's resolve.
+func (c *Client) OnResolved(f func(server string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onResolved = f
 }
 
 // OnApps sets the listener of app lists the server pushes, and of the one
@@ -306,9 +345,16 @@ func (c *Client) fail(err error) {
 }
 
 // Receive hands the client one incoming message: a text frame, or a piece of
-// a body. Messages must arrive in order, one at a time.
+// a body. Messages must arrive in order, one at a time. A piece of a doc's
+// body is written to the get's writer here, before Receive returns.
 func (c *Client) Receive(text bool, data []byte) {
-	in, err := c.assemble(text, data)
+	var in *incoming
+	var err error
+	if text {
+		in, err = c.frame(data)
+	} else {
+		in, err = c.piece(data)
+	}
 	if err != nil {
 		c.fail(err)
 		return
@@ -318,29 +364,13 @@ func (c *Client) Receive(text bool, data []byte) {
 	}
 }
 
-// assemble reads one message: a frame without a body is ready at once, one
-// with a body once all of it is in. It returns nil while a body is incomplete
-// or after the client has ended.
-func (c *Client) assemble(text bool, data []byte) (*incoming, error) {
+// frame reads a text frame: ready at once, unless it is a doc whose body is
+// still to come. It returns nil then, or after the client has ended.
+func (c *Client) frame(data []byte) (*incoming, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.ended != nil {
 		return nil, nil
-	}
-	if !text {
-		b := c.body
-		if b == nil {
-			return nil, protocolError("a binary message arrived when no body was expected")
-		}
-		if len(b.in.body)+len(data) > b.expected {
-			return nil, protocolError("a body overran its announced size")
-		}
-		b.in.body = append(b.in.body, data...)
-		if len(b.in.body) < b.expected {
-			return nil, nil
-		}
-		c.body = nil
-		return &b.in, nil
 	}
 	if c.body != nil {
 		return nil, protocolError("a text frame arrived inside a body")
@@ -354,35 +384,104 @@ func (c *Client) assemble(text bool, data []byte) (*incoming, error) {
 		return nil, protocolError("a frame without t")
 	}
 	in := incoming{t: t, frame: frame}
-	raw, ok := frame["bytes"]
-	if !ok {
+	if t != "doc" {
 		return &in, nil
 	}
-	var n float64
-	if json.Unmarshal(raw, &n) != nil || n < 0 || n != math.Trunc(n) || n > 1<<53 {
-		return nil, protocolError("a frame with an invalid body size")
+	// Only a doc carries a body: the document's bytes past the offset.
+	size, ok1 := readCount(frame["bytes"])
+	offset, ok2 := int64(0), true
+	if raw, present := frame["offset"]; present {
+		offset, ok2 = readCount(raw)
 	}
-	in.body = []byte{}
-	if n == 0 {
+	if !ok1 || !ok2 || offset > size {
+		return nil, protocolError("a doc with an invalid size or offset")
+	}
+	if size == offset {
 		return &in, nil
 	}
-	c.body = &bodyState{in: in, expected: int(n)}
+	if c.pending == nil || c.pending.kind != "get" {
+		return nil, protocolError("a doc nobody asked for")
+	}
+	c.body = &bodyState{in: in, left: size - offset, w: c.pending.sink}
 	return nil, nil
+}
+
+// piece takes a piece of the body arriving and writes it to the get's
+// writer, outside the client's lock. A writer that fails is not written to
+// again; the rest of the body is read and dropped, and the get fails with
+// the writer's error. It returns the doc once its body is all in.
+func (c *Client) piece(data []byte) (*incoming, error) {
+	c.mu.Lock()
+	b := c.body
+	ended := c.ended != nil
+	c.mu.Unlock()
+	switch {
+	case ended:
+		return nil, nil
+	case b == nil:
+		return nil, protocolError("a binary message arrived when no body was expected")
+	case int64(len(data)) > b.left:
+		return nil, protocolError("a body overran its announced size")
+	}
+	b.left -= int64(len(data))
+	if b.in.werr == nil && len(data) > 0 {
+		if _, err := b.w.Write(data); err != nil {
+			b.in.werr = err
+		}
+	}
+	if b.left > 0 {
+		return nil, nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ended != nil {
+		return nil, nil
+	}
+	c.body = nil
+	return &b.in, nil
 }
 
 // dispatch hands a complete frame to the listeners or to the request
 // waiting for it.
 func (c *Client) dispatch(in incoming) {
 	c.mu.Lock()
-	onChanged, onApps, onDevices, onTakeOver, p := c.onChanged, c.onApps, c.onDevices, c.onTakeOver, c.pending
+	onChanged, onDiverged, onResolved := c.onChanged, c.onDiverged, c.onResolved
+	onApps, onDevices, onTakeOver, p := c.onApps, c.onDevices, c.onTakeOver, c.pending
 	c.mu.Unlock()
 
 	switch in.t {
 	case "changed":
-		if etag, ok := readString(in.frame["etag"]); ok && onChanged != nil {
-			onChanged(etag)
+		rev, ok := readRevision(in.frame)
+		if !ok {
+			c.fail(protocolError("a malformed changed"))
+			return
+		}
+		if onChanged != nil {
+			onChanged(rev)
 		}
 		return
+	case "diverged":
+		list, ok := readDiverged(in.frame["servers"])
+		if !ok {
+			c.fail(protocolError("a malformed diverged"))
+			return
+		}
+		if onDiverged != nil {
+			onDiverged(list)
+		}
+		return
+	case "resolved":
+		server, ok := readString(in.frame["server"])
+		if !ok {
+			c.fail(protocolError("a malformed resolved"))
+			return
+		}
+		if onResolved != nil {
+			onResolved(server)
+		}
+		if p == nil || p.kind != "resolve" {
+			return // a push
+		}
 	case "apps":
 		list, err := readApps(in.frame)
 		if err != nil {
@@ -428,14 +527,22 @@ func (c *Client) dispatch(in incoming) {
 	}
 }
 
-// request sends frame (with body, when not nil) once every earlier request
+// outBody is a body a request sends after its frame: n bytes read from r.
+type outBody struct {
+	r io.Reader
+	n int64
+}
+
+// request sends frame (and body, when not nil) once every earlier request
 // has finished, and hands each reply to read until it reports the request
-// done. An error frame fails the request with its code.
-func (c *Client) request(ctx context.Context, frame map[string]any, body []byte, read func(incoming) (bool, error)) error {
+// done. sink, when not nil, takes the body of a doc that answers. An error
+// frame fails the request with its code; an error read returns ends the
+// client, as the two sides no longer agree.
+func (c *Client) request(ctx context.Context, frame map[string]any, body *outBody, sink io.Writer, read func(incoming) (bool, error)) error {
 	c.reqMu.Lock()
 	defer c.reqMu.Unlock()
 
-	p := &pending{kind: frame["t"].(string), replies: make(chan incoming, 4)}
+	p := &pending{kind: frame["t"].(string), sink: sink, replies: make(chan incoming, 4)}
 	c.mu.Lock()
 	if c.ended != nil {
 		err := c.ended
@@ -476,12 +583,11 @@ func (c *Client) request(ctx context.Context, frame map[string]any, body []byte,
 	}
 }
 
-// send sends frame and then body in pieces, pausing while the channel holds
-// more than BufferHigh bytes.
-func (c *Client) send(ctx context.Context, frame map[string]any, body []byte) error {
-	if body != nil {
-		frame["bytes"] = len(body)
-	}
+// send sends frame and then body in pieces of at most ChunkBytes, pausing
+// while the channel holds more than BufferHigh bytes. A body that cannot be
+// read to its end ends the client: the frame announced its size, and the
+// server would take the next frame for the rest of it.
+func (c *Client) send(ctx context.Context, frame map[string]any, body *outBody) error {
 	text, err := json.Marshal(frame)
 	if err != nil {
 		return err
@@ -489,7 +595,11 @@ func (c *Client) send(ctx context.Context, frame map[string]any, body []byte) er
 	if err := c.ch.SendText(string(text)); err != nil {
 		return c.sendFailed(err)
 	}
-	for off := 0; off < len(body); off += ChunkBytes {
+	if body == nil || body.n == 0 {
+		return nil
+	}
+	buf := make([]byte, min(int64(ChunkBytes), body.n))
+	for left := body.n; left > 0; {
 		for c.ch.BufferedAmount() > BufferHigh {
 			select {
 			case <-c.low:
@@ -503,9 +613,15 @@ func (c *Client) send(ctx context.Context, frame map[string]any, body []byte) er
 				// costs a moment, not the request.
 			}
 		}
-		if err := c.ch.Send(body[off:min(off+ChunkBytes, len(body))]); err != nil {
+		chunk := buf[:min(int64(len(buf)), left)]
+		if _, err := io.ReadFull(body.r, chunk); err != nil {
+			c.fail(&Error{Code: CodeClosed, Message: "the body could not be read to its announced size: " + err.Error()})
+			return fmt.Errorf("read the body: %w", err)
+		}
+		if err := c.ch.Send(chunk); err != nil {
 			return c.sendFailed(err)
 		}
+		left -= int64(len(chunk))
 	}
 	return nil
 }
@@ -524,7 +640,7 @@ func (c *Client) Hello(ctx context.Context, device, token string) (Welcome, erro
 		frame["app"] = c.app
 	}
 	var w Welcome
-	err := c.request(ctx, frame, nil, func(in incoming) (bool, error) {
+	err := c.request(ctx, frame, nil, nil, func(in incoming) (bool, error) {
 		if in.t != "welcome" {
 			return false, protocolError("unexpected %s", in.t)
 		}
@@ -550,7 +666,7 @@ func (c *Client) Pair(ctx context.Context, kind, secret, name string) (Paired, W
 	var p Paired
 	var w Welcome
 	got := false
-	err := c.request(ctx, frame, nil, func(in incoming) (bool, error) {
+	err := c.request(ctx, frame, nil, nil, func(in incoming) (bool, error) {
 		switch {
 		case in.t == "paired" && !got:
 			device, ok1 := readString(in.frame["device"])
@@ -570,65 +686,11 @@ func (c *Client) Pair(ctx context.Context, kind, secret, name string) (Paired, W
 	return p, w, err
 }
 
-// Head returns the etag of the app's document, nil when there is none.
-func (c *Client) Head(ctx context.Context) (*string, error) {
-	var etag *string
-	err := c.request(ctx, map[string]any{"t": "head"}, nil, func(in incoming) (bool, error) {
-		e, ok := readEtag(in.frame)
-		if in.t != "head" || !ok {
-			return false, protocolError("unexpected %s", in.t)
-		}
-		etag = e
-		return true, nil
-	})
-	return etag, err
-}
-
-// Get returns the app's document and its etag: nil and an empty body when
-// there is none.
-func (c *Client) Get(ctx context.Context) (*string, []byte, error) {
-	var etag *string
-	var body []byte
-	err := c.request(ctx, map[string]any{"t": "get"}, nil, func(in incoming) (bool, error) {
-		e, ok := readEtag(in.frame)
-		if in.t != "doc" || !ok || in.body == nil {
-			return false, protocolError("unexpected %s", in.t)
-		}
-		etag, body = e, in.body
-		return true, nil
-	})
-	return etag, body, err
-}
-
-// Put writes body if the server's document still has ifEtag (nil: there is
-// none yet). It reports whether it was stored, and the etag: the new one, or
-// on a conflict the server's current one.
-func (c *Client) Put(ctx context.Context, ifEtag *string, body []byte) (bool, *string, error) {
-	if body == nil {
-		body = []byte{}
-	}
-	var stored bool
-	var etag *string
-	err := c.request(ctx, map[string]any{"t": "put", "ifEtag": ifEtag}, body, func(in incoming) (bool, error) {
-		e, ok := readEtag(in.frame)
-		switch {
-		case in.t == "stored" && ok && e != nil:
-			stored, etag = true, e
-		case in.t == "conflict" && ok:
-			stored, etag = false, e
-		default:
-			return false, protocolError("unexpected %s", in.t)
-		}
-		return true, nil
-	})
-	return stored, etag, err
-}
-
 // Apps asks for the server's app list, which a server tells only a
 // server-kind device. The listener set with OnApps hears it too.
 func (c *Client) Apps(ctx context.Context) ([]App, error) {
 	var list []App
-	err := c.request(ctx, map[string]any{"t": "apps"}, nil, func(in incoming) (bool, error) {
+	err := c.request(ctx, map[string]any{"t": "apps"}, nil, nil, func(in incoming) (bool, error) {
 		var err error
 		list, err = readApps(in.frame)
 		return true, err
@@ -654,7 +716,7 @@ func (c *Client) Announce(ctx context.Context, self Server, handover *Registry) 
 		}
 	}
 	var reg Registry
-	err := c.request(ctx, frame, nil, func(in incoming) (bool, error) {
+	err := c.request(ctx, frame, nil, nil, func(in incoming) (bool, error) {
 		if in.t != "devices" {
 			return false, protocolError("unexpected %s", in.t)
 		}
@@ -676,7 +738,7 @@ func (c *Client) Term(ctx context.Context, term int, self Server, device, token 
 		frame["device"], frame["token"] = device, token
 	}
 	var a TermAnswer
-	err := c.request(ctx, frame, nil, func(in incoming) (bool, error) {
+	err := c.request(ctx, frame, nil, nil, func(in incoming) (bool, error) {
 		var n float64
 		main, ok := readString(in.frame["main"])
 		if in.t != "term" || json.Unmarshal(in.frame["term"], &n) != nil || n < 0 || n != math.Trunc(n) || !ok {
@@ -700,7 +762,7 @@ type Invitation struct {
 // computer to pair with the main.
 func (c *Client) Invite(ctx context.Context) (Invitation, error) {
 	var inv Invitation
-	err := c.request(ctx, map[string]any{"t": "invite"}, nil, func(in incoming) (bool, error) {
+	err := c.request(ctx, map[string]any{"t": "invite"}, nil, nil, func(in incoming) (bool, error) {
 		code, ok1 := readString(in.frame["code"])
 		at, ok2 := readString(in.frame["expiresAt"])
 		expires, err := time.Parse(time.RFC3339, at)
@@ -740,10 +802,16 @@ func readString(raw json.RawMessage) (string, bool) {
 	return s, true
 }
 
-// readEtag reads the frame's etag, a string or null; ok is false when it is
-// missing or neither.
-func readEtag(frame map[string]json.RawMessage) (etag *string, ok bool) {
-	raw, present := frame["etag"]
+// readRevision reads the frame's revision, a string or null; ok is false
+// when it is missing or neither.
+func readRevision(frame map[string]json.RawMessage) (rev *string, ok bool) {
+	return readNullable(frame, "revision")
+}
+
+// readNullable reads the field name of frame, a string or null; ok is false
+// when it is missing or neither.
+func readNullable(frame map[string]json.RawMessage, name string) (*string, bool) {
+	raw, present := frame[name]
 	if !present {
 		return nil, false
 	}
@@ -757,10 +825,19 @@ func readEtag(frame map[string]json.RawMessage) (etag *string, ok bool) {
 	return &s, true
 }
 
+// readCount reads a whole number of 0 or more, at most 2^53.
+func readCount(raw json.RawMessage) (int64, bool) {
+	var n float64
+	if raw == nil || json.Unmarshal(raw, &n) != nil || n < 0 || n != math.Trunc(n) || n > 1<<53 {
+		return 0, false
+	}
+	return int64(n), true
+}
+
 func readWelcome(frame map[string]json.RawMessage) (Welcome, error) {
 	serverID, ok1 := readString(frame["serverId"])
 	name, ok2 := readString(frame["name"])
-	etag, ok3 := readEtag(frame)
+	rev, ok3 := readRevision(frame)
 	var hosts []string
 	ok4 := json.Unmarshal(frame["hosts"], &hosts) == nil && hosts != nil
 	for _, h := range hosts {
@@ -770,15 +847,43 @@ func readWelcome(frame map[string]json.RawMessage) (Welcome, error) {
 		return Welcome{}, protocolError("a malformed welcome")
 	}
 	role, _ := readString(frame["role"])
-	w := Welcome{ServerID: serverID, Name: name, Etag: etag, Hosts: hosts, Role: role}
-	var term float64
-	if raw, ok := frame["term"]; ok && json.Unmarshal(raw, &term) == nil && term >= 0 && term == math.Trunc(term) && term <= 1<<53 {
+	w := Welcome{ServerID: serverID, Name: name, Revision: rev, Hosts: hosts, Role: role}
+	if term, ok := readCount(frame["term"]); ok {
 		w.Term = int(term)
 	}
 	if raw, ok := frame["subordinates"]; ok {
 		w.Subordinates = readServers(raw)
 	}
+	if raw, ok := frame["diverged"]; ok {
+		list, ok := readDiverged(raw)
+		if !ok {
+			return Welcome{}, protocolError("a malformed welcome")
+		}
+		if len(list) > 0 {
+			w.Diverged = list
+		}
+	}
 	return w, nil
+}
+
+// readDiverged reads a list of diverged servers, never nil.
+func readDiverged(raw json.RawMessage) ([]DivergedServer, bool) {
+	var entries []struct {
+		ServerID *string `json:"serverId"`
+		Name     *string `json:"name"`
+		Since    *string `json:"since"`
+	}
+	if raw == nil || json.Unmarshal(raw, &entries) != nil || entries == nil {
+		return nil, false
+	}
+	out := make([]DivergedServer, 0, len(entries))
+	for _, e := range entries {
+		if e.ServerID == nil || *e.ServerID == "" || e.Name == nil || e.Since == nil {
+			return nil, false
+		}
+		out = append(out, DivergedServer{ServerID: *e.ServerID, Name: *e.Name, Since: *e.Since})
+	}
+	return out, true
 }
 
 // readServers reads a main's list of subordinates, never nil: an entry this

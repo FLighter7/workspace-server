@@ -134,8 +134,8 @@ func TestReplicaWhileTheMainIsAway(t *testing.T) {
 		t.Fatal("the restarted server is not a subordinate")
 	}
 	tab = sub.connect("todo", id, token)
-	if tab.welcome.Etag == nil || *tab.welcome.Etag != away {
-		t.Errorf("after the restart the device sees %v, want %s", tab.welcome.Etag, away)
+	if tab.welcome.Revision == nil || *tab.welcome.Revision != revOne(away) {
+		t.Errorf("after the restart the device sees %v, want the revision of %s", tab.welcome.Revision, away)
 	}
 
 	main.hub.RemoveDevice(id)

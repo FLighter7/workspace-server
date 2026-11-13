@@ -167,4 +167,77 @@ describe('ChannelFraming', () => {
 		expect(channel.listenerCount('message')).toBe(0);
 		expect(incoming).toEqual([]);
 	});
+
+	it('expects only the bytes past an offset', () => {
+		const { channel, incoming } = setup();
+
+		channel.receiveFrame({ t: 'doc', etag: 'e', bytes: 5, offset: 3 });
+		channel.receiveBinary([4, 5]);
+
+		expect(incoming).toEqual([
+			{ frame: { t: 'doc', etag: 'e', bytes: 5, offset: 3 }, body: Uint8Array.from([4, 5]) },
+		]);
+	});
+
+	it('delivers a body whose offset is its size at once, empty', () => {
+		const { channel, incoming } = setup();
+
+		channel.receiveFrame({ t: 'doc', etag: 'e', bytes: 5, offset: 5 });
+
+		expect(incoming).toEqual([
+			{ frame: { t: 'doc', etag: 'e', bytes: 5, offset: 5 }, body: new Uint8Array(0) },
+		]);
+	});
+
+	it('fails on an offset past the size', () => {
+		const { channel, failures } = setup();
+
+		channel.receiveFrame({ t: 'doc', etag: 'e', bytes: 5, offset: 6 });
+
+		expect(failures.map((error) => error.code)).toEqual(['protocol']);
+	});
+
+	it('streams a body to the receiver onBody gives, and delivers the frame after it', () => {
+		const channel = new FakeChannel();
+		const incoming: Incoming[] = [];
+		const pieces: number[][] = [];
+		new ChannelFraming(
+			channel,
+			(message) => incoming.push(message),
+			() => undefined,
+			(frame) => (frame.t === 'doc' ? (piece) => pieces.push([...piece]) : null),
+		);
+
+		channel.receiveFrame({ t: 'doc', etag: 'e', bytes: 3 });
+		channel.receiveBinary([1, 2]);
+		expect(pieces).toEqual([[1, 2]]);
+		expect(incoming).toEqual([]);
+		channel.receiveBinary([3]);
+
+		expect(pieces).toEqual([[1, 2], [3]]);
+		expect(incoming).toEqual([
+			{ frame: { t: 'doc', etag: 'e', bytes: 3 }, body: new Uint8Array(0), streamed: true },
+		]);
+	});
+
+	it('sends a Blob from an offset, read a slice at a time', async () => {
+		const { channel, framing } = setup();
+		const bytes = Uint8Array.from({ length: 40000 }, (_, i) => i % 251);
+
+		await framing.sendFrameWithBody({ t: 'put' }, new Blob([bytes]), 1000);
+
+		expect(channel.sentFrames()).toEqual([{ t: 'put', bytes: 40000, offset: 1000 }]);
+		const chunks = channel.sent.slice(1) as Uint8Array[];
+		expect(chunks.map((chunk) => chunk.byteLength)).toEqual([16384, 16384, 6232]);
+		expect(chunks[0][0]).toBe(1000 % 251);
+	});
+
+	it('refuses an offset past the body before sending anything', async () => {
+		const { channel, framing } = setup();
+
+		await expect(
+			framing.sendFrameWithBody({ t: 'put' }, new Uint8Array(2), 3),
+		).rejects.toBeInstanceOf(RangeError);
+		expect(channel.sent).toEqual([]);
+	});
 });

@@ -388,6 +388,17 @@ func (s *Store) List(app string) (Listing, error) {
 // document that is not there with that etag is ErrStale. A file that differs
 // from the index (an edit by hand) is reconciled first.
 func (s *Store) Open(app string, k Key, etag string) (*os.File, DocInfo, error) {
+	return s.open(app, k, &etag)
+}
+
+// OpenLatest opens the document k of app as Open does, whatever its etag. A
+// document that is not there is ErrStale.
+func (s *Store) OpenLatest(app string, k Key) (*os.File, DocInfo, error) {
+	return s.open(app, k, nil)
+}
+
+// open opens k if its etag is *etag, or whatever it is when etag is nil.
+func (s *Store) open(app string, k Key, etag *string) (*os.File, DocInfo, error) {
 	if err := k.Validate(); err != nil {
 		return nil, DocInfo{}, err
 	}
@@ -397,7 +408,7 @@ func (s *Store) Open(app string, k Key, etag string) (*os.File, DocInfo, error) 
 		ks := k.String()
 		for attempt := 0; ; attempt++ {
 			e, ok := a.idx.Docs[ks]
-			if !ok || e.Etag != etag {
+			if !ok || etag != nil && e.Etag != *etag {
 				return ErrStale
 			}
 			file, err := fsutil.OpenShared(s.docPath(app, ks))

@@ -12,8 +12,17 @@ export interface Pairing extends ServerTarget {
 	device: string;
 	/** This device's secret token; the server keeps only its hash. */
 	token: string;
-	/** The etag of the server's document at the last successful sync. */
+	/**
+	 * The etag of the synced document (`data.json`) at the last successful
+	 * sync; `null` when there was none.
+	 */
 	lastEtag: string | null;
+	/**
+	 * The revision of the app's set at the last successful sync: a sync that
+	 * finds the set still at it, with no local change since, reads nothing.
+	 * Absent from a record saved before a sync recorded one.
+	 */
+	lastRevision?: string | null;
 	/** ISO 8601 UTC of the last successful sync. */
 	lastSyncAt: string | null;
 	/**
@@ -106,7 +115,8 @@ function readPairing(value: unknown): Pairing | null {
 				.filter((server): server is FallbackServer => server !== null)
 		: [];
 	if (fallbacks.length > 0) pairing.fallbacks = fallbacks;
-	const { term } = raw;
+	const { lastRevision, term } = raw;
+	if (isNullableString(lastRevision)) pairing.lastRevision = lastRevision;
 	if (typeof term === 'number' && Number.isSafeInteger(term) && term > 0) pairing.term = term;
 
 	return pairing;

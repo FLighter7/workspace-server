@@ -1,9 +1,11 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -187,10 +189,106 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// fakeFile is a document body the fake backend opens: it counts its closes
+// and how much was read from it.
+type fakeFile struct {
+	*bytes.Reader
+	mu      sync.Mutex
+	closes  int
+	readErr error // returned once read reaches failAt
+	failAt  int64
+	read    int64
+}
+
+func (f *fakeFile) Read(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.readErr != nil && f.read+int64(len(p)) > f.failAt {
+		return 0, f.readErr
+	}
+	n, err := f.Reader.Read(p)
+	f.read += int64(n)
+	return n, err
+}
+
+func (f *fakeFile) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closes++
+	return nil
+}
+
+func (f *fakeFile) closeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closes
+}
+
+// fakeSink is a put's body as the fake backend stages it. It keeps the
+// bytes (the tests' bodies are small), and records every write.
+type fakeSink struct {
+	mu       sync.Mutex
+	data     []byte
+	writes   []int // the size of each write
+	closes   int
+	failAt   int64 // with failErr: the write that would reach past it fails
+	failErr  error
+	closeErr error
+}
+
+func (k *fakeSink) Write(p []byte) (int, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.closes > 0 {
+		return 0, &Error{CodeNoTransaction, "the body is closed"}
+	}
+	if k.failErr != nil && int64(len(k.data)+len(p)) > k.failAt {
+		n := int(k.failAt) - len(k.data)
+		k.data = append(k.data, p[:n]...)
+		k.writes = append(k.writes, n)
+		return n, k.failErr
+	}
+	k.data = append(k.data, p...)
+	k.writes = append(k.writes, len(p))
+	return len(p), nil
+}
+
+func (k *fakeSink) Close() error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.closes++
+	return k.closeErr
+}
+
+func (k *fakeSink) state() (data []byte, writes []int, closes int) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]byte(nil), k.data...), append([]int(nil), k.writes...), k.closes
+}
+
+type fakeDoc struct {
+	etag string
+	body []byte
+}
+
+type getCall struct {
+	app  string
+	key  Key
+	etag *string
+}
+
 type putCall struct {
-	app, device string
-	ifEtag      *string
-	body        []byte
+	app, device, tx string
+	key             Key
+	ifEtag          *string
+	size, offset    int64
+	sink            *fakeSink
+}
+
+type deleteCall struct {
+	app, device, tx string
+	key             Key
+	ifEtag          *string
 }
 
 // fakeBackend returns configured results and records its calls. Tests set the
@@ -207,19 +305,32 @@ type fakeBackend struct {
 	pairErr               *Error
 	onPair                func(s *Session)
 
-	headEtag *string
-	headErr  *Error
+	head    *string
+	headErr *Error
 
-	doc     []byte
-	docEtag *string
-	getErr  *Error
+	listing Listing
+	listErr *Error
 
-	maxBytes int64
+	docs     map[string]fakeDoc // by Key.String()
+	revision *string            // what a stale get names
+	getErr   *Error
+	file     func(*fakeFile) // tweaks each file Get opens
+	files    []*fakeFile
 
-	putEtag     string
-	putConflict bool
-	putCurrent  *string
-	putErr      *Error
+	began    []Staged
+	beginErr *Error
+
+	putErr *Error
+	sink   func() *fakeSink // makes each Sink; nil: a plain one
+
+	deleteErr *Error
+
+	committed Committed
+	conflict  *Conflict
+	commitErr *Error
+
+	abortErr   *Error
+	resolveErr *Error
 
 	apps    []AppInfo
 	appsErr *Error
@@ -238,11 +349,18 @@ type fakeBackend struct {
 	inviteErr     *Error
 
 	// calls logs every call in order: "hello", "hello returned", "pair",
-	// "pair returned", "head", "get", "maxBytes", "put", "forget", "closed".
+	// "pair returned", "head", "list", "get", "begin", "put", "delete",
+	// "commit", "abort", "resolve", "forget", "closed", and the servers'.
 	calls     []string
 	hellos    [][3]string // app, device, token
 	pairs     [][4]string // kind, app, secret, name
+	gets      []getCall
+	begins    [][3]string // app, device, tx
 	puts      []putCall
+	deletes   []deleteCall
+	commits   [][3]string // app, device, tx
+	aborts    [][3]string
+	resolves  [][4]string // app, device, server, keep
 	forgets   [][2]string // app, device
 	announces []ServerInfo
 }
@@ -252,8 +370,7 @@ func newFakeBackend() *fakeBackend {
 		welcome:    Welcome{ServerID: "S", Name: "Desk", Hosts: []string{"u.local", "192.168.1.5"}},
 		pairDevice: "d1",
 		pairToken:  "tok",
-		maxBytes:   1 << 20,
-		putEtag:    "e2",
+		docs:       map[string]fakeDoc{},
 	}
 }
 
@@ -296,29 +413,105 @@ func (b *fakeBackend) Head(app string) (*string, *Error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.calls = append(b.calls, "head")
-	return b.headEtag, b.headErr
+	return b.head, b.headErr
 }
 
-func (b *fakeBackend) Get(app string) ([]byte, *string, *Error) {
+func (b *fakeBackend) List(app string) (Listing, *Error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = append(b.calls, "list")
+	return b.listing, b.listErr
+}
+
+// setDoc makes the backend hold body as the document k, with etag.
+func (b *fakeBackend) setDoc(k Key, etag string, body []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.docs[k.String()] = fakeDoc{etag, body}
+}
+
+func (b *fakeBackend) Get(app string, k Key, etag *string) (Doc, *Stale, *Error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.calls = append(b.calls, "get")
-	return b.doc, b.docEtag, b.getErr
+	b.gets = append(b.gets, getCall{app, k, etag})
+	if b.getErr != nil {
+		return Doc{}, nil, b.getErr
+	}
+	d, ok := b.docs[k.String()]
+	if !ok || etag != nil && *etag != d.etag {
+		return Doc{}, &Stale{Revision: b.revision}, nil
+	}
+	f := &fakeFile{Reader: bytes.NewReader(d.body)}
+	if b.file != nil {
+		b.file(f)
+	}
+	b.files = append(b.files, f)
+	return Doc{DocInfo: DocInfo{Key: k, Etag: d.etag, Bytes: int64(len(d.body))}, Body: f}, nil, nil
 }
 
-func (b *fakeBackend) MaxBytes(app string) int64 {
+// openFiles returns the files Get opened.
+func (b *fakeBackend) openFiles() []*fakeFile {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.calls = append(b.calls, "maxBytes")
-	return b.maxBytes
+	return append([]*fakeFile(nil), b.files...)
 }
 
-func (b *fakeBackend) Put(from *Session, app, device string, ifEtag *string, body []byte) (string, bool, *string, *Error) {
+func (b *fakeBackend) Begin(app, device, tx string) ([]Staged, *Error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = append(b.calls, "begin")
+	b.begins = append(b.begins, [3]string{app, device, tx})
+	return b.began, b.beginErr
+}
+
+func (b *fakeBackend) Put(app, device, tx string, k Key, ifEtag *string, size, offset int64) (Sink, *Error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.calls = append(b.calls, "put")
-	b.puts = append(b.puts, putCall{app, device, ifEtag, append([]byte(nil), body...)})
-	return b.putEtag, b.putConflict, b.putCurrent, b.putErr
+	c := putCall{app: app, device: device, tx: tx, key: k, ifEtag: ifEtag, size: size, offset: offset}
+	if b.putErr != nil {
+		b.puts = append(b.puts, c)
+		return nil, b.putErr
+	}
+	c.sink = &fakeSink{}
+	if b.sink != nil {
+		c.sink = b.sink()
+	}
+	b.puts = append(b.puts, c)
+	return c.sink, nil
+}
+
+func (b *fakeBackend) Delete(app, device, tx string, k Key, ifEtag *string) *Error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = append(b.calls, "delete")
+	b.deletes = append(b.deletes, deleteCall{app, device, tx, k, ifEtag})
+	return b.deleteErr
+}
+
+func (b *fakeBackend) Commit(from *Session, app, device, tx string) (Committed, *Conflict, *Error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = append(b.calls, "commit")
+	b.commits = append(b.commits, [3]string{app, device, tx})
+	return b.committed, b.conflict, b.commitErr
+}
+
+func (b *fakeBackend) Abort(app, device, tx string) *Error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = append(b.calls, "abort")
+	b.aborts = append(b.aborts, [3]string{app, device, tx})
+	return b.abortErr
+}
+
+func (b *fakeBackend) Resolve(from *Session, app, device, server, keep string) *Error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = append(b.calls, "resolve")
+	b.resolves = append(b.resolves, [4]string{app, device, server, keep})
+	return b.resolveErr
 }
 
 func (b *fakeBackend) Forget(app, device string) {
@@ -396,3 +589,5 @@ func (b *fakeBackend) count(call string) int {
 	}
 	return n
 }
+
+var _ io.ReadSeekCloser = (*fakeFile)(nil)

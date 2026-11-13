@@ -26,6 +26,7 @@ import (
 
 	"github.com/FLighter7/workspace-server/internal/devices"
 	"github.com/FLighter7/workspace-server/internal/fsutil"
+	"github.com/FLighter7/workspace-server/internal/store"
 	"github.com/FLighter7/workspace-server/internal/wsclient"
 )
 
@@ -180,39 +181,48 @@ func (l *Link) keepTerm(term int) {
 	l.saveLocked()
 }
 
-// setUp records the etag the main's document of app has, as this server
+// setUp records the revision the main's set of app has, as this server
 // last heard it.
-func (l *Link) setUp(app string, etag *string) {
+func (l *Link) setUp(app string, rev *string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if etag == nil {
+	if rev == nil {
 		l.up[app] = nil
 		return
 	}
-	e := *etag
-	l.up[app] = &e
+	r := *rev
+	l.up[app] = &r
 }
 
-// inStep reports whether every app this server syncs holds the same
-// document here and on the main, as both last agreed. Apps the write guard
-// stopped are left out: they are settled by the sync rule at the next link.
+// inStep reports whether every app this server syncs holds the same set
+// here and on the main, as both last agreed: this server's revision and the
+// main's (as last heard) are both the base's, and no transaction of the
+// link is in flight. Apps the write guard stopped are left out: they are
+// settled by the sync rule at the next link.
 func (l *Link) inStep() bool {
 	l.mu.Lock()
 	apps := slices.Clone(l.syncing)
+	mainID := ""
+	if l.st != nil {
+		mainID = l.st.ServerID
+	}
 	l.mu.Unlock()
 	for _, app := range apps {
 		if l.isStopped(app) {
 			continue
 		}
-		_, local, err := l.d.Store.Read(app)
+		local, err := l.d.Store.Head(app)
 		if err != nil {
 			return false
 		}
-		base, agreed := l.base(app)
+		lk := l.linkOf(app, mainID)
 		l.mu.Lock()
 		up, heard := l.up[app]
 		l.mu.Unlock()
-		if !agreed || !heard || !same(local, base) || !same(up, base) {
+		if lk.Base == nil || lk.Pull != nil || lk.Push != nil || !heard {
+			return false
+		}
+		if base := store.RevisionOf(lk.Base); !same(local, base) || !same(up, base) {
 			return false
 		}
 	}
@@ -336,6 +346,9 @@ func (l *Link) Promote(ctx context.Context, force bool) (followed bool, err erro
 	clear(l.pushes)
 	clear(l.up)
 	l.mu.Unlock()
+	// A main has no base: should it follow another main again, that is a
+	// first link, never a comparison with what it agreed on long before.
+	l.forgetLinks()
 	if l.d.Admit != nil {
 		l.d.Admit(nil) // the main's devices are this server's own now
 	}
@@ -397,9 +410,10 @@ func (l *Link) Follow(sender string, term int, from wsclient.Server, device, tok
 }
 
 // relinkLocked points this subordinate's link at the main m of term, with
-// its own credential, and makes the link reconnect. The agreed etags stay:
-// an etag is the document's hash, the same on every server holding it. The
-// caller holds mu.
+// its own credential, and makes the link reconnect. The bases agreed with the
+// former main are not the new one's (the files plan's decision 6): the first
+// sync with it is a first link, which finds the two in step after a planned
+// switch. The caller holds mu.
 func (l *Link) relinkLocked(m wsclient.Server, term int) {
 	l.st.ServerID, l.st.Name, l.st.Password, l.st.Fingerprint, l.st.Port = m.ServerID, m.Name, m.Password, m.Fingerprint, m.Port
 	l.st.Hosts = append([]string(nil), m.Hosts...)
@@ -431,7 +445,7 @@ func (l *Link) stepDown(m wsclient.Server, device, token string, term int, sende
 		ServerID: m.ServerID, Name: m.Name, Password: m.Password, Fingerprint: m.Fingerprint, Port: m.Port,
 		Hosts:  append([]string(nil), m.Hosts...),
 		Device: device, Token: token, LinkedAt: l.d.Now().UTC(),
-		Apps: map[string]appState{}, Term: term, Handover: true,
+		Term: term, Handover: true,
 	}
 	if err := st.validate(); err != nil {
 		l.mu.Unlock()

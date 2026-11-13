@@ -23,8 +23,8 @@ import (
 // until Commit. A device has at most one open transaction per app; Begin with
 // another id discards the one it had. A transaction lives StagingTTL after
 // its last activity and survives a restart: received is saved as the body
-// arrives (every persistEvery bytes and when a put's body stops), so a put
-// cut off resumes from there.
+// arrives (at most every persistInterval, and when a put's body stops), so a
+// put cut off resumes from there.
 
 // syncFile flushes a body to disk; a test replaces it.
 var syncFile = (*os.File).Sync
@@ -42,9 +42,13 @@ func syncBody(path string) error {
 	return err
 }
 
-// persistEvery is how many bytes of a body arrive between two saves of
-// tx.json; a restart resumes the body from the last save.
-var persistEvery int64 = 8 << 20
+// persistInterval is the least time between two saves of tx.json while a
+// body arrives; a restart after a crash resumes the body from the last save,
+// so it loses at most this much of the transfer. A body that stops (its
+// session ended, complete or not) is saved at once, whatever the time. Each
+// save syncs the body first, which is what makes it costly: counted in bytes
+// (every 8 MiB) it halved a put's rate.
+var persistInterval = 5 * time.Second
 
 // stagingDir names the staging folder of transaction tx: its id in hex, so
 // that two ids that differ only in case (the client chooses them) never share
@@ -500,7 +504,7 @@ func (s *Store) Put(app, device, tx string, k Key, ifEtag *string, bytes, offset
 			sink = &Sink{done: true}
 			return err
 		}
-		sink = &Sink{s: s, a: a, t: t, key: ks, bytes: bytes, f: f, h: h, received: offset, saved: offset}
+		sink = &Sink{s: s, a: a, t: t, key: ks, bytes: bytes, f: f, h: h, received: offset, saved: offset, savedAt: t.rec.Active}
 		t.sinks[ks] = sink
 		return nil
 	})
@@ -582,9 +586,10 @@ type Sink struct {
 	f        *os.File
 	h        hash.Hash
 	received int64
-	saved    int64 // received as tx.json last recorded it
-	done     bool  // complete or closed
-	err      error // why the transaction ended under it
+	saved    int64     // received as tx.json last recorded it
+	savedAt  time.Time // when the Sink was opened or last recorded
+	done     bool      // complete or closed
+	err      error     // why the transaction ended under it
 }
 
 // Received returns how many bytes of the body have arrived.
@@ -646,7 +651,11 @@ func (k *Sink) Write(p []byte) (int, error) {
 		}
 		return n, k.record(received, etag, true)
 	}
-	persist := received-k.saved >= persistEvery
+	now := k.s.now()
+	persist := received > k.saved && now.Sub(k.savedAt) >= persistInterval
+	if persist {
+		k.savedAt = now // the next save waits a full interval, whatever this one takes
+	}
 	f := k.f
 	k.mu.Unlock()
 	if persist {

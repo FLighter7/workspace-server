@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -88,19 +89,36 @@ func (x *index) derive() {
 // lines "<key>\x00<etag>\n", sorted by key, byte for byte; nil for an empty
 // set. Two servers holding the same files have the same revision.
 func revisionOf(docs map[string]docEntry) *string {
-	if len(docs) == 0 {
+	return revision(len(docs), func(yield func(ks, etag string)) {
+		for ks, e := range docs {
+			yield(ks, e.Etag)
+		}
+	})
+}
+
+// RevisionOf returns the revision of a set given as its etags by key
+// (Key.String()): what Head and List report for a set of those documents.
+func RevisionOf(etags map[string]string) *string {
+	return revision(len(etags), func(yield func(ks, etag string)) {
+		for ks, etag := range etags {
+			yield(ks, etag)
+		}
+	})
+}
+
+func revision(n int, each func(yield func(ks, etag string))) *string {
+	if n == 0 {
 		return nil
 	}
-	keys := make([]string, 0, len(docs))
-	for ks := range docs {
-		keys = append(keys, ks)
-	}
-	slices.Sort(keys)
+	type line struct{ ks, etag string }
+	lines := make([]line, 0, n)
+	each(func(ks, etag string) { lines = append(lines, line{ks, etag}) })
+	slices.SortFunc(lines, func(a, b line) int { return strings.Compare(a.ks, b.ks) })
 	h := sha256.New()
-	for _, ks := range keys {
-		h.Write([]byte(ks))
+	for _, l := range lines {
+		h.Write([]byte(l.ks))
 		h.Write([]byte{0})
-		h.Write([]byte(docs[ks].Etag))
+		h.Write([]byte(l.etag))
 		h.Write([]byte{'\n'})
 	}
 	rev := hex.EncodeToString(h.Sum(nil))

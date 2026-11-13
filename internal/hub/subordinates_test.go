@@ -368,8 +368,8 @@ func TestReplicaAdmission(t *testing.T) {
 	}
 
 	s, fc := e.login(t, "192.168.1.9:5000", "todo", "Dev0123456789ab", "tok-main")
-	put(s, nil, []byte(`{"a":1}`))
-	waitFrames(t, fc, "stored", 1)
+	write(s, "data.json", nil, []byte(`{"a":1}`))
+	waitFrames(t, fc, "committed", 1)
 	e.login(t, "192.168.1.9:5001", "todo", own, ownToken) // the own device wins its id
 
 	for _, c := range []struct{ name, app, device, token string }{

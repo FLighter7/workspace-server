@@ -1,8 +1,9 @@
 {
 	"about": [
-		"Exchanges. A session is new, authenticated as device \"d1\" of app \"todo\", or a link session (authenticated as the server-kind device \"s1\", with no app). With the backend in the state given, a client call sends the client frame (and clientBody, if any); the server answers with the server frames (and serverBody); the call resolves with result or fails with the error code. push is a changed frame the server sends unasked; pushApps is an apps frame and pushDevices a devices frame (with pushRemoved as its removed) the server sends unasked; pushTakeOver is a takeOver frame the server sends unasked.",
+		"Exchanges. A session is new, authenticated as device \"d1\" of app \"todo\", or a link session (authenticated as the server-kind device \"s1\", with no app). With the backend in the state given, a client call sends the client frame (and clientBody, if any); the server answers with the server frames (and serverBody); the call resolves with result or fails with the error code. push is a changed frame the server sends unasked, with that revision; pushDiverged is a diverged frame and pushResolved a resolved frame the server sends unasked; pushApps is an apps frame and pushDevices a devices frame (with pushRemoved as its removed) the server sends unasked; pushTakeOver is a takeOver frame the server sends unasked.",
 		"closes: the server closes the channel after its frames. An error frame also carries a message, English text for a developer whose wording is the server's; it is not compared.",
-		"Bodies are UTF-8 text. backend keys: welcome, helloError, paired, pairError, head, doc, put ({stored} or {conflict}), putError, apps, appsError, devices, removed, announceError, invite ({code, expiresAt}), inviteError, term ({term, main}), termError. A welcome result holds role, term and subordinates when the frame carries them. A registry result is the list of devices, or {devices, removed} when the frame carries removed.",
+		"Bodies are UTF-8 text. A body follows the frame that announces it: a put's body is its bytes past its offset, a doc's body the document's bytes past the offset it names. backend keys: welcome, helloError, paired, pairError, head (a revision), list ({revision, docs, removed}: the whole set), listError, doc ({path, id, type, etag, body}: the document the server holds), stale (the revision a stale answer names), getError, began (what a begin returns to), beginError, putError, deleteError, committed ({revision, docs}), conflict ({revision, docs}), commitError, abortError, resolveError, apps, appsError, devices, removed, announceError, invite ({code, expiresAt}), inviteError, term ({term, main}), termError. pageSize, when given, is the most entries the server puts in one list page in that exchange: a server pages by at most 500, and a client counts on no size.",
+		"Results: head and changed resolve with the revision; list with the page ({revision, docs, removed, cursor?}) and get with the document ({path, id, type, etag, bytes, offset, body}), or either with {stale: revision} when the server answers stale; begin with {tx, staged}; put and delete with {path, id, type, received}; commit with {committed: true, revision, docs}, or {committed: false, revision, docs} on a conflict; abort with {tx}; resolve with {server}; diverged with its servers and resolved with its server. A cursor is opaque: a client sends back the one it got, with the revision of the page that named it. A welcome result holds role, term, subordinates and diverged when the frame carries them. A registry result is the list of devices, or {devices, removed} when the frame carries removed.",
 		"exchanges are spoken by every client. serverKind holds the exchanges of a server-kind device: a subordinate server linking to its main. The client package does not speak them; the server's Session and its Go client play them.",
 		"tolerated: frames one side accepts although the other side never sends them."
 	],
@@ -14,7 +15,7 @@
 				"welcome": {
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -42,7 +43,7 @@
 					"role": "main",
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -52,7 +53,7 @@
 			"result": {
 				"serverId": "Ab3dEf6hIj9k",
 				"name": "Desk",
-				"etag": "e1",
+				"revision": "e1",
 				"hosts": [
 					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 					"192.168.1.20"
@@ -67,7 +68,7 @@
 				"welcome": {
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": null,
+					"revision": null,
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -95,7 +96,7 @@
 					"role": "main",
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": null,
+					"revision": null,
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -105,7 +106,7 @@
 			"result": {
 				"serverId": "Ab3dEf6hIj9k",
 				"name": "Desk",
-				"etag": null,
+				"revision": null,
 				"hosts": [
 					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 					"192.168.1.20"
@@ -120,7 +121,7 @@
 				"welcome": {
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -161,7 +162,7 @@
 					"role": "main",
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -184,7 +185,7 @@
 			"result": {
 				"serverId": "Ab3dEf6hIj9k",
 				"name": "Desk",
-				"etag": "e1",
+				"revision": "e1",
 				"hosts": [
 					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 					"192.168.1.20"
@@ -212,7 +213,7 @@
 				"welcome": {
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -241,7 +242,7 @@
 					"role": "main",
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -252,7 +253,7 @@
 			"result": {
 				"serverId": "Ab3dEf6hIj9k",
 				"name": "Desk",
-				"etag": "e1",
+				"revision": "e1",
 				"hosts": [
 					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 					"192.168.1.20"
@@ -268,7 +269,7 @@
 				"welcome": {
 					"serverId": "Lp7tOp0123ab",
 					"name": "Laptop",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
 						"192.168.1.30"
@@ -299,7 +300,7 @@
 					"term": 2,
 					"serverId": "Lp7tOp0123ab",
 					"name": "Laptop",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
 						"192.168.1.30"
@@ -310,7 +311,7 @@
 			"result": {
 				"serverId": "Lp7tOp0123ab",
 				"name": "Laptop",
-				"etag": "e1",
+				"revision": "e1",
 				"hosts": [
 					"5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f.local",
 					"192.168.1.30"
@@ -359,7 +360,7 @@
 				"welcome": {
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -392,7 +393,7 @@
 					"role": "main",
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -405,7 +406,7 @@
 				"welcome": {
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -499,46 +500,6 @@
 			"error": "notMain"
 		},
 		{
-			"name": "head",
-			"session": "authenticated",
-			"backend": {
-				"head": "e1"
-			},
-			"call": {
-				"method": "head"
-			},
-			"client": {
-				"t": "head"
-			},
-			"server": [
-				{
-					"t": "head",
-					"etag": "e1"
-				}
-			],
-			"result": "e1"
-		},
-		{
-			"name": "head when there is no document",
-			"session": "authenticated",
-			"backend": {
-				"head": null
-			},
-			"call": {
-				"method": "head"
-			},
-			"client": {
-				"t": "head"
-			},
-			"server": [
-				{
-					"t": "head",
-					"etag": null
-				}
-			],
-			"result": null
-		},
-		{
 			"name": "head before hello",
 			"session": "new",
 			"backend": {},
@@ -558,206 +519,1448 @@
 			"error": "notAuthenticated"
 		},
 		{
+			"name": "hello to a server whose copy of the app diverged from its main's",
+			"session": "new",
+			"backend": {
+				"welcome": {
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"revision": "r1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					],
+					"role": "main",
+					"diverged": [
+						{
+							"serverId": "Lp7tOp0123ab",
+							"name": "Laptop",
+							"since": "2026-11-13T09:00:00Z"
+						}
+					]
+				}
+			},
+			"call": {
+				"method": "hello",
+				"app": "todo",
+				"device": "Dev0123456789ab",
+				"token": "tok-hello"
+			},
+			"client": {
+				"t": "hello",
+				"proto": 1,
+				"app": "todo",
+				"device": "Dev0123456789ab",
+				"token": "tok-hello"
+			},
+			"server": [
+				{
+					"t": "welcome",
+					"proto": 1,
+					"role": "main",
+					"serverId": "Ab3dEf6hIj9k",
+					"name": "Desk",
+					"revision": "r1",
+					"hosts": [
+						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+						"192.168.1.20"
+					],
+					"diverged": [
+						{
+							"serverId": "Lp7tOp0123ab",
+							"name": "Laptop",
+							"since": "2026-11-13T09:00:00Z"
+						}
+					]
+				}
+			],
+			"result": {
+				"serverId": "Ab3dEf6hIj9k",
+				"name": "Desk",
+				"revision": "r1",
+				"hosts": [
+					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
+					"192.168.1.20"
+				],
+				"role": "main",
+				"diverged": [
+					{
+						"serverId": "Lp7tOp0123ab",
+						"name": "Laptop",
+						"since": "2026-11-13T09:00:00Z"
+					}
+				]
+			}
+		},
+		{
+			"name": "head",
+			"session": "authenticated",
+			"backend": {
+				"head": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a"
+			},
+			"call": {
+				"method": "head"
+			},
+			"client": {
+				"t": "head"
+			},
+			"server": [
+				{
+					"t": "head",
+					"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a"
+				}
+			],
+			"result": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a"
+		},
+		{
+			"name": "head of an empty set",
+			"session": "authenticated",
+			"backend": {
+				"head": null
+			},
+			"call": {
+				"method": "head"
+			},
+			"client": {
+				"t": "head"
+			},
+			"server": [
+				{
+					"t": "head",
+					"revision": null
+				}
+			],
+			"result": null
+		},
+		{
+			"name": "list",
+			"session": "authenticated",
+			"backend": {
+				"list": {
+					"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
+					"docs": [
+						{
+							"path": "",
+							"id": "data",
+							"type": "json",
+							"etag": "e1",
+							"bytes": 12
+						},
+						{
+							"path": "photos/2026",
+							"id": "p1",
+							"type": "jpg",
+							"etag": "e2",
+							"bytes": 40000
+						}
+					],
+					"removed": [
+						{
+							"path": "notes",
+							"id": "old",
+							"type": "md",
+							"at": "2026-11-13T10:00:00Z"
+						}
+					]
+				}
+			},
+			"call": {
+				"method": "list"
+			},
+			"client": {
+				"t": "list"
+			},
+			"server": [
+				{
+					"t": "list",
+					"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
+					"docs": [
+						{
+							"path": "",
+							"id": "data",
+							"type": "json",
+							"etag": "e1",
+							"bytes": 12
+						},
+						{
+							"path": "photos/2026",
+							"id": "p1",
+							"type": "jpg",
+							"etag": "e2",
+							"bytes": 40000
+						}
+					],
+					"removed": [
+						{
+							"path": "notes",
+							"id": "old",
+							"type": "md",
+							"at": "2026-11-13T10:00:00Z"
+						}
+					]
+				}
+			],
+			"result": {
+				"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
+				"docs": [
+					{
+						"path": "",
+						"id": "data",
+						"type": "json",
+						"etag": "e1",
+						"bytes": 12
+					},
+					{
+						"path": "photos/2026",
+						"id": "p1",
+						"type": "jpg",
+						"etag": "e2",
+						"bytes": 40000
+					}
+				],
+				"removed": [
+					{
+						"path": "notes",
+						"id": "old",
+						"type": "md",
+						"at": "2026-11-13T10:00:00Z"
+					}
+				]
+			}
+		},
+		{
+			"name": "list of an empty set",
+			"session": "authenticated",
+			"backend": {
+				"list": {
+					"revision": null,
+					"docs": [],
+					"removed": []
+				}
+			},
+			"call": {
+				"method": "list"
+			},
+			"client": {
+				"t": "list"
+			},
+			"server": [
+				{
+					"t": "list",
+					"revision": null,
+					"docs": [],
+					"removed": []
+				}
+			],
+			"result": {
+				"revision": null,
+				"docs": [],
+				"removed": []
+			}
+		},
+		{
+			"name": "list of a set larger than a page, which names a cursor",
+			"session": "authenticated",
+			"backend": {
+				"list": {
+					"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
+					"docs": [
+						{
+							"path": "",
+							"id": "data",
+							"type": "json",
+							"etag": "e1",
+							"bytes": 12
+						},
+						{
+							"path": "photos/2026",
+							"id": "p1",
+							"type": "jpg",
+							"etag": "e2",
+							"bytes": 40000
+						}
+					],
+					"removed": [
+						{
+							"path": "notes",
+							"id": "old",
+							"type": "md",
+							"at": "2026-11-13T10:00:00Z"
+						}
+					]
+				}
+			},
+			"call": {
+				"method": "list"
+			},
+			"pageSize": 2,
+			"client": {
+				"t": "list"
+			},
+			"server": [
+				{
+					"t": "list",
+					"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
+					"docs": [
+						{
+							"path": "",
+							"id": "data",
+							"type": "json",
+							"etag": "e1",
+							"bytes": 12
+						},
+						{
+							"path": "photos/2026",
+							"id": "p1",
+							"type": "jpg",
+							"etag": "e2",
+							"bytes": 40000
+						}
+					],
+					"removed": [],
+					"cursor": "d:photos/2026/p1.jpg"
+				}
+			],
+			"result": {
+				"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
+				"docs": [
+					{
+						"path": "",
+						"id": "data",
+						"type": "json",
+						"etag": "e1",
+						"bytes": 12
+					},
+					{
+						"path": "photos/2026",
+						"id": "p1",
+						"type": "jpg",
+						"etag": "e2",
+						"bytes": 40000
+					}
+				],
+				"removed": [],
+				"cursor": "d:photos/2026/p1.jpg"
+			}
+		},
+		{
+			"name": "list of the next page, at the revision of the first",
+			"session": "authenticated",
+			"backend": {
+				"list": {
+					"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
+					"docs": [
+						{
+							"path": "",
+							"id": "data",
+							"type": "json",
+							"etag": "e1",
+							"bytes": 12
+						},
+						{
+							"path": "photos/2026",
+							"id": "p1",
+							"type": "jpg",
+							"etag": "e2",
+							"bytes": 40000
+						}
+					],
+					"removed": [
+						{
+							"path": "notes",
+							"id": "old",
+							"type": "md",
+							"at": "2026-11-13T10:00:00Z"
+						}
+					]
+				}
+			},
+			"call": {
+				"method": "list",
+				"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
+				"cursor": "d:photos/2026/p1.jpg"
+			},
+			"pageSize": 2,
+			"client": {
+				"t": "list",
+				"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
+				"cursor": "d:photos/2026/p1.jpg"
+			},
+			"server": [
+				{
+					"t": "list",
+					"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
+					"docs": [],
+					"removed": [
+						{
+							"path": "notes",
+							"id": "old",
+							"type": "md",
+							"at": "2026-11-13T10:00:00Z"
+						}
+					]
+				}
+			],
+			"result": {
+				"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
+				"docs": [],
+				"removed": [
+					{
+						"path": "notes",
+						"id": "old",
+						"type": "md",
+						"at": "2026-11-13T10:00:00Z"
+					}
+				]
+			}
+		},
+		{
+			"name": "list of the next page after the set changed",
+			"session": "authenticated",
+			"backend": {
+				"list": {
+					"revision": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b",
+					"docs": [
+						{
+							"path": "",
+							"id": "data",
+							"type": "json",
+							"etag": "e1",
+							"bytes": 12
+						},
+						{
+							"path": "photos/2026",
+							"id": "p1",
+							"type": "jpg",
+							"etag": "e2",
+							"bytes": 40000
+						}
+					],
+					"removed": [
+						{
+							"path": "notes",
+							"id": "old",
+							"type": "md",
+							"at": "2026-11-13T10:00:00Z"
+						}
+					]
+				}
+			},
+			"call": {
+				"method": "list",
+				"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
+				"cursor": "d:photos/2026/p1.jpg"
+			},
+			"pageSize": 2,
+			"client": {
+				"t": "list",
+				"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a",
+				"cursor": "d:photos/2026/p1.jpg"
+			},
+			"server": [
+				{
+					"t": "stale",
+					"revision": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b"
+				}
+			],
+			"result": {
+				"stale": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b"
+			}
+		},
+		{
 			"name": "get",
 			"session": "authenticated",
 			"backend": {
 				"doc": {
+					"path": "",
+					"id": "data",
+					"type": "json",
 					"etag": "e1",
 					"body": "{\"items\":[]}"
 				}
 			},
 			"call": {
-				"method": "get"
+				"method": "get",
+				"path": "",
+				"id": "data",
+				"type": "json"
 			},
 			"client": {
-				"t": "get"
+				"t": "get",
+				"path": "",
+				"id": "data",
+				"type": "json"
 			},
 			"server": [
 				{
 					"t": "doc",
+					"path": "",
+					"id": "data",
+					"type": "json",
 					"etag": "e1",
-					"bytes": 12
+					"bytes": 12,
+					"offset": 0
 				}
 			],
 			"serverBody": "{\"items\":[]}",
 			"result": {
+				"path": "",
+				"id": "data",
+				"type": "json",
 				"etag": "e1",
+				"bytes": 12,
+				"offset": 0,
 				"body": "{\"items\":[]}"
 			}
 		},
 		{
-			"name": "get when there is no document",
+			"name": "get at the etag of a listing",
 			"session": "authenticated",
 			"backend": {
 				"doc": {
-					"etag": null,
-					"body": ""
+					"path": "",
+					"id": "data",
+					"type": "json",
+					"etag": "e1",
+					"body": "{\"items\":[]}"
 				}
 			},
 			"call": {
-				"method": "get"
+				"method": "get",
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"etag": "e1"
 			},
 			"client": {
-				"t": "get"
+				"t": "get",
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"etag": "e1"
 			},
 			"server": [
 				{
 					"t": "doc",
-					"etag": null,
-					"bytes": 0
+					"path": "",
+					"id": "data",
+					"type": "json",
+					"etag": "e1",
+					"bytes": 12,
+					"offset": 0
 				}
 			],
-			"serverBody": "",
+			"serverBody": "{\"items\":[]}",
 			"result": {
-				"etag": null,
-				"body": ""
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"etag": "e1",
+				"bytes": 12,
+				"offset": 0,
+				"body": "{\"items\":[]}"
+			}
+		},
+		{
+			"name": "get that resumes from an offset",
+			"session": "authenticated",
+			"backend": {
+				"doc": {
+					"path": "",
+					"id": "data",
+					"type": "json",
+					"etag": "e1",
+					"body": "{\"items\":[]}"
+				}
+			},
+			"call": {
+				"method": "get",
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"etag": "e1",
+				"offset": 5
+			},
+			"client": {
+				"t": "get",
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"etag": "e1",
+				"offset": 5
+			},
+			"server": [
+				{
+					"t": "doc",
+					"path": "",
+					"id": "data",
+					"type": "json",
+					"etag": "e1",
+					"bytes": 12,
+					"offset": 5
+				}
+			],
+			"serverBody": "ms\":[]}",
+			"result": {
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"etag": "e1",
+				"bytes": 12,
+				"offset": 5,
+				"body": "ms\":[]}"
+			}
+		},
+		{
+			"name": "get of a document that changed since the listing",
+			"session": "authenticated",
+			"backend": {
+				"doc": {
+					"path": "",
+					"id": "data",
+					"type": "json",
+					"etag": "e1",
+					"body": "{\"items\":[]}"
+				},
+				"stale": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b"
+			},
+			"call": {
+				"method": "get",
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"etag": "e0"
+			},
+			"client": {
+				"t": "get",
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"etag": "e0"
+			},
+			"server": [
+				{
+					"t": "stale",
+					"revision": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b"
+				}
+			],
+			"result": {
+				"stale": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b"
+			}
+		},
+		{
+			"name": "get of a document that is not there",
+			"session": "authenticated",
+			"backend": {
+				"stale": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a"
+			},
+			"call": {
+				"method": "get",
+				"path": "photos/2026",
+				"id": "p1",
+				"type": "jpg"
+			},
+			"client": {
+				"t": "get",
+				"path": "photos/2026",
+				"id": "p1",
+				"type": "jpg"
+			},
+			"server": [
+				{
+					"t": "stale",
+					"revision": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a"
+				}
+			],
+			"result": {
+				"stale": "5d2f8a3c4b1e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a"
+			}
+		},
+		{
+			"name": "get of a path that breaks the rules",
+			"session": "authenticated",
+			"backend": {
+				"getError": "badPath"
+			},
+			"call": {
+				"method": "get",
+				"path": "",
+				"id": "Data",
+				"type": "json"
+			},
+			"client": {
+				"t": "get",
+				"path": "",
+				"id": "Data",
+				"type": "json"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "badPath"
+				}
+			],
+			"closes": false,
+			"error": "badPath"
+		},
+		{
+			"name": "begin",
+			"session": "authenticated",
+			"backend": {
+				"began": []
+			},
+			"call": {
+				"method": "begin",
+				"tx": "tx-0123456789abcdef"
+			},
+			"client": {
+				"t": "begin",
+				"tx": "tx-0123456789abcdef"
+			},
+			"server": [
+				{
+					"t": "began",
+					"tx": "tx-0123456789abcdef",
+					"staged": []
+				}
+			],
+			"result": {
+				"tx": "tx-0123456789abcdef",
+				"staged": []
+			}
+		},
+		{
+			"name": "begin that returns to a transaction, for resuming",
+			"session": "authenticated",
+			"backend": {
+				"began": [
+					{
+						"path": "photos/2026",
+						"id": "p1",
+						"type": "jpg",
+						"ifEtag": null,
+						"bytes": 40000,
+						"received": 16384
+					},
+					{
+						"path": "notes",
+						"id": "old",
+						"type": "md",
+						"delete": true,
+						"ifEtag": "e3",
+						"bytes": 0,
+						"received": 0
+					}
+				]
+			},
+			"call": {
+				"method": "begin",
+				"tx": "tx-0123456789abcdef"
+			},
+			"client": {
+				"t": "begin",
+				"tx": "tx-0123456789abcdef"
+			},
+			"server": [
+				{
+					"t": "began",
+					"tx": "tx-0123456789abcdef",
+					"staged": [
+						{
+							"path": "photos/2026",
+							"id": "p1",
+							"type": "jpg",
+							"ifEtag": null,
+							"bytes": 40000,
+							"received": 16384
+						},
+						{
+							"path": "notes",
+							"id": "old",
+							"type": "md",
+							"delete": true,
+							"ifEtag": "e3",
+							"bytes": 0,
+							"received": 0
+						}
+					]
+				}
+			],
+			"result": {
+				"tx": "tx-0123456789abcdef",
+				"staged": [
+					{
+						"path": "photos/2026",
+						"id": "p1",
+						"type": "jpg",
+						"ifEtag": null,
+						"bytes": 40000,
+						"received": 16384
+					},
+					{
+						"path": "notes",
+						"id": "old",
+						"type": "md",
+						"delete": true,
+						"ifEtag": "e3",
+						"bytes": 0,
+						"received": 0
+					}
+				]
 			}
 		},
 		{
 			"name": "put",
 			"session": "authenticated",
-			"backend": {
-				"put": {
-					"stored": "e2"
-				}
-			},
+			"backend": {},
 			"call": {
 				"method": "put",
+				"tx": "tx-0123456789abcdef",
+				"path": "",
+				"id": "data",
+				"type": "json",
 				"ifEtag": "e1",
+				"offset": 0,
 				"body": "{\"a\":1}"
 			},
 			"client": {
 				"t": "put",
+				"tx": "tx-0123456789abcdef",
+				"path": "",
+				"id": "data",
+				"type": "json",
 				"ifEtag": "e1",
-				"bytes": 7
+				"bytes": 7,
+				"offset": 0
 			},
 			"clientBody": "{\"a\":1}",
 			"server": [
 				{
-					"t": "stored",
-					"etag": "e2"
+					"t": "staged",
+					"path": "",
+					"id": "data",
+					"type": "json",
+					"received": 7
 				}
 			],
 			"result": {
-				"stored": true,
-				"etag": "e2"
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"received": 7
 			}
 		},
 		{
-			"name": "put when the client believes there is no document",
+			"name": "put of a new document",
 			"session": "authenticated",
-			"backend": {
-				"put": {
-					"stored": "e1"
-				}
-			},
+			"backend": {},
 			"call": {
 				"method": "put",
+				"tx": "tx-0123456789abcdef",
+				"path": "photos/2026",
+				"id": "p1",
+				"type": "jpg",
 				"ifEtag": null,
-				"body": "{}"
+				"offset": 0,
+				"body": "jpeg"
 			},
 			"client": {
 				"t": "put",
+				"tx": "tx-0123456789abcdef",
+				"path": "photos/2026",
+				"id": "p1",
+				"type": "jpg",
 				"ifEtag": null,
-				"bytes": 2
+				"bytes": 4,
+				"offset": 0
 			},
-			"clientBody": "{}",
+			"clientBody": "jpeg",
 			"server": [
 				{
-					"t": "stored",
-					"etag": "e1"
+					"t": "staged",
+					"path": "photos/2026",
+					"id": "p1",
+					"type": "jpg",
+					"received": 4
 				}
 			],
 			"result": {
-				"stored": true,
-				"etag": "e1"
+				"path": "photos/2026",
+				"id": "p1",
+				"type": "jpg",
+				"received": 4
 			}
 		},
 		{
-			"name": "put after another device wrote first",
+			"name": "put that resumes a body from an offset",
 			"session": "authenticated",
-			"backend": {
-				"put": {
-					"conflict": "e3"
-				}
-			},
+			"backend": {},
 			"call": {
 				"method": "put",
+				"tx": "tx-0123456789abcdef",
+				"path": "",
+				"id": "data",
+				"type": "json",
 				"ifEtag": "e1",
-				"body": "{}"
+				"offset": 3,
+				"body": "{\"a\":1}"
 			},
 			"client": {
 				"t": "put",
+				"tx": "tx-0123456789abcdef",
+				"path": "",
+				"id": "data",
+				"type": "json",
 				"ifEtag": "e1",
-				"bytes": 2
+				"bytes": 7,
+				"offset": 3
 			},
-			"clientBody": "{}",
+			"clientBody": "\":1}",
 			"server": [
 				{
-					"t": "conflict",
-					"etag": "e3"
+					"t": "staged",
+					"path": "",
+					"id": "data",
+					"type": "json",
+					"received": 7
 				}
 			],
 			"result": {
-				"stored": false,
-				"etag": "e3"
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"received": 7
 			}
 		},
 		{
-			"name": "put that conflicts with no document",
+			"name": "put that only changes the etag a complete body expects",
 			"session": "authenticated",
-			"backend": {
-				"put": {
-					"conflict": null
-				}
-			},
+			"backend": {},
 			"call": {
 				"method": "put",
-				"ifEtag": "e1",
-				"body": "{}"
+				"tx": "tx-0123456789abcdef",
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"ifEtag": "e2",
+				"offset": 7,
+				"body": "{\"a\":1}"
 			},
 			"client": {
 				"t": "put",
-				"ifEtag": "e1",
-				"bytes": 2
+				"tx": "tx-0123456789abcdef",
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"ifEtag": "e2",
+				"bytes": 7,
+				"offset": 7
 			},
-			"clientBody": "{}",
 			"server": [
 				{
-					"t": "conflict",
-					"etag": null
+					"t": "staged",
+					"path": "",
+					"id": "data",
+					"type": "json",
+					"received": 7
 				}
 			],
 			"result": {
-				"stored": false,
-				"etag": null
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"received": 7
 			}
 		},
 		{
-			"name": "put of a body that is not JSON",
+			"name": "put past the app's quota, whose body the server discards",
 			"session": "authenticated",
 			"backend": {
-				"putError": "notJson"
+				"putError": "quota"
 			},
 			"call": {
 				"method": "put",
-				"ifEtag": "e1",
-				"body": "nope"
+				"tx": "tx-0123456789abcdef",
+				"path": "photos/2026",
+				"id": "p1",
+				"type": "jpg",
+				"ifEtag": null,
+				"offset": 0,
+				"body": "jpeg"
 			},
 			"client": {
 				"t": "put",
-				"ifEtag": "e1",
-				"bytes": 4
+				"tx": "tx-0123456789abcdef",
+				"path": "photos/2026",
+				"id": "p1",
+				"type": "jpg",
+				"ifEtag": null,
+				"bytes": 4,
+				"offset": 0
 			},
-			"clientBody": "nope",
+			"clientBody": "jpeg",
 			"server": [
 				{
 					"t": "error",
-					"code": "notJson"
+					"code": "quota"
 				}
 			],
 			"closes": false,
-			"error": "notJson"
+			"error": "quota"
+		},
+		{
+			"name": "put of a path that breaks the rules",
+			"session": "authenticated",
+			"backend": {
+				"putError": "badPath"
+			},
+			"call": {
+				"method": "put",
+				"tx": "tx-0123456789abcdef",
+				"path": "Photos",
+				"id": "p1",
+				"type": "jpg",
+				"ifEtag": null,
+				"offset": 0,
+				"body": "jpeg"
+			},
+			"client": {
+				"t": "put",
+				"tx": "tx-0123456789abcdef",
+				"path": "Photos",
+				"id": "p1",
+				"type": "jpg",
+				"ifEtag": null,
+				"bytes": 4,
+				"offset": 0
+			},
+			"clientBody": "jpeg",
+			"server": [
+				{
+					"t": "error",
+					"code": "badPath"
+				}
+			],
+			"closes": false,
+			"error": "badPath"
+		},
+		{
+			"name": "put to a transaction that is gone",
+			"session": "authenticated",
+			"backend": {
+				"putError": "noTransaction"
+			},
+			"call": {
+				"method": "put",
+				"tx": "tx-0123456789abcdef",
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"ifEtag": "e1",
+				"offset": 0,
+				"body": "{}"
+			},
+			"client": {
+				"t": "put",
+				"tx": "tx-0123456789abcdef",
+				"path": "",
+				"id": "data",
+				"type": "json",
+				"ifEtag": "e1",
+				"bytes": 2,
+				"offset": 0
+			},
+			"clientBody": "{}",
+			"server": [
+				{
+					"t": "error",
+					"code": "noTransaction"
+				}
+			],
+			"closes": false,
+			"error": "noTransaction"
+		},
+		{
+			"name": "delete",
+			"session": "authenticated",
+			"backend": {},
+			"call": {
+				"method": "delete",
+				"tx": "tx-0123456789abcdef",
+				"path": "notes",
+				"id": "old",
+				"type": "md",
+				"ifEtag": "e3"
+			},
+			"client": {
+				"t": "delete",
+				"tx": "tx-0123456789abcdef",
+				"path": "notes",
+				"id": "old",
+				"type": "md",
+				"ifEtag": "e3"
+			},
+			"server": [
+				{
+					"t": "staged",
+					"path": "notes",
+					"id": "old",
+					"type": "md",
+					"received": 0
+				}
+			],
+			"result": {
+				"path": "notes",
+				"id": "old",
+				"type": "md",
+				"received": 0
+			}
+		},
+		{
+			"name": "commit",
+			"session": "authenticated",
+			"backend": {
+				"committed": {
+					"revision": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b",
+					"docs": [
+						{
+							"path": "",
+							"id": "data",
+							"type": "json",
+							"etag": "e4"
+						},
+						{
+							"path": "notes",
+							"id": "old",
+							"type": "md",
+							"etag": null
+						}
+					]
+				}
+			},
+			"call": {
+				"method": "commit",
+				"tx": "tx-0123456789abcdef"
+			},
+			"client": {
+				"t": "commit",
+				"tx": "tx-0123456789abcdef"
+			},
+			"server": [
+				{
+					"t": "committed",
+					"revision": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b",
+					"docs": [
+						{
+							"path": "",
+							"id": "data",
+							"type": "json",
+							"etag": "e4"
+						},
+						{
+							"path": "notes",
+							"id": "old",
+							"type": "md",
+							"etag": null
+						}
+					]
+				}
+			],
+			"result": {
+				"committed": true,
+				"revision": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b",
+				"docs": [
+					{
+						"path": "",
+						"id": "data",
+						"type": "json",
+						"etag": "e4"
+					},
+					{
+						"path": "notes",
+						"id": "old",
+						"type": "md",
+						"etag": null
+					}
+				]
+			}
+		},
+		{
+			"name": "commit after another device wrote first, which leaves the transaction open",
+			"session": "authenticated",
+			"backend": {
+				"conflict": {
+					"revision": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b",
+					"docs": [
+						{
+							"path": "",
+							"id": "data",
+							"type": "json",
+							"etag": "e5"
+						},
+						{
+							"path": "photos/2026",
+							"id": "p1",
+							"type": "jpg",
+							"etag": null
+						}
+					]
+				}
+			},
+			"call": {
+				"method": "commit",
+				"tx": "tx-0123456789abcdef"
+			},
+			"client": {
+				"t": "commit",
+				"tx": "tx-0123456789abcdef"
+			},
+			"server": [
+				{
+					"t": "conflict",
+					"revision": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b",
+					"docs": [
+						{
+							"path": "",
+							"id": "data",
+							"type": "json",
+							"etag": "e5"
+						},
+						{
+							"path": "photos/2026",
+							"id": "p1",
+							"type": "jpg",
+							"etag": null
+						}
+					]
+				}
+			],
+			"result": {
+				"committed": false,
+				"revision": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b",
+				"docs": [
+					{
+						"path": "",
+						"id": "data",
+						"type": "json",
+						"etag": "e5"
+					},
+					{
+						"path": "photos/2026",
+						"id": "p1",
+						"type": "jpg",
+						"etag": null
+					}
+				]
+			}
+		},
+		{
+			"name": "commit with a body that has not fully arrived",
+			"session": "authenticated",
+			"backend": {
+				"commitError": "incomplete"
+			},
+			"call": {
+				"method": "commit",
+				"tx": "tx-0123456789abcdef"
+			},
+			"client": {
+				"t": "commit",
+				"tx": "tx-0123456789abcdef"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "incomplete"
+				}
+			],
+			"closes": false,
+			"error": "incomplete"
+		},
+		{
+			"name": "commit past the app's quota",
+			"session": "authenticated",
+			"backend": {
+				"commitError": "quota"
+			},
+			"call": {
+				"method": "commit",
+				"tx": "tx-0123456789abcdef"
+			},
+			"client": {
+				"t": "commit",
+				"tx": "tx-0123456789abcdef"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "quota"
+				}
+			],
+			"closes": false,
+			"error": "quota"
+		},
+		{
+			"name": "commit of a transaction that is gone",
+			"session": "authenticated",
+			"backend": {
+				"commitError": "noTransaction"
+			},
+			"call": {
+				"method": "commit",
+				"tx": "tx-0123456789abcdef"
+			},
+			"client": {
+				"t": "commit",
+				"tx": "tx-0123456789abcdef"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "noTransaction"
+				}
+			],
+			"closes": false,
+			"error": "noTransaction"
+		},
+		{
+			"name": "commit to a path that something else holds on disk",
+			"session": "authenticated",
+			"backend": {
+				"commitError": "badPath"
+			},
+			"call": {
+				"method": "commit",
+				"tx": "tx-0123456789abcdef"
+			},
+			"client": {
+				"t": "commit",
+				"tx": "tx-0123456789abcdef"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "badPath"
+				}
+			],
+			"closes": false,
+			"error": "badPath"
+		},
+		{
+			"name": "abort",
+			"session": "authenticated",
+			"backend": {},
+			"call": {
+				"method": "abort",
+				"tx": "tx-0123456789abcdef"
+			},
+			"client": {
+				"t": "abort",
+				"tx": "tx-0123456789abcdef"
+			},
+			"server": [
+				{
+					"t": "aborted",
+					"tx": "tx-0123456789abcdef"
+				}
+			],
+			"result": {
+				"tx": "tx-0123456789abcdef"
+			}
+		},
+		{
+			"name": "resolve",
+			"session": "authenticated",
+			"backend": {},
+			"call": {
+				"method": "resolve",
+				"server": "Lp7tOp0123ab",
+				"keep": "main"
+			},
+			"client": {
+				"t": "resolve",
+				"server": "Lp7tOp0123ab",
+				"keep": "main"
+			},
+			"server": [
+				{
+					"t": "resolved",
+					"server": "Lp7tOp0123ab"
+				}
+			],
+			"result": {
+				"server": "Lp7tOp0123ab"
+			}
+		},
+		{
+			"name": "changed",
+			"session": "authenticated",
+			"backend": {},
+			"push": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b",
+			"server": [
+				{
+					"t": "changed",
+					"revision": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b"
+				}
+			],
+			"result": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b"
+		},
+		{
+			"name": "changed to an empty set",
+			"session": "authenticated",
+			"backend": {},
+			"push": null,
+			"server": [
+				{
+					"t": "changed",
+					"revision": null
+				}
+			],
+			"result": null
+		},
+		{
+			"name": "diverged",
+			"session": "authenticated",
+			"backend": {},
+			"pushDiverged": [
+				{
+					"serverId": "Lp7tOp0123ab",
+					"name": "Laptop",
+					"since": "2026-11-13T09:00:00Z"
+				}
+			],
+			"server": [
+				{
+					"t": "diverged",
+					"servers": [
+						{
+							"serverId": "Lp7tOp0123ab",
+							"name": "Laptop",
+							"since": "2026-11-13T09:00:00Z"
+						}
+					]
+				}
+			],
+			"result": [
+				{
+					"serverId": "Lp7tOp0123ab",
+					"name": "Laptop",
+					"since": "2026-11-13T09:00:00Z"
+				}
+			]
+		},
+		{
+			"name": "resolved pushed when another device settled the divergence",
+			"session": "authenticated",
+			"backend": {},
+			"pushResolved": "Lp7tOp0123ab",
+			"server": [
+				{
+					"t": "resolved",
+					"server": "Lp7tOp0123ab"
+				}
+			],
+			"result": "Lp7tOp0123ab"
 		},
 		{
 			"name": "forget",
@@ -772,19 +1975,6 @@
 			"server": [],
 			"closes": true,
 			"result": null
-		},
-		{
-			"name": "changed",
-			"session": "authenticated",
-			"backend": {},
-			"push": "e2",
-			"server": [
-				{
-					"t": "changed",
-					"etag": "e2"
-				}
-			],
-			"result": "e2"
 		}
 	],
 	"serverKind": [
@@ -799,7 +1989,7 @@
 				"welcome": {
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": null,
+					"revision": null,
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -832,7 +2022,7 @@
 					"role": "main",
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": null,
+					"revision": null,
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -845,7 +2035,7 @@
 				"welcome": {
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": null,
+					"revision": null,
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -887,7 +2077,7 @@
 				"welcome": {
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": null,
+					"revision": null,
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -913,7 +2103,7 @@
 					"role": "main",
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": null,
+					"revision": null,
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -923,7 +2113,7 @@
 			"result": {
 				"serverId": "Ab3dEf6hIj9k",
 				"name": "Desk",
-				"etag": null,
+				"revision": null,
 				"hosts": [
 					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 					"192.168.1.20"
@@ -938,7 +2128,7 @@
 				"welcome": {
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -966,7 +2156,7 @@
 					"role": "main",
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -976,7 +2166,7 @@
 			"result": {
 				"serverId": "Ab3dEf6hIj9k",
 				"name": "Desk",
-				"etag": "e1",
+				"revision": "e1",
 				"hosts": [
 					"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 					"192.168.1.20"
@@ -2069,6 +3259,92 @@
 				}
 			],
 			"result": "takeOver"
+		},
+		{
+			"name": "list on a link session, which has no documents",
+			"session": "link",
+			"backend": {},
+			"call": {
+				"method": "list"
+			},
+			"client": {
+				"t": "list"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "protocol"
+				}
+			],
+			"closes": true,
+			"error": "protocol"
+		},
+		{
+			"name": "get on a link session, which has no documents",
+			"session": "link",
+			"backend": {},
+			"call": {
+				"method": "get",
+				"path": "",
+				"id": "data",
+				"type": "json"
+			},
+			"client": {
+				"t": "get",
+				"path": "",
+				"id": "data",
+				"type": "json"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "protocol"
+				}
+			],
+			"closes": true,
+			"error": "protocol"
+		},
+		{
+			"name": "begin on a link session, which has no documents",
+			"session": "link",
+			"backend": {},
+			"call": {
+				"method": "begin",
+				"tx": "tx-0123456789abcdef"
+			},
+			"client": {
+				"t": "begin",
+				"tx": "tx-0123456789abcdef"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "protocol"
+				}
+			],
+			"closes": true,
+			"error": "protocol"
+		},
+		{
+			"name": "commit on a link session, which has no documents",
+			"session": "link",
+			"backend": {},
+			"call": {
+				"method": "commit",
+				"tx": "tx-0123456789abcdef"
+			},
+			"client": {
+				"t": "commit",
+				"tx": "tx-0123456789abcdef"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "protocol"
+				}
+			],
+			"closes": true,
+			"error": "protocol"
 		}
 	],
 	"tolerated": {
@@ -2077,7 +3353,12 @@
 				"name": "a put with no ifEtag reads as null",
 				"frame": {
 					"t": "put",
-					"bytes": 2
+					"tx": "tx-0123456789abcdef",
+					"path": "",
+					"id": "data",
+					"type": "json",
+					"bytes": 2,
+					"offset": 0
 				},
 				"body": "{}",
 				"ifEtag": null
@@ -2103,6 +3384,30 @@
 					"token": "tok-hello",
 					"future": true
 				}
+			},
+			{
+				"name": "a put with no offset starts at 0",
+				"frame": {
+					"t": "put",
+					"tx": "tx-0123456789abcdef",
+					"path": "",
+					"id": "data",
+					"type": "json",
+					"ifEtag": "e1",
+					"bytes": 2
+				},
+				"body": "{}",
+				"ifEtag": "e1"
+			},
+			{
+				"name": "a get with a null etag reads the document as it is",
+				"frame": {
+					"t": "get",
+					"path": "",
+					"id": "data",
+					"type": "json",
+					"etag": null
+				}
 			}
 		],
 		"server": [
@@ -2120,7 +3425,7 @@
 						"proto": 1,
 						"serverId": "Ab3dEf6hIj9k",
 						"name": "Desk",
-						"etag": "e1",
+						"revision": "e1",
 						"hosts": [
 							"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 							"192.168.1.20"
@@ -2131,7 +3436,7 @@
 				"result": {
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"
@@ -2153,7 +3458,7 @@
 						"role": "main",
 						"serverId": "Ab3dEf6hIj9k",
 						"name": "Desk",
-						"etag": "e1",
+						"revision": "e1",
 						"hosts": [
 							"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 							"192.168.1.20"
@@ -2187,7 +3492,7 @@
 				"result": {
 					"serverId": "Ab3dEf6hIj9k",
 					"name": "Desk",
-					"etag": "e1",
+					"revision": "e1",
 					"hosts": [
 						"0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local",
 						"192.168.1.20"

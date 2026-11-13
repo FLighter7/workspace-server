@@ -22,6 +22,19 @@ describe('createPairingStore', () => {
 		expect(storage.getItem(KEY)).not.toBeNull();
 	});
 
+	it('keeps the revision of the last sync, null included, and leaves out one that does not read', () => {
+		const { storage, store } = setup();
+
+		for (const lastRevision of ['r1', null]) {
+			const pairing = makePairing({ lastEtag: 'e1', lastRevision });
+			store.save(pairing);
+			expect(store.load()).toEqual(pairing);
+		}
+
+		storage.setItem(KEY, JSON.stringify({ ...makePairing(), lastRevision: 7 }));
+		expect(store.load()).not.toHaveProperty('lastRevision');
+	});
+
 	it('reads a record saved before the package existed', () => {
 		// The todo app saved exactly this shape under this key; devices paired
 		// then must not have to pair again.

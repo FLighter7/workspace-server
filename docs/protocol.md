@@ -13,6 +13,7 @@ This is the contract between `workspace-server` and an app's client. The referen
   - no message is exchanged before the first STUN packet.
 - **Authentication:** DTLS is authenticated by the server certificate's fingerprint, pinned in the pairing code. After that the device sends `hello` with its token, or `pair` with a one-time secret.
 - **Scope:** IPv4 and the local network only.
+- **The data:** each app holds a set of documents, plain files on the server's disk, in any format. A device lists the set, reads documents at the etags the listing named, and writes them in transactions that apply all or nothing and fail on a conflict; bodies are streamed in pieces, and a read or a write cut off resumes from where it stopped. See "Documents and the set" and "Transactions".
 - **Servers as clients:** a workspace-server can link to another as its subordinate. It speaks this same protocol as a device of kind `server`; see "Servers: roles, server-kind devices and link sessions". An app's client never needs that part.
 - **Fallback servers:** a main lists its subordinates in every `welcome`, and a device may sync with any of them, with the same device id and token, when the main is out of reach; see "Subordinates: fallback servers for a device".
 - **Switching the main:** a subordinate can take the role of main over; every `welcome` names the family's `term`, and a device follows the main of the highest term it reaches; see "Switching the main".
@@ -102,82 +103,158 @@ a=max-message-size:262144
   - the server stops.
 - **When the data channel closes, the client should close its peer connection.** Otherwise a connection whose server went away lingers.
 
+
 ## Limits
 
 - **Sessions:** at most 64 at once, authenticated or not. Binding requests beyond that are ignored.
-- **Unread replies:** a session whose replies and pushes waiting to be sent exceed the app's `maxBytes` plus 1 MiB (1 MiB before authentication) is closed, without an error frame. A client that reads what it asks for never comes near it; one that repeats `get` without reading the `doc`s does.
+- **Unread replies:** what the server has queued for a session and not yet sent may hold at most 1 MiB of text frames and at most 4 `doc` bodies besides the one being sent; a body waits in the queue as an open file, never as its bytes. A session that would queue more is closed, without an error frame. A client that reads what it asks for never comes near it; one that repeats `get` without reading the `doc`s does. A text frame that finds the queue empty is always taken.
 - **Failed attempts:** an IP is blocked at its 10th failed `hello`/`pair` within a minute, for 10 minutes from that failure.
   - While it is blocked, every `hello` and `pair` from it gets `error {code: 'blocked'}` and the channel closes.
   - Nothing is checked and no pairing secret is consumed.
   - `blocked` is temporary, and the pairing still stands. A client keeps its pairing, tells the user to wait a few minutes, and retries later.
   - Attempts made during the block do not extend it.
-- **Document size:** each app has a `maxBytes` limit, 64 MiB by default (see `tooLarge` below).
+- **The quota:** each app's documents together may take at most its quota, 50 MiB by default, set on the server's page (see `quota` below).
+- **A list page** carries at most 500 entries, documents and tombstones together. A client counts on no page size.
 
 ## Framing
 
 - **Text frames:** JSON objects with a `t` field.
-- **Bodies:** a frame that announces a body carries `bytes`. That is `put` from the client and `doc` from the server.
-  - Exactly that many bytes follow, as binary messages of at most 16 KiB each.
+- **Bodies:** a frame that announces a body carries `bytes`, the document's whole size, and `offset`, where the body starts (0 when absent). That is `put` from the client and `doc` from the server.
+  - Exactly `bytes − offset` bytes follow: the document's bytes past the offset, as binary messages, cut into pieces of at most 16 KiB from the offset on. A receiver takes pieces of any size up to 16 KiB.
+  - No binary message follows when `offset` equals `bytes`.
   - One body is in flight per direction at a time.
   - A binary message that arrives when no body is expected, or that overruns the announced size, is a protocol error.
-- **Order:** the server never interleaves a text frame inside a body it is sending. Frames requested meanwhile go after the body.
+- **Order:** the server never interleaves a text frame inside a body it is sending. Frames requested meanwhile go after the body. Every answer to a `put` follows its body, a refusal included.
 - **Flow control:** a sender pauses while more than 1 MiB waits in the channel's buffer, and resumes when the buffer drains to 256 KiB.
+- **Streaming:** neither side needs a body whole in memory. The server writes a `put` body to disk as its pieces arrive and sends a `doc` body from the file as the channel takes it; the reference client sends a `Blob` a slice at a time and can hand a `doc` body to the app piece by piece.
+
+## Documents and the set
+
+An app holds a **set** of documents, kept by the server as plain files in the app's folder.
+
+- **A document** is named by a key of three parts, which every frame about a document carries:
+  - `path`: its folder, `""` for the app's root, otherwise segments of `[a-z0-9_-]` joined by `/`, at most 10 of them;
+  - `id`: `[a-z0-9_-]{1,64}`, chosen by the client;
+  - `type`: `[a-z0-9]{1,8}`, the file's extension, part of the identity (`a/r.jpg` and `a/r.png` are two documents).
+
+  The server keeps it as `<path>/<id>.<type>`, `<id>.<type>` at the root: its **canonical form**, at most 255 characters. No segment and no id may be a Windows device name (`con`, `prn`, `aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`). Uppercase, dots and empty segments are not allowed. A key that breaks a rule is refused with `badPath`. Moving a document is deleting it and creating another. The server checks no format: the bytes are the app's.
+- **`etag`** is the lowercase hex SHA-256 of a document's bytes, so two identical writes agree, on every server.
+- **`revision`** names the whole set: the lowercase hex SHA-256 of the lines `<canonical key>\0<etag>\n`, sorted by key byte for byte, or `null` for an empty set. Servers holding the same files have the same revision, so a client compares sets by it alone.
+- **Tombstones:** the set lists the documents deleted from it, with when (`at`, RFC 3339 UTC), the newest 1,000. A document created again drops its tombstone.
+- **Files changed by hand:** the server checks the app's folder at every `hello` for the app, and takes in what changed there: a changed file gets a new etag, a new file with a valid name becomes a document, a vanished one a tombstone. The set then has a new revision, and every session of the app gets `changed`. A file whose name is not a key is not a document, and is never shown or touched.
 
 ## Messages
 
 The first client frame, `hello` or `pair`, carries `proto: 1`. Any other number gets `error {code: 'protocol'}` and the channel closes.
 
-| Client → server                                         | Server → client                                                                                             |
-| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `hello {proto, app, device, token}`                     | `welcome {proto, role, term, serverId, name, etag, hosts, subordinates}`, or `error` and the channel closes |
-| `pair {proto, app, secret, name}`                       | `paired {device, token}` then `welcome {…}`, or `error` (closes unless `unknownApp`)                        |
-| `head`                                                  | `head {etag}`                                                                                               |
-| `get`                                                   | `doc {etag, bytes}` + body (`etag: null`, `bytes: 0` when there is none)                                    |
-| `put {ifEtag, bytes}` + body                            | `stored {etag}` or `conflict {etag}`                                                                        |
-| `forget`                                                | the device entry is deleted; the server closes every session of the device                                  |
-| `apps` (server-kind devices only)                       | `apps {apps}`                                                                                               |
-| `announce {server, devices?, removed?}` (link sessions) | `devices {devices, removed}`                                                                                |
-| `invite` (link sessions)                                | `invited {code, expiresAt}`                                                                                 |
-| `term {term, server, device?, token?}` (link sessions)  | `term {term, main}`                                                                                         |
-|                                                         | `changed {etag}`: to every other session of the same app after a stored write                               |
-|                                                         | `apps {apps}`: to every link session after the server's app list changes                                    |
-|                                                         | `devices {devices, removed}`: to every link session that announced, after the device registry changes       |
-|                                                         | `takeOver`: to a subordinate's link session, when its main hands it the role of main                        |
-|                                                         | `error {code, message}`                                                                                     |
+`proto` stayed 1 when the set of documents, with its transactions, replaced the single JSON document an app had before (2026-11-13): nothing had been released. A client of the single document cannot sync with this server.
+
+| Client → server | Server → client |
+| --- | --- |
+| `hello {proto, app, device, token}` | `welcome {proto, role, term, serverId, name, revision, hosts, subordinates, diverged}`, or `error` and the channel closes |
+| `pair {proto, app, secret, name}` | `paired {device, token}` then `welcome {…}`, or `error` (closes unless `unknownApp`) |
+| `head` | `head {revision}` |
+| `list {revision?, cursor?}` | `list {revision, docs, removed, cursor?}`, or `stale {revision}` |
+| `get {path, id, type, etag?, offset?}` | `doc {path, id, type, etag, bytes, offset}` + body, or `stale {revision}` |
+| `begin {tx}` | `began {tx, staged}` |
+| `put {tx, path, id, type, ifEtag, bytes, offset}` + body | `staged {path, id, type, received}` |
+| `delete {tx, path, id, type, ifEtag}` | `staged {path, id, type, received: 0}` |
+| `commit {tx}` | `committed {revision, docs}` or `conflict {revision, docs}` |
+| `abort {tx}` | `aborted {tx}` |
+| `resolve {server, keep}` | `resolved {server}` |
+| `forget` | the device entry is deleted; the server closes every session of the device |
+| `apps` (server-kind devices only) | `apps {apps}` |
+| `announce {server, devices?, removed?}` (link sessions) | `devices {devices, removed}` |
+| `invite` (link sessions) | `invited {code, expiresAt}` |
+| `term {term, server, device?, token?}` (link sessions) | `term {term, main}` |
+|  | `changed {revision}`: the app's set has a new revision (see "Pushes") |
+|  | `diverged {servers}`: the servers whose copy of the app diverged from their main's (see "Divergence") |
+|  | `resolved {server}`: a divergence was settled (see "Divergence") |
+|  | `apps {apps}`: to every link session after the server's app list changes |
+|  | `devices {devices, removed}`: to every link session that announced, after the device registry changes |
+|  | `takeOver`: to a subordinate's link session, when its main hands it the role of main |
+|  | `error {code, message}` |
 
 `pair` may also carry `kind`, and a server-kind device's `hello` may leave `app` out; both, `apps`, `announce`, `invite`, `term` and `takeOver`, are for servers only (see "Servers: roles, server-kind devices and link sessions" and "Switching the main").
 
 ### Values
 
-- **`etag`** is a string, or `null` when there is no document. It is the lowercase hex SHA-256 of the document's bytes, so two identical writes agree.
+- **`revision`** in `welcome`, `head`, `list`, `stale`, `changed`, `committed` and `conflict` is the set's revision, a string, or `null` for an empty set.
 - **`hosts`** is `[mdnsName, ...LAN IPv4]`, the server's current list. A client can refresh the hosts it stored at pairing from it, since addresses change.
 - **`role`** is `"main"` or `"subordinate"`: whether the server is linked to an upstream server (see "Servers"). A server from before roles sends none. An app's client may ignore it.
 - **`term`** is the family's term, a whole number: it goes up by one every time a subordinate becomes the main (see "Switching the main"). A main names its own, a subordinate its main's. It is left out at 0, as it is by a server whose family never switched its main and by a server from before terms; absent reads as 0. An app's client may ignore it; the reference client uses it to follow the main.
 - **`subordinates`** is sent by a main only, always, `[]` when it has none: the servers linked to it that serve its devices too, sorted by name. A subordinate, and a server from before subordinates, sends none. Each entry is a pairing code without the secret, `{serverId, name, password, fingerprint, port, hosts}`, with the fingerprint in uppercase colon hex (`AB:CD:…`, 32 bytes) as the answer's `a=fingerprint` line takes it. A client leaves out an entry it cannot build a connection to (see the vectors' tolerated frames). See "Subordinates: fallback servers for a device".
+- **`diverged`** lists the servers whose divergence on the app waits for a device's choice, `[{serverId, name, since}]` (`since` in RFC 3339 UTC); it is left out when there is none (see "Divergence").
 - **`device`** is the device id, 16 characters.
 - **`token`** is 32 random bytes, base64url.
 - **`name`** in `pair` is the device's display name, shown on the server's page.
+- **`tx`** is a transaction id the client chooses: 16 to 64 of `[A-Za-z0-9_-]`. Another is `protocol`, and the channel closes.
 
-### Documents
+### Listing
 
-- **`put` is always conditional.**
-  - `ifEtag` is the etag the client read.
-  - `null` means "I believe there is no document yet".
-  - A mismatch is answered with `conflict` and the current etag, which may be `null`.
-- **The stored bytes** are exactly what the last writer sent. They are never reparsed or reformatted.
-- **`tooLarge`:** a `put` announcing more than the app's `maxBytes` gets `error {code: 'tooLarge'}`.
-  - The server checks the size on the header. It then reads and discards exactly the announced bytes, and answers.
-  - Every answer to a `put` follows its body.
-- **`notJson`:** a body that is not valid JSON gets `error {code: 'notJson'}`.
-- **Neither error closes the channel.**
-- **`changed`** goes to every other session of the app after a stored `put`, and to every session of the app when a subordinate stores what it pulled from its main. It is never sent before that session's `welcome`.
-  - A `changed` may carry an etag older than one the session already received; for example, `welcome(e3)` can be followed by `changed(e2)` and then `changed(e3)`.
-  - The last frame always carries the newest etag. Act on the latest etag, not on each push in turn.
+- **`list`** answers with one page of the set: `revision`, `docs: [{path, id, type, etag, bytes}]`, then `removed: [{path, id, type, at}]` (tombstones), each sorted by canonical key byte for byte, and `cursor` when more follows. The documents come first, then the tombstones, at most 500 entries in a page together. `docs` and `removed` are always there, `[]` when empty.
+- **The next page:** `list {revision, cursor}` with the cursor the last page gave, opaque, and the revision that page named. A cursor without a revision, or one the server never gave, is `protocol`, and the channel closes.
+- **Stale:** a `list` that names a `revision` (`null` included) is answered only at that revision. If the set has moved on, the answer is `stale {revision}` with the revision now, and the client lists again from the first page. So the pages of one listing are always of one revision.
+- **`head`** answers with the revision alone: a client that remembers the revision it last synced at needs nothing more when nothing changed.
+
+### Reading
+
+- **`get {path, id, type, etag}`** reads a document only if it still has the etag a listing named. If it does not, or the document is not there, the answer is `stale {revision}`: the set moved on, and the client lists again. So several `get`s made from one listing read a consistent set: any change between them shows as `stale`.
+- **Without `etag`** (absent or `null`), `get` reads the document as it is; one that is not there is `stale` too.
+- **The answer** is `doc {path, id, type, etag, bytes, offset}` and the body: the document's bytes past `offset`.
+- **Resuming a read:** `get` with `offset` (past 0, at most the document's size) sends the bytes past it. It needs `etag`, the etag of the body it resumes: one past 0 without it, or one past the document's size, is `protocol`, and the channel closes. A body that changed meanwhile is `stale`, and the client reads it from the start.
+- **A read is consistent:** the server opens the document when it answers, and sends what it held then, even if a commit replaces it while the body goes out.
+
+### Transactions
+
+Every write is a transaction: `begin`, then `put`s and `delete`s, then `commit`, which applies all of it or nothing.
+
+- **`begin {tx}`** opens the transaction `tx`, or returns to it. The answer `began {tx, staged}` lists what it holds, for resuming: `staged: [{path, id, type, delete?, ifEtag, bytes, received}]` (`delete: true` for a removal), `[]` for a new transaction.
+  - A device has at most one open transaction per app: `begin` with another id discards the one it had.
+  - A transaction lives 24 hours after its last activity, and survives a restart of the server.
+- **`put {tx, path, id, type, ifEtag, bytes, offset}`** and the body stage a document of `bytes` bytes. The answer, once the whole body has arrived, is `staged {path, id, type, received}`: how many bytes of it the server holds.
+  - **`ifEtag`** is the etag the document must have at the commit; `null` (or absent) means it must not exist. It is checked at the commit, not at the `put`.
+  - **`offset` 0** starts the body afresh, replacing whatever the transaction staged for the key.
+  - **Resuming a body:** `offset` past 0 sends the bytes past it, of a body of the same `bytes` that the transaction staged before, from at most what `began` reported as `received`. Anything else (another size, an offset past what arrived, a key the transaction does not hold as a body) is `protocol`, and the channel closes.
+  - **`offset` equal to `bytes`** sends no body, and only changes `ifEtag` of a body that has fully arrived.
+  - **Quota:** a body larger than the quota, or one with which the set after the transaction would exceed the quota (and be larger than now), is refused with `quota`. A set already over its quota can always shrink.
+  - **A refusal follows the body,** which the server reads and discards: `quota`, `badPath`, `noTransaction`, `badToken` (a device removed meanwhile), `unknownApp` (an app removed meanwhile) or `internal`. None closes the channel.
+  - **A body cut off** (the session ended under it) stays staged with what arrived, written to disk; the next `begin` with the same id reports it, and a `put` resumes it.
+- **`delete {tx, path, id, type, ifEtag}`** stages the removal of a document, which must have `ifEtag` at the commit, as for a `put`. The answer is `staged {…, received: 0}`.
+- **`commit {tx}`** applies the transaction:
+  - **`committed {revision, docs}`**: the set's new revision, and every document the transaction wrote, with its new etag, or deleted, with `etag: null`. The transaction is over.
+  - **`conflict {revision, docs}`**: some documents are not at the etags the transaction expects. `docs` lists each of them with its current etag (`null` when it does not exist), and `revision` is the set's now. Nothing was applied, and **the transaction stays open**: the client reads again, merges, and stages again (`put` with `offset` equal to `bytes` only changes `ifEtag` of a body it still wants as it is), or aborts.
+  - **`incomplete`**: a body has not fully arrived; the transaction stays open, and a `put` resumes it.
+  - **`quota`**, **`badPath`** (a key's path is taken on disk by something that is no document, such as a folder or a file whose name differs in case): the transaction stays open.
+  - **`noTransaction`**: there is no open transaction of that id for this device (never begun, discarded by another `begin`, aborted, expired, or committed already).
+  - **`internal`** can come after the server's commit point, with the commit applied, possibly in part, and the transaction over. Never commit the same transaction again: list again, and decide from what the set holds. A `begin` with the same id tells whether the failure came before the commit point: the transaction is still open, with what it staged; otherwise the `begin` opens a new, empty one with that id.
+- **`abort {tx}`** discards the transaction; `aborted {tx}` answers it even when the transaction was gone already.
+- **The stored bytes** are exactly what the writer sent. They are never reparsed or reformatted.
+- **Every write is conditional,** so a client that merges, writes with the etags it read and starts again on a conflict never loses another device's write.
+
+### Pushes
+
+- **`changed {revision}`** tells a session that the app's set has a new revision. It goes:
+  - to every other session of the app after a `commit` (the committing session has the revision in `committed`);
+  - to every session of the app when the server changes the set itself: a subordinate writing what it took from its main, files changed by hand taken in at a `hello`, or a `commit` that failed after its commit point.
+
+  It is never sent before that session's `welcome`: one that comes earlier is held, the newest kept, and sent right after the `welcome` unless the `welcome` names the same revision.
+  - Pushes may come out of order: `welcome(r3)` can be followed by `changed(r2)` and then `changed(r3)`. The last frame always carries the newest revision. Act on the latest revision, not on each push in turn; comparing it with the revision last synced tells whether anything is left to do.
+- **`diverged`** and **`resolved`** are pushes too (see "Divergence").
+
+### Divergence
+
+A subordinate holds a copy of its main's apps (see "Servers"). When both servers changed the same documents differently while they could not reach each other, the two copies of an app have **diverged**, and a device chooses which copy to keep.
+
+- **`diverged {servers: [{serverId, name, since}]}`** lists the servers whose copy of the app diverged from their main's and waits for a choice; `[]` once none does. Every `welcome` carries the same list as `diverged` while it is not empty.
+- **`resolve {server, keep}`** settles the divergence of `server`, a subordinate's server id: `keep` is `"main"` (the subordinate's copy becomes the main's) or `"subordinate"` (the other way round), for the app's whole set. Without a server id, or with another `keep`, it is `protocol`, and the channel closes.
+- **`resolved {server}`** answers `resolve`, and goes to every session of the app once a divergence is settled, by whichever device chose first.
+- **This version of the server never reports a divergence:** a subordinate still settles one at once by the main's copy (see [architecture.md](architecture.md), "The sync rule"), and answers every `resolve` with `resolved` at once, as one that another device settled first. A client should handle the frames all the same.
 
 ### Pairing outcomes
 
 - **Success:** the server checks the app id against its app list and checks the secret. It then creates the device entry, consumes the secret, and answers `paired` then `welcome`. The session continues authenticated.
-- **Confirming:** the client confirms the pairing with its next frame on that session, any frame, after it has received `welcome`; normally it sends `head` or `get` at once.
+- **Confirming:** the client confirms the pairing with its next frame on that session, any frame, after it has received `welcome`; normally it sends `head` at once.
   - If the session ends before the server hears one, the server deletes the device entry: it cannot know that the token arrived.
   - The secret stays used, so the user needs a new code.
   - A client that stored the token from a session that ended this way gets `badToken` on its next `hello`, and pairs again.
@@ -198,8 +275,10 @@ Codes:
 - `badSecret`
 - `badToken`
 - `blocked`
-- `tooLarge`
-- `notJson`
+- `badPath`
+- `quota`
+- `noTransaction`
+- `incomplete`
 - `notAuthenticated`
 - `internal`
 - `notMain`
@@ -208,15 +287,18 @@ Codes:
 
 **A code the client does not know** should be treated as a temporary server error: report it and retry later. Do not treat it as a reason to drop the pairing. Codes may be added without a new `proto`.
 
-- **Before authentication,** `head`, `get`, `put`, `forget`, `apps`, `announce`, `invite` and `term` get `notAuthenticated`.
+- **Before authentication,** every frame but `hello` and `pair` (`head`, `list`, `get`, `begin`, `put`, `delete`, `commit`, `abort`, `resolve`, `forget`, `apps`, `announce`, `invite`, `term`) gets `notAuthenticated`.
 - **After authentication,** a second `hello`/`pair` is a `protocol` error.
 - **A frame with an unknown `t`** gets `error {code: 'protocol'}` and the channel closes, before authentication or after.
+- **`protocol` always closes the channel;** every other error answers the frame and leaves the session open, except where `hello` and `pair` say otherwise.
 - **`hello` failures:**
   - a `hello` for an app removed from the server's list gets `unknownApp`;
   - a `hello` with a removed device or a wrong token gets `badToken`, meaning the pairing is gone;
   - a `hello` from a blocked IP gets `blocked`, and the pairing still stands (see Limits).
-- **An in-flight `put` from a device the user removed** gets `badToken` and is not stored.
-- **`internal`** means a server-side failure, such as a disk error. The details are in the server's log.
+- **A device removed during a session:** its `begin`, `put`, `delete` and `commit` get `badToken`, and nothing is stored.
+- **An app removed during a session:** its frames get `unknownApp`.
+- **The documents' codes:** `badPath`, `quota`, `noTransaction` and `incomplete` (see "Transactions").
+- **`internal`** means a server-side failure, such as a disk error. The details are in the server's log. After a `commit`, see "Transactions".
 
 ## Servers: roles, server-kind devices and link sessions
 
@@ -227,10 +309,10 @@ A workspace-server can be a **subordinate** of another, its **main**: it mirrors
   - `kind` is `"device"` (the default when it is absent: the pairing described above) or `"server"`. Any other value is `protocol`, and the channel closes.
   - A server-kind pair names no app; an `app` it carries is ignored. The outcomes are those of a device's pair, without `unknownApp`.
   - The new device is admitted to every app the server lists, now and later, and to link sessions.
-  - The session it pairs on is a link session: `paired` is followed by a `welcome` with `etag: null`. The pairing is confirmed by the next frame, as for a device; the subordinate sends `apps`.
+  - The session it pairs on is a link session: `paired` is followed by a `welcome` with `revision: null`. The pairing is confirmed by the next frame, as for a device; the subordinate sends `apps`.
 - **Link sessions:** `hello {proto, device, token}` without `app`, from a server-kind device, opens one.
-  - Its `welcome` has `etag: null`.
-  - It has no document: `head`, `get` and `put` there are `protocol`, and the channel closes.
+  - Its `welcome` has `revision: null`.
+  - It has no documents: `head`, `list`, `get`, `begin`, `put`, `delete`, `commit`, `abort` and `resolve` there are `protocol`, and the channel closes.
   - `forget` deletes the server-kind device and closes every session of it.
   - A `hello` without `app` from a device of an app gets `unknownApp`, as it always did; from an unknown device or with a wrong token, `badToken`.
 - **App sessions:** a server-kind device says `hello {proto, app, device, token}` for any app the server lists, and the session works as a device's.
@@ -280,17 +362,17 @@ A **family** is a main and the subordinates linked to it. The main is the server
 
 ## Subordinates: fallback servers for a device
 
-A device pairs only with a main. The main's `welcome` lists its subordinates (`subordinates`, above), and a device may keep them and sync with one of them when the main is out of reach: a laptop's server travelling with a phone. Nothing about the documents changes: the subordinate holds the main's documents, and the device merges with whichever server it reached, as it always does.
+A device pairs only with a main. The main's `welcome` lists its subordinates (`subordinates`, above), and a device may keep them and sync with one of them when the main is out of reach: a laptop's server travelling with a phone. Nothing about the documents changes: the subordinate holds the main's set, and the device merges with whichever server it reached, as it always does.
 
 - **The same pairing:** the device says `hello` to a subordinate with the device id and token it got from the main. A device paired after the subordinate's last link is not known there yet and gets `badToken`, which on a subordinate does not mean the pairing is gone.
 - **Which server:** the reference client connects to the main and its subordinates at once, takes the main if it answers within a short grace period, and otherwise a subordinate that did. It takes a `welcome` only from a `serverId` it knows; a `welcome` from another one is `serverChanged`, which stops sync when it comes from the main's own address. Only the main's refusals stop sync.
-- **The etag** is the SHA-256 of the bytes on every server, so the etag a device last synced is valid on all of them: a subordinate that holds the same document is not read again.
+- **The revision and the etags** are hashes of the bytes on every server, so the revision and the etags a device last synced at are valid on all of them: a subordinate that holds the same set is not read again.
 - **Keep the list current:** each `welcome` from the main replaces the list; one without `subordinates` (from a subordinate, or an older server) leaves it as it was.
 - **Follow the main:** after a switch of the main, a fallback answers as the main and the paired server as a subordinate, or not at all. The reference client then takes the fallback, when its `term` is at least the one the paired server last named as the main, as the server it is paired with; the server it paired with before becomes a fallback. Of two servers answering as mains (a family split for a while), it takes the higher `term`, unless the paired server answers as a main first.
 - **Pairing and forgetting** go to the main: a subordinate answers `pair` with `notMain`, and a `forget` sent to a subordinate does not reach the main. A subordinate's page shows no code of its own; for a browser on its computer it shows a code of the main, which it gets with `invite`.
 
 ## What the client cannot see
 
-- The server merges nothing and knows nothing about the document's contents. Merging is the client's job, using `conflict` and the etag.
+- The server merges nothing and knows nothing about the documents' contents or formats. Merging is the client's job, using `stale`, `conflict` and the etags.
 - Changing the server's UDP port invalidates every pairing, because the device stored `o`. The server's page warns the user, and every device pairs again.
 - Losing the server's `identity.json` invalidates every pairing: the certificate, `icePwd` and `serverId` change.

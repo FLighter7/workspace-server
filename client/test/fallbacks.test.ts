@@ -166,7 +166,15 @@ describe('SyncEngine with fallback servers', () => {
 		await fire(MAIN_GRACE_MS);
 
 		expect(last()).toMatchObject({ status: 'connected', serverName: 'Desk', via: 'Laptop' });
-		expect(sub.log).toEqual(['connect', 'hello#1', 'head#1', 'get#1', 'put#1']);
+		expect(sub.log).toEqual([
+			'connect',
+			'hello#1',
+			'head#1',
+			'list#1',
+			'begin#1',
+			'put#1',
+			'commit#1',
+		]);
 		expect(state.pairing?.lastEtag).toBe(sub.etag);
 	});
 
@@ -194,15 +202,16 @@ describe('SyncEngine with fallback servers', () => {
 		expect(state.pairing?.fallbacks).toEqual([{ ...sub.entry(), hosts: ['b.local', '10.0.0.9'] }]);
 	});
 
-	it('shares lastEtag: a subordinate holding the same document is not read again', async () => {
+	it('shares lastRevision: a subordinate holding the same documents is not read again', async () => {
 		const { engine, main, sub, state } = setup();
 		engine.start(true);
 		await settle();
 		expect(state.pairing?.lastEtag).toBe(main.etag);
+		expect(state.pairing?.lastRevision).toBe(main.revision);
 
-		// The subordinate pulled the main's document: same bytes, same etag.
-		sub.etag = main.etag;
-		sub.body = main.body.slice();
+		// The subordinate pulled the main's documents: same bytes, same etags, same revision.
+		sub.store(main.body);
+		expect(sub.revision).toBe(main.revision);
 		main.connectError = 'connectTimeout';
 		engine.setVisible(false);
 		engine.setVisible(true);

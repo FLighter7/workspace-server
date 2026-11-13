@@ -93,3 +93,34 @@ test('an app the server does not serve gets unknownApp', async ({ browser }) => 
 
 	expect(outcome).toBe('unknownApp');
 });
+
+test('the protocol client writes, lists, streams, resumes and deletes a document of the set', async ({
+	browser,
+}) => {
+	const page = await openPage(browser);
+	// Larger than a channel buffer's worth, so the body goes in many pieces both ways.
+	const size = 3 * 1024 * 1024 + 123;
+
+	const outcome = await page.evaluate(
+		([code, bytes]) => window.harness.documents('todo', code, bytes),
+		[await pairingCode(), size] as const,
+	);
+
+	expect(outcome).toEqual({
+		before: expect.anything(),
+		began: 0,
+		received: size,
+		committed: true,
+		listedBytes: size,
+		listedEtag: true,
+		revision: true,
+		streamed: true,
+		tail: true,
+		stale: true,
+		conflictReceived: 1,
+		refused: false,
+		deleted: true,
+		removed: true,
+		left: false,
+	});
+});

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -147,9 +148,10 @@ type env struct {
 	secrets  *pairing.Secrets
 	refusals *pairing.Refusals
 
-	hookMu  sync.Mutex
-	onName  func()           // runs inside every welcome, after the session is registered
-	onStore func(app string) // Deps.Stored
+	hookMu   sync.Mutex
+	onName   func()           // runs inside every welcome, after the session is registered
+	onChange func(app string) // runs in every Deps.Changed
+	heard    []string         // every Deps.Changed, "app revision"
 }
 
 // setOnName sets the function that runs inside every welcome: the hub reads
@@ -212,18 +214,9 @@ func newEnv(t *testing.T, tweaks ...func(*env)) *env {
 		Refusals: e.refusals,
 		Now:      clk.Now,
 		Logf:     e.logs.printf,
-		Stored:   e.stored,
+		Changed:  e.changed,
 	})
 	return e
-}
-
-func (e *env) stored(app string) {
-	e.hookMu.Lock()
-	f := e.onStore
-	e.hookMu.Unlock()
-	if f != nil {
-		f(app)
-	}
 }
 
 func (e *env) addApp(t *testing.T, a apps.App) {
@@ -285,14 +278,6 @@ func helloFrame(app, device, token string) string {
 
 func pairFrame(app, secret, name string) string {
 	return frame(obj{"t": "pair", "proto": 1, "app": app, "secret": secret, "name": name})
-}
-
-// put sends a put of body that expects the document to have ifEtag.
-func put(s *protocol.Session, ifEtag *string, body []byte) {
-	s.HandleText(frame(obj{"t": "put", "ifEtag": ifEtag, "bytes": len(body)}))
-	if len(body) > 0 {
-		s.HandleBinary(body)
-	}
 }
 
 func ptr(s string) *string { return &s }
@@ -406,10 +391,7 @@ func TestHelloOutcomes(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
 		e := newEnv(t)
 		id, token := e.device(t, "todo")
-		doc := []byte(`{"items":[]}`)
-		if _, err := e.store.Write("todo", doc, nil); err != nil {
-			t.Fatal(err)
-		}
+		rev := e.writeDoc(t, "todo", "data.json", `{"items":[]}`)
 		e.clock.Advance(time.Hour)
 
 		s, fc := e.connect(t, "192.168.1.9:5000")
@@ -418,7 +400,7 @@ func TestHelloOutcomes(t *testing.T) {
 		w := waitFrames(t, fc, "welcome", 1)[0]
 		want := obj{
 			"t": "welcome", "proto": float64(1), "role": "main", "serverId": "srv-1", "name": "Desk",
-			"etag": store.Etag(doc), "hosts": []any{"u.local", "192.168.1.5"}, "subordinates": []any{},
+			"revision": rev, "hosts": []any{"u.local", "192.168.1.5"}, "subordinates": []any{},
 		}
 		if !reflect.DeepEqual(w, want) {
 			t.Errorf("welcome %v, want %v", w, want)
@@ -429,12 +411,12 @@ func TestHelloOutcomes(t *testing.T) {
 		}
 	})
 
-	t.Run("no document", func(t *testing.T) {
+	t.Run("no documents", func(t *testing.T) {
 		e := newEnv(t)
 		id, token := e.device(t, "todo")
 		_, fc := e.login(t, "192.168.1.9:5000", "todo", id, token)
-		if w := framesOf(fc, "welcome")[0]; w["etag"] != nil {
-			t.Errorf("welcome etag %v, want null", w["etag"])
+		if w := framesOf(fc, "welcome")[0]; w["revision"] != nil {
+			t.Errorf("welcome revision %v, want null", w["revision"])
 		}
 	})
 
@@ -482,7 +464,7 @@ func TestPairConsumesSecret(t *testing.T) {
 	if device == "" || token == "" {
 		t.Fatalf("paired frame %v lacks a device or token", frames[0])
 	}
-	if w := frames[1]; w["serverId"] != "srv-1" || w["etag"] != nil {
+	if w := frames[1]; w["serverId"] != "srv-1" || w["revision"] != nil {
 		t.Errorf("welcome %v", w)
 	}
 	list := e.devices.List()
@@ -638,259 +620,6 @@ func TestRateLimitForgetsOldFailures(t *testing.T) {
 	expectClosedWithError(t, fc, protocol.CodeBlocked)
 }
 
-func TestHeadAndGet(t *testing.T) {
-	e := newEnv(t)
-	id, token := e.device(t, "todo")
-	s, fc := e.login(t, "192.168.1.9:5000", "todo", id, token)
-
-	s.HandleText(`{"t":"head"}`)
-	s.HandleText(`{"t":"get"}`)
-	got := waitFrames(t, fc, "head", 2, "doc")
-	want := []obj{{"t": "head", "etag": nil}, {"t": "doc", "etag": nil, "bytes": float64(0)}}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("sent %v, want %v", got, want)
-	}
-
-	doc := []byte(`{"items":["milk"]}`)
-	etag, err := e.store.Write("todo", doc, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.HandleText(`{"t":"head"}`)
-	s.HandleText(`{"t":"get"}`)
-	got = waitFrames(t, fc, "head", 4, "doc")[2:]
-	want = []obj{{"t": "head", "etag": etag}, {"t": "doc", "etag": etag, "bytes": float64(len(doc))}}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("sent %v, want %v", got, want)
-	}
-	waitFor(t, "the document body", func() bool { return len(fc.body()) >= len(doc) })
-	if !bytes.Equal(fc.body(), doc) {
-		t.Errorf("body %q, want %q", fc.body(), doc)
-	}
-}
-
-func TestPutBroadcast(t *testing.T) {
-	e := newEnv(t)
-	e.addApp(t, apps.App{ID: "notes"})
-	idA, tokA := e.device(t, "todo")
-	idB, tokB := e.device(t, "todo")
-	idC, tokC := e.device(t, "notes")
-	a, fa := e.login(t, "192.168.1.9:5000", "todo", idA, tokA)
-	_, fb := e.login(t, "192.168.1.9:5001", "todo", idB, tokB)
-	c, fcC := e.login(t, "192.168.1.9:5002", "notes", idC, tokC)
-
-	doc := []byte(`{"items":[]}`)
-	put(a, nil, doc)
-	etag := store.Etag(doc)
-	if f := waitFrames(t, fa, "stored", 1)[0]; f["etag"] != etag {
-		t.Errorf("stored %v, want etag %s", f, etag)
-	}
-	if f := waitFrames(t, fb, "changed", 1)[0]; f["etag"] != etag {
-		t.Errorf("B got %v, want changed %s", f, etag)
-	}
-	if n := countType(settle(t, a, fa), "changed"); n != 0 {
-		t.Errorf("the writer got %d changed frames, want 0", n)
-	}
-	if n := countType(settle(t, c, fcC), "changed"); n != 0 {
-		t.Errorf("a session of another app got %d changed frames, want 0", n)
-	}
-	if _, cur, _ := e.store.Read("todo"); cur == nil || *cur != etag {
-		t.Errorf("stored etag %v, want %s", cur, etag)
-	}
-}
-
-func TestPutConflictAndNotJSON(t *testing.T) {
-	e := newEnv(t)
-	idA, tokA := e.device(t, "todo")
-	idB, tokB := e.device(t, "todo")
-	a, fa := e.login(t, "192.168.1.9:5000", "todo", idA, tokA)
-	b, fb := e.login(t, "192.168.1.9:5001", "todo", idB, tokB)
-
-	first := []byte(`{"v":1}`)
-	put(a, nil, first)
-	waitFrames(t, fa, "stored", 1)
-	etag := store.Etag(first)
-
-	// null ifEtag although a document exists, then a wrong etag.
-	put(a, nil, []byte(`{"v":2}`))
-	put(a, ptr("0000"), []byte(`{"v":3}`))
-	for _, f := range waitFrames(t, fa, "conflict", 2) {
-		if f["etag"] != etag {
-			t.Errorf("conflict %v, want the current etag %s", f, etag)
-		}
-	}
-
-	put(a, &etag, []byte("not json"))
-	errs := waitFrames(t, fa, "error", 1)
-	expectError(t, errs[0], protocol.CodeNotJSON)
-	settle(t, a, fa) // the channel stays open
-	if fa.isClosed() {
-		t.Error("notJson closed the channel")
-	}
-
-	if _, cur, _ := e.store.Read("todo"); cur == nil || *cur != etag {
-		t.Errorf("stored etag %v, want %s unchanged", cur, etag)
-	}
-	if n := countType(settle(t, b, fb), "changed"); n != 1 {
-		t.Errorf("B got %d changed frames, want 1 (refused puts are not pushed)", n)
-	}
-}
-
-// Deps.Stored hears every stored put, once the hub's locks are released,
-// and nothing else: not a refused put, and not Replace, which is how the link
-// writes (a hook on its own writes would send them back).
-func TestStoredHook(t *testing.T) {
-	e := newEnv(t)
-	var mu sync.Mutex
-	var calls []string
-	locked := false
-	e.hookMu.Lock()
-	e.onStore = func(app string) {
-		free := make(chan struct{})
-		go func() {
-			l := e.hub.appLock(app)
-			l.Lock()
-			l.Unlock()
-			e.hub.servers.Lock()
-			e.hub.servers.Unlock()
-			close(free)
-		}()
-		mu.Lock()
-		defer mu.Unlock()
-		select {
-		case <-free:
-		case <-time.After(time.Second):
-			locked = true
-		}
-		calls = append(calls, app)
-	}
-	e.hookMu.Unlock()
-	heard := func() []string {
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]string(nil), calls...)
-	}
-
-	id, tok := e.device(t, "todo")
-	a, fa := e.login(t, "192.168.1.9:5000", "todo", id, tok)
-	first := []byte(`{"v":1}`)
-	put(a, nil, first)
-	waitFrames(t, fa, "stored", 1)
-	if got := heard(); !slices.Equal(got, []string{"todo"}) {
-		t.Fatalf("Stored heard %v after a stored put, want [todo]", got)
-	}
-	mu.Lock()
-	if locked {
-		t.Error("Stored ran under the app's lock or the servers lock")
-	}
-	mu.Unlock()
-
-	etag := store.Etag(first)
-	put(a, nil, []byte(`{"v":2}`)) // a conflict
-	waitFrames(t, fa, "conflict", 1)
-	put(a, &etag, []byte("not json"))
-	waitFrames(t, fa, "error", 1)
-	if _, err := e.hub.Replace("todo", []byte(`{"v":3}`), &etag); err != nil {
-		t.Fatal(err)
-	}
-	if got := heard(); !slices.Equal(got, []string{"todo"}) {
-		t.Errorf("Stored heard %v, want only the one stored put", got)
-	}
-}
-
-func TestPutLimits(t *testing.T) {
-	e := newEnv(t)
-	e.addApp(t, apps.App{ID: "tiny", Quota: apps.MinQuota})
-	if got := e.hub.MaxBytes("tiny"); got != apps.MinQuota {
-		t.Errorf("MaxBytes(tiny) = %d, want %d", got, apps.MinQuota)
-	}
-	if got := e.hub.MaxBytes("todo"); got != apps.DefaultQuota {
-		t.Errorf("MaxBytes(todo) = %d, want %d", got, apps.DefaultQuota)
-	}
-	e.addApp(t, apps.App{ID: "huge", Quota: apps.MaxQuota})
-	if got := e.hub.MaxBytes("huge"); got != 1<<30 {
-		t.Errorf("MaxBytes(huge) = %d, want the shim's cap of 1 GiB", got)
-	}
-	if got := e.hub.MaxBytes("nope"); got != 0 {
-		t.Errorf("MaxBytes(nope) = %d, want 0", got)
-	}
-
-	id, token := e.device(t, "tiny")
-	s, fc := e.login(t, "192.168.1.9:5000", "tiny", id, token)
-	put(s, nil, bytes.Repeat([]byte(" "), int(apps.MinQuota)+1))
-	expectError(t, waitFrames(t, fc, "error", 1)[0], protocol.CodeTooLarge)
-
-	// The quota is the app's files together: another file there leaves the
-	// document less room, and a put past that is too large too.
-	other := filepath.Join(e.dir, "apps", "tiny", "other.bin")
-	if err := os.MkdirAll(filepath.Dir(other), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(other, bytes.Repeat([]byte("o"), int(apps.MinQuota)-10), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	put(s, nil, []byte(`{"v":"twenty bytes"}`))
-	expectError(t, waitFrames(t, fc, "error", 2)[1], protocol.CodeTooLarge)
-	if err := os.Remove(other); err != nil {
-		t.Fatal(err)
-	}
-
-	// The app disappears from apps.json; its session is still open. Its limit
-	// is now 0, so any body is too large, and an empty one reaches Put.
-	if err := e.apps.Remove("tiny"); err != nil {
-		t.Fatal(err)
-	}
-	put(s, nil, []byte(`{}`))
-	expectError(t, waitFrames(t, fc, "error", 3)[2], protocol.CodeTooLarge)
-	put(s, nil, nil)
-	expectError(t, waitFrames(t, fc, "error", 4)[3], protocol.CodeUnknownApp)
-}
-
-// Two devices writing at the same instant with the same ifEtag: exactly one is
-// stored, the other gets conflict with the winner's etag.
-func TestConcurrentPutsWithSameEtag(t *testing.T) {
-	e := newEnv(t)
-	idA, tokA := e.device(t, "todo")
-	idB, tokB := e.device(t, "todo")
-	a, fa := e.login(t, "192.168.1.9:5000", "todo", idA, tokA)
-	b, fb := e.login(t, "192.168.1.9:5001", "todo", idB, tokB)
-
-	var current *string
-	for round := range 20 {
-		start := make(chan struct{})
-		var wg sync.WaitGroup
-		for i, s := range []*protocol.Session{a, b} {
-			body := []byte(fmt.Sprintf(`{"round":%d,"writer":%d}`, round, i))
-			wg.Go(func() {
-				<-start
-				put(s, current, body)
-			})
-		}
-		close(start)
-		wg.Wait()
-
-		ra := waitFrames(t, fa, "stored", round+1, "conflict")[round]
-		rb := waitFrames(t, fb, "stored", round+1, "conflict")[round]
-		var winner, loser obj
-		switch {
-		case ra["t"] == "stored" && rb["t"] == "conflict":
-			winner, loser = ra, rb
-		case rb["t"] == "stored" && ra["t"] == "conflict":
-			winner, loser = rb, ra
-		default:
-			t.Fatalf("round %d: answers %v and %v, want one stored and one conflict", round, ra, rb)
-		}
-		etag, _ := winner["etag"].(string)
-		if loser["etag"] != etag {
-			t.Fatalf("round %d: conflict %v, want the winner's etag %s", round, loser, etag)
-		}
-		if _, cur, _ := e.store.Read("todo"); cur == nil || *cur != etag {
-			t.Fatalf("round %d: stored etag %v, want the winner's %s", round, cur, etag)
-		}
-		current = &etag
-	}
-}
-
 func TestRemoveAppClosesSessionsAndDeletesData(t *testing.T) {
 	e := newEnv(t)
 	e.addApp(t, apps.App{ID: "notes"})
@@ -898,15 +627,15 @@ func TestRemoveAppClosesSessionsAndDeletesData(t *testing.T) {
 	idN, tokN := e.device(t, "notes")
 	s, fc := e.login(t, "192.168.1.9:5000", "todo", id, token)
 	n, fn := e.login(t, "192.168.1.9:5001", "notes", idN, tokN)
-	put(s, nil, []byte(`{"x":1}`))
-	waitFrames(t, fc, "stored", 1)
+	write(s, "data.json", nil, []byte(`{"x":1}`))
+	waitFrames(t, fc, "committed", 1)
 
 	if err := e.hub.RemoveApp("todo"); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "the todo session to close", fc.isClosed)
-	if doc, etag, err := e.store.Read("todo"); doc != nil || etag != nil || err != nil {
-		t.Errorf("Store.Read(todo) = %q, %v, %v; want no document", doc, etag, err)
+	if rev := e.revisionOf(t, "todo"); rev != nil {
+		t.Errorf("revision of todo %v, want no documents", rev)
 	}
 	if _, ok := e.apps.Get("todo"); ok {
 		t.Error("todo still listed")
@@ -952,29 +681,6 @@ func TestRemoveDeviceClosesItsSession(t *testing.T) {
 	}
 }
 
-// A put that reaches the hub after its device was removed, as one in flight
-// when the device is removed does, stores nothing.
-func TestPutFromARemovedDevice(t *testing.T) {
-	e := newEnv(t)
-	id, token := e.device(t, "todo")
-	s, fc := e.login(t, "192.168.1.9:5000", "todo", id, token)
-	first := []byte(`{"v":1}`)
-	put(s, nil, first)
-	waitFrames(t, fc, "stored", 1)
-	etag := store.Etag(first)
-
-	if !e.hub.RemoveDevice(id) {
-		t.Fatal("RemoveDevice = false")
-	}
-	_, conflict, _, perr := e.hub.Put(s, "todo", id, &etag, []byte(`{"v":2}`))
-	if perr == nil || perr.Code != protocol.CodeBadToken || conflict {
-		t.Errorf("Put after RemoveDevice = conflict %v, error %v; want error %q", conflict, perr, protocol.CodeBadToken)
-	}
-	if doc, _, _ := e.store.Read("todo"); !bytes.Equal(doc, first) {
-		t.Errorf("document %q, want %q unchanged", doc, first)
-	}
-}
-
 // An internal error reaches the device without its text, which can name
 // files on the server's computer; the server's log gets the text.
 func TestInternalErrorKeepsTheDetailsInTheLog(t *testing.T) {
@@ -984,7 +690,7 @@ func TestInternalErrorKeepsTheDetailsInTheLog(t *testing.T) {
 	if perr == nil || perr.Code != protocol.CodeInternal {
 		t.Fatalf("Head = %v, want error %q", perr, protocol.CodeInternal)
 	}
-	if perr.Message == "" || strings.Contains(perr.Message, "data.json") || strings.Contains(perr.Message, e.dir) {
+	if perr.Message == "" || strings.Contains(perr.Message, "journal") || strings.Contains(perr.Message, e.dir) {
 		t.Errorf("message %q, want one that names no file", perr.Message)
 	}
 	if !strings.Contains(e.logs.String(), filepath.Join("todo", ".wss", "journal.json")) {
@@ -996,8 +702,8 @@ func TestCloseAppKeepsDevicesAndData(t *testing.T) {
 	e := newEnv(t)
 	id, token := e.device(t, "todo")
 	s, fc := e.login(t, "192.168.1.9:5000", "todo", id, token)
-	put(s, nil, []byte(`{}`))
-	waitFrames(t, fc, "stored", 1)
+	write(s, "data.json", nil, []byte(`{}`))
+	waitFrames(t, fc, "committed", 1)
 
 	// As when the entry is deleted from apps.json by hand.
 	if err := e.apps.Remove("todo"); err != nil {
@@ -1009,7 +715,7 @@ func TestCloseAppKeepsDevicesAndData(t *testing.T) {
 	if ids := e.deviceIDs(); !reflect.DeepEqual(ids, []string{id}) {
 		t.Errorf("devices %v, want %s kept", ids, id)
 	}
-	if doc, _, _ := e.store.Read("todo"); doc == nil {
+	if e.etagOf(t, "todo", "data.json") == nil {
 		t.Error("document deleted")
 	}
 }
@@ -1178,34 +884,6 @@ func TestHelloWhenTheWelcomeFails(t *testing.T) {
 	e.login(t, "192.168.1.9:6000", "todo", id, token)
 }
 
-func TestGetAndPutInternalErrors(t *testing.T) {
-	e := newEnv(t)
-	id, token := e.device(t, "todo")
-	idB, tokenB := e.device(t, "todo")
-	s, fc := e.login(t, "192.168.1.9:5000", "todo", id, token)
-	other, fo := e.login(t, "192.168.1.9:5001", "todo", idB, tokenB)
-	repair := e.breakDocument(t, "todo")
-
-	s.HandleText(`{"t":"get"}`)
-	expectError(t, waitFrames(t, fc, "error", 1)[0], protocol.CodeInternal)
-	put(s, nil, []byte(`{"a":1}`))
-	expectError(t, waitFrames(t, fc, "error", 2)[1], protocol.CodeInternal)
-	expectNoFileInFrames(t, e, fc)
-	if fc.isClosed() {
-		t.Fatal("an internal error closed the channel")
-	}
-
-	// The failed put told nobody: the next stored put is the only change.
-	repair()
-	body := []byte(`{"a":2}`)
-	put(s, nil, body)
-	waitFrames(t, fc, "stored", 1)
-	frames := settle(t, other, fo)
-	if changed := framesOf(&fakeChannel{texts: frames}, "changed"); len(changed) != 1 || changed[0]["etag"] != store.Etag(body) {
-		t.Errorf("the other session got %v, want one changed for the stored put", changed)
-	}
-}
-
 func TestNoRefusalRecordedWhileBlocked(t *testing.T) {
 	e := newEnv(t)
 	id, _ := e.device(t, "todo")
@@ -1354,4 +1032,548 @@ func TestSessionsSorted(t *testing.T) {
 		SessionInfo{App: "todo", Device: idT, Remote: "192.168.1.9:5000"},
 		SessionInfo{App: "todo", Device: idT, Remote: "192.168.1.9:5001"},
 	)
+}
+
+// changesHeard returns what Deps.Changed was told so far, as "app rev"
+// ("app null" for an empty set).
+func (e *env) changesHeard() []string {
+	e.hookMu.Lock()
+	defer e.hookMu.Unlock()
+	return append([]string(nil), e.heard...)
+}
+
+// changed is Deps.Changed: it records the call and runs onChange.
+func (e *env) changed(app string, rev *string) {
+	e.hookMu.Lock()
+	r := "null"
+	if rev != nil {
+		r = *rev
+	}
+	e.heard = append(e.heard, app+" "+r)
+	f := e.onChange
+	e.hookMu.Unlock()
+	if f != nil {
+		f(app)
+	}
+}
+
+// keyOf reads "path/id.type" or "id.type" into a key.
+func keyOf(ks string) store.Key {
+	k, ok := store.ParseKey(ks)
+	if !ok {
+		panic("bad key " + ks)
+	}
+	return k
+}
+
+var txSeq atomic.Int64
+
+// newTx returns a transaction id never used before.
+func newTx() string { return fmt.Sprintf("tx-%016d", txSeq.Add(1)) }
+
+// write sends one transaction that puts body as the document ks, expecting
+// it to have ifEtag: begin, put and commit. Its answers are began, staged,
+// and committed or conflict (or errors).
+func write(s *protocol.Session, ks string, ifEtag *string, body []byte) {
+	k := keyOf(ks)
+	tx := newTx()
+	s.HandleText(frame(obj{"t": "begin", "tx": tx}))
+	s.HandleText(frame(obj{
+		"t": "put", "tx": tx, "path": k.Path, "id": k.ID, "type": k.Type,
+		"ifEtag": ifEtag, "bytes": len(body), "offset": 0,
+	}))
+	for off := 0; off < len(body); off += protocol.ChunkBytes {
+		s.HandleBinary(body[off:min(off+protocol.ChunkBytes, len(body))])
+	}
+	s.HandleText(frame(obj{"t": "commit", "tx": tx}))
+}
+
+// writeDoc writes body as the document ks of app straight into the store,
+// and returns the set's revision after it.
+func (e *env) writeDoc(t *testing.T, app, ks, body string) string {
+	t.Helper()
+	tx := newTx()
+	if _, err := e.store.Begin(app, "test-writer", tx); err != nil {
+		t.Fatal(err)
+	}
+	sink, err := e.store.Put(app, "test-writer", tx, keyOf(ks), e.etagOf(t, app, ks), int64(len(body)), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sink.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	_ = sink.Close()
+	c, err := e.store.Commit(app, "test-writer", tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return *c.Revision
+}
+
+// etagOf returns the etag of the document ks of app, nil when there is
+// none.
+func (e *env) etagOf(t *testing.T, app, ks string) *string {
+	t.Helper()
+	l, err := e.store.List(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range l.Docs {
+		if d.Key.String() == ks {
+			return &d.Etag
+		}
+	}
+	return nil
+}
+
+// revisionOf returns app's revision, "null" for an empty set.
+func (e *env) revisionOf(t *testing.T, app string) any {
+	t.Helper()
+	rev, err := e.store.Head(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev == nil {
+		return nil
+	}
+	return *rev
+}
+
+// committedEtag returns the etag a committed or conflict frame names for its
+// first document.
+func committedEtag(f obj) any {
+	docs, _ := f["docs"].([]any)
+	if len(docs) == 0 {
+		return "none"
+	}
+	return docs[0].(obj)["etag"]
+}
+
+// Every hello reconciles the app's set with its files: a file changed by
+// hand is in the welcome's revision, and the app's other sessions and
+// Deps.Changed hear of it.
+func TestHelloReconciles(t *testing.T) {
+	e := newEnv(t)
+	idA, tokA := e.device(t, "todo")
+	idB, tokB := e.device(t, "todo")
+	rev := e.writeDoc(t, "todo", "data.json", `{}`)
+	a, fa := e.login(t, "192.168.1.9:5000", "todo", idA, tokA)
+	if w := framesOf(fa, "welcome")[0]; w["revision"] != rev {
+		t.Fatalf("welcome %v, want revision %s", w, rev)
+	}
+	if got := e.changesHeard(); len(got) != 0 {
+		t.Fatalf("Changed heard %v with nothing changed", got)
+	}
+
+	path := filepath.Join(e.dir, "apps", "todo", "notes", "hand.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("by hand"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, fb := e.login(t, "192.168.1.9:5001", "todo", idB, tokB)
+	now := e.revisionOf(t, "todo")
+	if now == rev {
+		t.Fatal("the hand-made file did not change the revision")
+	}
+	if w := framesOf(fb, "welcome")[0]; w["revision"] != now {
+		t.Errorf("welcome %v, want revision %v", w, now)
+	}
+	if c := waitFrames(t, fa, "changed", 1); c[0]["revision"] != now {
+		t.Errorf("the other session got %v, want changed %v", c, now)
+	}
+	if got := e.changesHeard(); !slices.Equal(got, []string{"todo " + now.(string)}) {
+		t.Errorf("Changed heard %v", got)
+	}
+	if n := countType(settle(t, a, fa), "changed"); n != 1 {
+		t.Errorf("%d changed frames, want 1", n)
+	}
+}
+
+func TestDocumentReads(t *testing.T) {
+	e := newEnv(t)
+	id, token := e.device(t, "todo")
+	s, fc := e.login(t, "192.168.1.9:5000", "todo", id, token)
+
+	s.HandleText(`{"t":"head"}`)
+	s.HandleText(`{"t":"list"}`)
+	s.HandleText(`{"t":"get","path":"","id":"data","type":"json"}`)
+	got := waitFrames(t, fc, "head", 3, "list", "stale")
+	want := []obj{
+		{"t": "head", "revision": nil},
+		{"t": "list", "revision": nil, "docs": []any{}, "removed": []any{}},
+		{"t": "stale", "revision": nil},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("sent %v, want %v", got, want)
+	}
+
+	doc := `{"items":["milk"]}`
+	e.writeDoc(t, "todo", "data.json", doc)
+	rev := e.writeDoc(t, "todo", "photos/p1.jpg", "jpeg")
+	etag := store.Etag([]byte(doc))
+	s.HandleText(`{"t":"head"}`)
+	s.HandleText(`{"t":"list"}`)
+	s.HandleText(frame(obj{"t": "get", "path": "", "id": "data", "type": "json", "etag": etag, "offset": 3}))
+	got = waitFrames(t, fc, "head", 6, "list", "stale", "doc")[3:]
+	want = []obj{
+		{"t": "head", "revision": rev},
+		{"t": "list", "revision": rev, "docs": []any{
+			obj{"path": "", "id": "data", "type": "json", "etag": etag, "bytes": float64(len(doc))},
+			obj{"path": "photos", "id": "p1", "type": "jpg", "etag": store.Etag([]byte("jpeg")), "bytes": float64(4)},
+		}, "removed": []any{}},
+		{"t": "doc", "path": "", "id": "data", "type": "json", "etag": etag, "bytes": float64(len(doc)), "offset": float64(3)},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("sent %v, want %v", got, want)
+	}
+	waitFor(t, "the document body", func() bool { return len(fc.body()) >= len(doc)-3 })
+	if string(fc.body()) != doc[3:] {
+		t.Errorf("body %q, want %q", fc.body(), doc[3:])
+	}
+
+	// At an etag the document no longer has: stale, with the revision now.
+	s.HandleText(frame(obj{"t": "get", "path": "", "id": "data", "type": "json", "etag": store.Etag([]byte("old"))}))
+	if f := waitFrames(t, fc, "stale", 2)[1]; f["revision"] != rev {
+		t.Errorf("stale %v, want revision %s", f, rev)
+	}
+	// A key that breaks the rules.
+	s.HandleText(`{"t":"get","path":"","id":"Data","type":"json"}`)
+	expectError(t, waitFrames(t, fc, "error", 1)[0], protocol.CodeBadPath)
+	if fc.isClosed() {
+		t.Error("channel closed")
+	}
+}
+
+func TestCommitBroadcast(t *testing.T) {
+	e := newEnv(t)
+	e.addApp(t, apps.App{ID: "notes"})
+	idA, tokA := e.device(t, "todo")
+	idB, tokB := e.device(t, "todo")
+	idC, tokC := e.device(t, "notes")
+	a, fa := e.login(t, "192.168.1.9:5000", "todo", idA, tokA)
+	_, fb := e.login(t, "192.168.1.9:5001", "todo", idB, tokB)
+	c, fcC := e.login(t, "192.168.1.9:5002", "notes", idC, tokC)
+
+	doc := []byte(`{"items":[]}`)
+	write(a, "data.json", nil, doc)
+	etag := store.Etag(doc)
+	f := waitFrames(t, fa, "committed", 1)[0]
+	rev := e.revisionOf(t, "todo")
+	if f["revision"] != rev || committedEtag(f) != etag {
+		t.Errorf("committed %v, want revision %v and etag %s", f, rev, etag)
+	}
+	if f := waitFrames(t, fb, "changed", 1)[0]; f["revision"] != rev {
+		t.Errorf("B got %v, want changed %v", f, rev)
+	}
+	if n := countType(settle(t, a, fa), "changed"); n != 0 {
+		t.Errorf("the writer got %d changed frames, want 0", n)
+	}
+	if n := countType(settle(t, c, fcC), "changed"); n != 0 {
+		t.Errorf("a session of another app got %d changed frames, want 0", n)
+	}
+	if got := e.changesHeard(); !slices.Equal(got, []string{"todo " + rev.(string)}) {
+		t.Errorf("Changed heard %v", got)
+	}
+
+	// A commit that changes nothing (the same bytes again) tells nobody.
+	write(a, "data.json", &etag, doc)
+	waitFrames(t, fa, "committed", 2)
+	if n := countType(settle(t, a, fa), "changed"); n != 0 {
+		t.Errorf("the writer got %d changed frames", n)
+	}
+	if got := e.changesHeard(); len(got) != 1 {
+		t.Errorf("Changed heard %v after a commit that changed nothing", got)
+	}
+}
+
+// A conflict leaves the transaction open: the device puts again with the
+// etag the conflict named, and commits the same transaction.
+func TestCommitConflictLeavesTheTransactionOpen(t *testing.T) {
+	e := newEnv(t)
+	idA, tokA := e.device(t, "todo")
+	idB, tokB := e.device(t, "todo")
+	a, fa := e.login(t, "192.168.1.9:5000", "todo", idA, tokA)
+	b, fb := e.login(t, "192.168.1.9:5001", "todo", idB, tokB)
+
+	write(b, "data.json", nil, []byte(`{"v":1}`))
+	waitFrames(t, fb, "committed", 1)
+	etag := store.Etag([]byte(`{"v":1}`))
+
+	tx := newTx()
+	a.HandleText(frame(obj{"t": "begin", "tx": tx}))
+	a.HandleText(frame(obj{"t": "put", "tx": tx, "path": "", "id": "data", "type": "json", "ifEtag": nil, "bytes": 7, "offset": 0}))
+	a.HandleBinary([]byte(`{"v":2}`))
+	a.HandleText(frame(obj{"t": "commit", "tx": tx}))
+	f := waitFrames(t, fa, "conflict", 1)[0]
+	if f["revision"] != e.revisionOf(t, "todo") || committedEtag(f) != etag {
+		t.Errorf("conflict %v, want the current etag %s", f, etag)
+	}
+	// Only the etag changes: no body follows.
+	a.HandleText(frame(obj{"t": "put", "tx": tx, "path": "", "id": "data", "type": "json", "ifEtag": etag, "bytes": 7, "offset": 7}))
+	a.HandleText(frame(obj{"t": "commit", "tx": tx}))
+	f = waitFrames(t, fa, "committed", 1)[0]
+	if committedEtag(f) != store.Etag([]byte(`{"v":2}`)) {
+		t.Errorf("committed %v", f)
+	}
+	if n := countType(settle(t, b, fb), "changed"); n != 1 {
+		t.Errorf("B got %d changed frames, want 1 (the conflict told nobody)", n)
+	}
+}
+
+// A body cut off by the session's end resumes in a new session from what
+// arrived, which began reports.
+func TestPutResumesInANewSession(t *testing.T) {
+	e := newEnv(t)
+	id, token := e.device(t, "todo")
+	s, fc := e.login(t, "192.168.1.9:5000", "todo", id, token)
+	body := bytes.Repeat([]byte("0123456789"), 5000) // 50000 bytes
+	tx := newTx()
+	s.HandleText(frame(obj{"t": "begin", "tx": tx}))
+	s.HandleText(frame(obj{"t": "put", "tx": tx, "path": "big", "id": "b", "type": "bin", "ifEtag": nil, "bytes": len(body), "offset": 0}))
+	s.HandleBinary(body[:16384])
+	s.HandleBinary(body[16384:30000])
+	waitFrames(t, fc, "began", 1)
+	s.Close()
+
+	s2, fc2 := e.login(t, "192.168.1.9:5001", "todo", id, token)
+	s2.HandleText(frame(obj{"t": "begin", "tx": tx}))
+	began := waitFrames(t, fc2, "began", 1)[0]
+	staged := began["staged"].([]any)
+	if len(staged) != 1 || staged[0].(obj)["received"] != float64(30000) || staged[0].(obj)["bytes"] != float64(len(body)) {
+		t.Fatalf("began %v, want the body at 30000 bytes", began)
+	}
+	s2.HandleText(frame(obj{"t": "put", "tx": tx, "path": "big", "id": "b", "type": "bin", "ifEtag": nil, "bytes": len(body), "offset": 30000}))
+	s2.HandleBinary(body[30000:])
+	s2.HandleText(frame(obj{"t": "commit", "tx": tx}))
+	if f := waitFrames(t, fc2, "committed", 1)[0]; committedEtag(f) != store.Etag(body) {
+		t.Errorf("committed %v, want the whole body's etag", f)
+	}
+	if st := framesOf(fc2, "staged"); len(st) != 1 || st[0]["received"] != float64(len(body)) {
+		t.Errorf("staged %v", st)
+	}
+}
+
+// The store's refusals reach the device as their codes, and keep the session
+// open; a bad transaction id closes it.
+func TestTransactionRefusals(t *testing.T) {
+	e := newEnv(t)
+	e.addApp(t, apps.App{ID: "tiny", Quota: apps.MinQuota})
+	id, token := e.device(t, "tiny")
+	s, fc := e.login(t, "192.168.1.9:5000", "tiny", id, token)
+
+	// Past the quota: refused at the put, before any byte is staged; the
+	// body is read and dropped.
+	write(s, "big.bin", nil, bytes.Repeat([]byte("x"), int(apps.MinQuota)+1))
+	errs := waitFrames(t, fc, "error", 1)
+	expectError(t, errs[0], protocol.CodeQuota)
+	if f := waitFrames(t, fc, "committed", 1)[0]; f["revision"] != nil {
+		t.Errorf("committed %v, want an empty transaction", f) // the put was refused
+	}
+
+	tx := newTx()
+	s.HandleText(frame(obj{"t": "begin", "tx": tx}))
+	// A key that breaks the rules.
+	s.HandleText(frame(obj{"t": "delete", "tx": tx, "path": "", "id": "CON", "type": "md", "ifEtag": nil}))
+	expectError(t, waitFrames(t, fc, "error", 2)[1], protocol.CodeBadPath)
+	// A body that has not arrived.
+	s.HandleText(frame(obj{"t": "put", "tx": tx, "path": "", "id": "a", "type": "md", "ifEtag": nil, "bytes": 10, "offset": 0}))
+	s.HandleBinary([]byte("12345"))
+	s.Close()
+	s, fc = e.login(t, "192.168.1.9:5001", "tiny", id, token)
+	s.HandleText(frame(obj{"t": "commit", "tx": tx}))
+	expectError(t, waitFrames(t, fc, "error", 1)[0], protocol.CodeIncomplete)
+	// Another device's transaction, or none.
+	s.HandleText(frame(obj{"t": "commit", "tx": newTx()}))
+	expectError(t, waitFrames(t, fc, "error", 2)[1], protocol.CodeNoTransaction)
+	// An abort of it is idempotent.
+	s.HandleText(frame(obj{"t": "abort", "tx": tx}))
+	s.HandleText(frame(obj{"t": "abort", "tx": tx}))
+	waitFrames(t, fc, "aborted", 2)
+	// Resolve finds nothing to settle until divergence exists.
+	s.HandleText(`{"t":"resolve","server":"Lp7tOp0123ab","keep":"main"}`)
+	if f := waitFrames(t, fc, "resolved", 1)[0]; f["server"] != "Lp7tOp0123ab" {
+		t.Errorf("resolved %v", f)
+	}
+	if fc.isClosed() {
+		t.Fatal("a refusal closed the channel")
+	}
+	s.HandleText(`{"t":"begin","tx":"short"}`)
+	expectClosedWithError(t, fc, protocol.CodeProtocol)
+}
+
+// Two devices committing at the same instant with the same ifEtag: exactly
+// one commits, the other gets conflict with the winner's etag.
+func TestConcurrentCommitsWithSameEtag(t *testing.T) {
+	e := newEnv(t)
+	idA, tokA := e.device(t, "todo")
+	idB, tokB := e.device(t, "todo")
+	a, fa := e.login(t, "192.168.1.9:5000", "todo", idA, tokA)
+	b, fb := e.login(t, "192.168.1.9:5001", "todo", idB, tokB)
+
+	var current *string
+	for round := range 20 {
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i, s := range []*protocol.Session{a, b} {
+			body := []byte(fmt.Sprintf(`{"round":%d,"writer":%d}`, round, i))
+			wg.Go(func() {
+				<-start
+				write(s, "data.json", current, body)
+			})
+		}
+		close(start)
+		wg.Wait()
+
+		ra := waitFrames(t, fa, "committed", round+1, "conflict")[round]
+		rb := waitFrames(t, fb, "committed", round+1, "conflict")[round]
+		var winner, loser obj
+		switch {
+		case ra["t"] == "committed" && rb["t"] == "conflict":
+			winner, loser = ra, rb
+		case rb["t"] == "committed" && ra["t"] == "conflict":
+			winner, loser = rb, ra
+		default:
+			t.Fatalf("round %d: answers %v and %v, want one committed and one conflict", round, ra, rb)
+		}
+		etag, _ := committedEtag(winner).(string)
+		if committedEtag(loser) != etag {
+			t.Fatalf("round %d: conflict %v, want the winner's etag %s", round, loser, etag)
+		}
+		if cur := e.etagOf(t, "todo", "data.json"); cur == nil || *cur != etag {
+			t.Fatalf("round %d: stored etag %v, want the winner's %s", round, cur, etag)
+		}
+		current = &etag
+	}
+}
+
+// A commit that reaches the hub after its device was removed, as one in
+// flight when the device is removed does, commits nothing.
+func TestCommitFromARemovedDevice(t *testing.T) {
+	e := newEnv(t)
+	id, token := e.device(t, "todo")
+	s, fc := e.login(t, "192.168.1.9:5000", "todo", id, token)
+	tx := newTx()
+	s.HandleText(frame(obj{"t": "begin", "tx": tx}))
+	s.HandleText(frame(obj{"t": "put", "tx": tx, "path": "", "id": "data", "type": "json", "ifEtag": nil, "bytes": 2, "offset": 0}))
+	s.HandleBinary([]byte("{}"))
+	waitFrames(t, fc, "staged", 1)
+
+	if !e.hub.RemoveDevice(id) {
+		t.Fatal("RemoveDevice = false")
+	}
+	_, conflict, perr := e.hub.Commit(s, "todo", id, tx)
+	if perr == nil || perr.Code != protocol.CodeBadToken || conflict != nil {
+		t.Errorf("Commit after RemoveDevice = conflict %v, error %v; want error %q", conflict, perr, protocol.CodeBadToken)
+	}
+	if rev := e.revisionOf(t, "todo"); rev != nil {
+		t.Errorf("revision %v, want nothing committed", rev)
+	}
+	if _, perr := e.hub.Begin("todo", id, newTx()); perr == nil || perr.Code != protocol.CodeBadToken {
+		t.Errorf("Begin after RemoveDevice = %v, want %q", perr, protocol.CodeBadToken)
+	}
+}
+
+func TestGetAndCommitInternalErrors(t *testing.T) {
+	e := newEnv(t)
+	id, token := e.device(t, "todo")
+	idB, tokenB := e.device(t, "todo")
+	s, fc := e.login(t, "192.168.1.9:5000", "todo", id, token)
+	other, fo := e.login(t, "192.168.1.9:5001", "todo", idB, tokenB)
+	repair := e.breakDocument(t, "todo")
+
+	s.HandleText(`{"t":"get","path":"","id":"data","type":"json"}`)
+	expectError(t, waitFrames(t, fc, "error", 1)[0], protocol.CodeInternal)
+	write(s, "data.json", nil, []byte(`{"a":1}`)) // begin, put and commit fail
+	for _, f := range waitFrames(t, fc, "error", 4)[1:] {
+		expectError(t, f, protocol.CodeInternal)
+	}
+	expectNoFileInFrames(t, e, fc)
+	if fc.isClosed() {
+		t.Fatal("an internal error closed the channel")
+	}
+
+	// The failures told nobody: the next commit is the only change.
+	repair()
+	write(s, "data.json", nil, []byte(`{"a":2}`))
+	waitFrames(t, fc, "committed", 1)
+	frames := settle(t, other, fo)
+	if changed := framesOf(&fakeChannel{texts: frames}, "changed"); len(changed) != 1 || changed[0]["revision"] != e.revisionOf(t, "todo") {
+		t.Errorf("the other session got %v, want one changed for the commit", changed)
+	}
+}
+
+// A commit that fails before the store's commit point leaves its
+// transaction open: nothing was applied, and the device, which lists again,
+// finds what it staged with a begin of the same id, and commits it.
+func TestCommitFailureBeforeTheCommitPoint(t *testing.T) {
+	e := newEnv(t)
+	id, token := e.device(t, "todo")
+	s, fc := e.login(t, "192.168.1.9:5000", "todo", id, token)
+	tx := newTx()
+	s.HandleText(frame(obj{"t": "begin", "tx": tx}))
+	s.HandleText(frame(obj{"t": "put", "tx": tx, "path": "", "id": "a", "type": "md", "ifEtag": nil, "bytes": 1, "offset": 0}))
+	s.HandleBinary([]byte("a"))
+	waitFrames(t, fc, "staged", 1)
+
+	repair := e.breakDocument(t, "todo")
+	s.HandleText(frame(obj{"t": "commit", "tx": tx}))
+	expectError(t, waitFrames(t, fc, "error", 1)[0], protocol.CodeInternal)
+	repair()
+	s.HandleText(frame(obj{"t": "begin", "tx": tx}))
+	if staged := waitFrames(t, fc, "began", 2)[1]["staged"].([]any); len(staged) != 1 {
+		t.Fatalf("began %v, want the body still staged", staged)
+	}
+	s.HandleText(frame(obj{"t": "commit", "tx": tx}))
+	if f := waitFrames(t, fc, "committed", 1)[0]; committedEtag(f) != store.Etag([]byte("a")) {
+		t.Errorf("committed %v", f)
+	}
+}
+
+// Deps.Changed runs once the hub's locks are released: the app's lock and
+// the servers lock are both free inside it.
+func TestChangedRunsOutsideTheLocks(t *testing.T) {
+	e := newEnv(t)
+	var locked atomic.Bool
+	e.hookMu.Lock()
+	e.onChange = func(app string) {
+		free := make(chan struct{})
+		go func() {
+			l := e.hub.appLock(app)
+			l.Lock()
+			l.Unlock()
+			e.hub.servers.Lock()
+			e.hub.servers.Unlock()
+			close(free)
+		}()
+		select {
+		case <-free:
+		case <-time.After(time.Second):
+			locked.Store(true)
+		}
+	}
+	e.hookMu.Unlock()
+
+	id, tok := e.device(t, "todo")
+	a, fa := e.login(t, "192.168.1.9:5000", "todo", id, tok)
+	write(a, "data.json", nil, []byte(`{"v":1}`))
+	waitFrames(t, fa, "committed", 1)
+	tx, _, err := e.hub.BeginLink("todo", newTx())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Delete(keyOf("data.json"), ptr(store.Etag([]byte(`{"v":1}`)))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.changesHeard(); len(got) != 2 {
+		t.Fatalf("Changed heard %v, want the device's commit and the link's", got)
+	}
+	if locked.Load() {
+		t.Error("Changed ran under the app's lock or the servers lock")
+	}
 }

@@ -5,10 +5,18 @@ import {
 	BUFFER_LOW_BYTES,
 	ChannelFraming,
 	MAX_MESSAGE_BYTES,
+	type Incoming,
 } from '../src/ChannelFraming.js';
 import { PAIRING_CODE_VERSION, parsePairingCode, type ServerTarget } from '../src/PairingCode.js';
 import { buildServerAnswer } from '../src/serverAnswer.js';
-import { PROTOCOL_VERSION, ServerClient } from '../src/ServerClient.js';
+import {
+	LIST_PAGE,
+	PROTOCOL_VERSION,
+	ServerClient,
+	isStale,
+	type DocumentKey,
+	type Keep,
+} from '../src/ServerClient.js';
 import { SERVER_ERROR_CODES, WorkspaceError } from '../src/WorkspaceError.js';
 import { FakeChannel } from '../src/testing/FakeChannel.js';
 import { settle } from './fixtures.js';
@@ -37,6 +45,7 @@ describe('conformance: constants and codes', () => {
 			chunkBytes: number;
 			bufferHighBytes: number;
 			bufferLowBytes: number;
+			listPage: number;
 		}>('constants.json');
 
 		expect(PROTOCOL_VERSION).toBe(c.proto);
@@ -44,6 +53,7 @@ describe('conformance: constants and codes', () => {
 		expect(MAX_MESSAGE_BYTES).toBe(c.chunkBytes);
 		expect(BUFFER_HIGH_BYTES).toBe(c.bufferHighBytes);
 		expect(BUFFER_LOW_BYTES).toBe(c.bufferLowBytes);
+		expect(LIST_PAGE).toBe(c.listPage);
 	});
 
 	it('knows every server error code', () => {
@@ -101,33 +111,95 @@ describe('conformance: the SDP answer', () => {
 });
 
 describe('conformance: chunks', () => {
-	const { cases } = vectors<{ cases: { bytes: number; chunks: number[] }[] }>('chunks.json');
+	const { cases } = vectors<{ cases: { bytes: number; offset: number; chunks: number[] }[] }>(
+		'chunks.json',
+	);
+	const pieces = (channel: FakeChannel): Uint8Array[] =>
+		channel.sent.filter((item): item is Uint8Array => typeof item !== 'string');
+	const numbered = (bytes: number): Uint8Array<ArrayBuffer> =>
+		Uint8Array.from({ length: bytes }, (_, i) => i % 251);
 
-	it.each(cases.map((c) => [c.bytes, c] as const))('sends a body of %i bytes', async (_, c) => {
-		const channel = new FakeChannel();
-		const framing = new ChannelFraming(
-			channel,
-			() => undefined,
-			() => undefined,
-		);
+	it.each(cases.map((c) => [c.bytes, c.offset, c] as const))(
+		'sends a body of %i bytes from %i, from memory and from a Blob',
+		async (_, __, c) => {
+			for (const body of [numbered(c.bytes), new Blob([numbered(c.bytes)])]) {
+				const channel = new FakeChannel();
+				const framing = new ChannelFraming(
+					channel,
+					() => undefined,
+					() => undefined,
+				);
 
-		await framing.sendFrameWithBody({ t: 'put', ifEtag: null }, new Uint8Array(c.bytes));
+				await framing.sendFrameWithBody({ t: 'put', ifEtag: null }, body, c.offset);
 
-		expect(channel.sentFrames()).toEqual([{ t: 'put', ifEtag: null, bytes: c.bytes }]);
-		const pieces = channel.sent.filter((item): item is Uint8Array => typeof item !== 'string');
-		expect(pieces.map((piece) => piece.byteLength)).toEqual(c.chunks);
-	});
+				expect(channel.sentFrames()).toEqual([
+					{ t: 'put', ifEtag: null, bytes: c.bytes, offset: c.offset },
+				]);
+				expect(pieces(channel).map((piece) => piece.byteLength)).toEqual(c.chunks);
+				const sent = new Uint8Array(c.bytes - c.offset);
+				pieces(channel).reduce((at, piece) => (sent.set(piece, at), at + piece.byteLength), 0);
+				expect(sent).toEqual(numbered(c.bytes).subarray(c.offset));
+			}
+		},
+	);
+
+	it.each(cases.map((c) => [c.bytes, c.offset, c] as const))(
+		'receives a body of %i bytes from %i',
+		(_, __, c) => {
+			const channel = new FakeChannel();
+			const incoming: Incoming[] = [];
+			new ChannelFraming(
+				channel,
+				(message) => incoming.push(message),
+				() => undefined,
+			);
+			const frame = { t: 'doc', etag: 'e1', bytes: c.bytes, offset: c.offset };
+
+			channel.receiveFrame(frame);
+			const body = numbered(c.bytes);
+			let at = c.offset;
+			for (const size of c.chunks) {
+				expect(incoming).toEqual([]);
+				channel.receiveBinary(body.subarray(at, at + size));
+				at += size;
+			}
+
+			expect(incoming).toEqual([{ frame, body: body.subarray(c.offset) }]);
+		},
+	);
 });
 
 interface Call {
-	method: 'hello' | 'pair' | 'head' | 'get' | 'put' | 'forget';
+	method:
+		| 'hello'
+		| 'pair'
+		| 'head'
+		| 'list'
+		| 'get'
+		| 'begin'
+		| 'put'
+		| 'delete'
+		| 'commit'
+		| 'abort'
+		| 'resolve'
+		| 'forget';
 	app?: string;
 	device?: string;
 	token?: string;
 	secret?: string;
 	name?: string;
+	revision?: string | null;
+	cursor?: string;
+	path?: string;
+	id?: string;
+	type?: string;
+	etag?: string | null;
+	offset?: number;
+	tx?: string;
 	ifEtag?: string | null;
 	body?: string;
+	server?: string;
+	keep?: Keep;
 }
 
 interface Exchange {
@@ -135,13 +207,21 @@ interface Exchange {
 	call?: Call;
 	client?: Json;
 	clientBody?: string;
-	push?: string;
+	push?: string | null;
+	pushDiverged?: unknown[];
+	pushResolved?: string;
 	server: Json[];
 	serverBody?: string;
 	closes?: boolean;
 	result?: unknown;
 	error?: string;
 }
+
+const keyOf = (call: Call): DocumentKey => ({
+	path: call.path ?? '',
+	id: call.id ?? '',
+	type: call.type ?? '',
+});
 
 /** Starts a call on the client; a `get` resolves with its body as text, to compare. */
 function start(client: ServerClient, call: Call): Promise<unknown> {
@@ -152,10 +232,34 @@ function start(client: ServerClient, call: Call): Promise<unknown> {
 			return client.pair(call.secret ?? '', call.name ?? '');
 		case 'head':
 			return client.head();
+		case 'list': {
+			const options: { revision?: string | null; cursor?: string } = {};
+			if ('revision' in call) options.revision = call.revision;
+			if (call.cursor !== undefined) options.cursor = call.cursor;
+			return client.list(options);
+		}
 		case 'get':
-			return client.get().then((doc) => ({ etag: doc.etag, body: text(doc.body) }));
+			return client
+				.get(keyOf(call), { etag: call.etag, offset: call.offset })
+				.then((doc) => (isStale(doc) ? doc : { ...doc, body: text(doc.body) }));
+		case 'begin':
+			return client.begin(call.tx ?? '');
 		case 'put':
-			return client.put(call.ifEtag ?? null, utf8(call.body ?? ''));
+			return client.put(
+				call.tx ?? '',
+				keyOf(call),
+				call.ifEtag ?? null,
+				utf8(call.body ?? ''),
+				call.offset,
+			);
+		case 'delete':
+			return client.delete(call.tx ?? '', keyOf(call), call.ifEtag ?? null);
+		case 'commit':
+			return client.commit(call.tx ?? '');
+		case 'abort':
+			return client.abort(call.tx ?? '');
+		case 'resolve':
+			return client.resolve(call.server ?? '', call.keep ?? 'main');
 		case 'forget':
 			return client.forget().then(() => null);
 	}
@@ -168,10 +272,13 @@ function playServer(channel: FakeChannel, frames: Json[], body = ''): void {
 		channel.receiveFrame(
 			frame.t === 'error' && frame.message === undefined ? { ...frame, message: 'x' } : frame,
 		);
-		if (typeof frame.bytes === 'number' && frame.bytes > 0) {
+		const offset = typeof frame.offset === 'number' ? frame.offset : 0;
+		const length = typeof frame.bytes === 'number' ? frame.bytes - offset : 0;
+		if (length > 0) {
 			const bytes = utf8(body);
-			for (let offset = 0; offset < bytes.byteLength; offset += MAX_MESSAGE_BYTES) {
-				channel.receiveBinary(bytes.subarray(offset, offset + MAX_MESSAGE_BYTES));
+			expect(bytes.byteLength).toBe(length);
+			for (let at = 0; at < bytes.byteLength; at += MAX_MESSAGE_BYTES) {
+				channel.receiveBinary(bytes.subarray(at, at + MAX_MESSAGE_BYTES));
 			}
 		}
 	}
@@ -197,9 +304,11 @@ describe('conformance: exchanges', () => {
 		const channel = new FakeChannel();
 		const client = new ServerClient(channel, { app: ex.call?.app ?? 'todo' });
 
-		if (ex.push !== undefined) {
-			const heard: string[] = [];
-			client.onChanged((etag) => heard.push(etag));
+		if ('push' in ex || ex.pushDiverged !== undefined || ex.pushResolved !== undefined) {
+			const heard: unknown[] = [];
+			client.onChanged((revision) => heard.push(revision));
+			client.onDiverged((servers) => heard.push(servers));
+			client.onResolved((server) => heard.push(server));
 			playServer(channel, ex.server);
 			expect(heard).toEqual([ex.result]);
 			return;

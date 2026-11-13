@@ -1,8 +1,9 @@
 {
-	"about": "Numbers both sides hold as constants.",
+	"about": "Numbers both sides hold as constants. listPage is the most entries one list page carries.",
 	"proto": 1,
 	"pairingCodePrefix": "wsrv1.",
 	"chunkBytes": 16384,
 	"bufferHighBytes": 1048576,
-	"bufferLowBytes": 262144
+	"bufferLowBytes": 262144,
+	"listPage": 500
 }

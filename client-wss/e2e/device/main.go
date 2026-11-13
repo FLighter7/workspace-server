@@ -1,24 +1,29 @@
 // Command device is a device for the page's e2e tests, which build it with
 // Go as they build the server. It pairs with a main for one app, connects to
-// the main's one subordinate on this machine (at 127.0.0.1), and writes
-// documents there, which the subordinate's link pushes on to the main: enough
-// of them, quickly enough, trip the subordinate's write guard.
+// the main's one subordinate on this machine (at 127.0.0.1), and writes the
+// app's document data.json there, again and again, each write a transaction,
+// which the subordinate's link pushes on to the main: enough of them, quickly
+// enough, trip the subordinate's write guard.
 //
 //	device -code <the main's pairing code> [-app todo] [-pushed 10] [-extra 1]
 //
-// The first pushed documents are written one at a time, each once the main
-// holds the one before; extra more follow at once, without waiting. It prints
-// the device id and the last document written as JSON, and exits 1 with the
-// reason on stderr when something fails.
+// The first pushed writes are made one at a time, each once the main holds
+// the one before (its set has the subordinate's revision); extra more follow
+// at once, without waiting. It prints the device id and the last body
+// written as JSON, and exits 1 with the reason on stderr when something
+// fails.
 package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/FLighter7/workspace-server/internal/wsclient"
@@ -46,8 +51,11 @@ func main() {
 
 type result struct {
 	Device string `json:"device"`
-	Last   string `json:"last"` // the last document written
+	Last   string `json:"last"` // the last body written
 }
+
+// data is the document the device writes: data.json at the app's root.
+var data = wsclient.Key{Path: "", ID: "data", Type: "json"}
 
 func run(ctx context.Context, code, app string, pushed, extra int) (result, error) {
 	c, err := wsclient.ParseCode(code)
@@ -82,16 +90,13 @@ func run(ctx context.Context, code, app string, pushed, extra int) (result, erro
 	var body string
 	for i := 1; i <= pushed+extra; i++ {
 		body = fmt.Sprintf(`{"run":%d,"n":%d}`, run, i)
-		stored, e, err := sub.Put(ctx, etag, []byte(body))
+		rev, e, err := write(ctx, sub, etag, body)
 		if err != nil {
 			return result{}, fmt.Errorf("write %d: %w", i, err)
 		}
-		if !stored {
-			return result{}, fmt.Errorf("write %d: the subordinate's document changed meanwhile", i)
-		}
 		etag = e
 		if i <= pushed {
-			if err := reached(ctx, up, *e); err != nil {
+			if err := reached(ctx, up, rev); err != nil {
 				return result{}, fmt.Errorf("write %d did not reach the main: %w", i, err)
 			}
 		}
@@ -99,18 +104,61 @@ func run(ctx context.Context, code, app string, pushed, extra int) (result, erro
 	return result{Device: p.Device, Last: body}, nil
 }
 
+// write writes body as data.json, which must have ifEtag, in a transaction
+// of its own, and returns the set's revision and the document's etag after
+// it.
+func write(ctx context.Context, cl *wsclient.Client, ifEtag *string, body string) (*string, *string, error) {
+	tx := newTx()
+	if _, err := cl.Begin(ctx, tx); err != nil {
+		return nil, nil, err
+	}
+	if _, err := cl.Put(ctx, tx, data, ifEtag, int64(len(body)), 0, strings.NewReader(body)); err != nil {
+		return nil, nil, err
+	}
+	r, err := cl.Commit(ctx, tx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !r.Committed {
+		return nil, nil, errors.New("the subordinate's document changed meanwhile")
+	}
+	for _, d := range r.Docs {
+		if d.Key == data {
+			return r.Revision, d.Etag, nil
+		}
+	}
+	return nil, nil, errors.New("the commit does not name data.json")
+}
+
+func newTx() string {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	return "e2e-" + hex.EncodeToString(b)
+}
+
 // admitted connects the paired device to the subordinate, which admits it
 // once the main's registry has reached it, and returns the session and the
-// subordinate's etag.
+// etag of the subordinate's data.json (nil when there is none).
 func admitted(ctx context.Context, t wsclient.Target, app string, p wsclient.Paired) (*wsclient.Client, *string, error) {
 	for {
 		cl, err := wsclient.Dial(ctx, t, app, wsclient.DialOptions{})
 		if err != nil {
 			return nil, nil, err
 		}
-		w, err := cl.Hello(ctx, p.Device, p.Token)
+		_, err = cl.Hello(ctx, p.Device, p.Token)
 		if err == nil {
-			return cl, w.Etag, nil
+			l, err := cl.ListAll(ctx)
+			if err != nil {
+				cl.Close()
+				return nil, nil, err
+			}
+			for _, d := range l.Docs {
+				if d.Key == data {
+					etag := d.Etag
+					return cl, &etag, nil
+				}
+			}
+			return cl, nil, nil
 		}
 		cl.Close()
 		if !wsclient.HasCode(err, "badToken") {
@@ -122,14 +170,14 @@ func admitted(ctx context.Context, t wsclient.Target, app string, p wsclient.Pai
 	}
 }
 
-// reached waits until the main's document has etag.
-func reached(ctx context.Context, up *wsclient.Client, etag string) error {
+// reached waits until the main's set has the revision rev.
+func reached(ctx context.Context, up *wsclient.Client, rev *string) error {
 	for {
 		head, err := up.Head(ctx)
 		if err != nil {
 			return err
 		}
-		if head != nil && *head == etag {
+		if head != nil && rev != nil && *head == *rev {
 			return nil
 		}
 		if err := pause(ctx, 50*time.Millisecond); err != nil {

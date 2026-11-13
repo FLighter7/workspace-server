@@ -125,8 +125,8 @@ func TestTwoServersLinkPullAndPush(t *testing.T) {
 	if err != nil || sw.Role != "subordinate" || sw.ServerID != si.ServerID {
 		t.Fatalf("hello on the subordinate: %+v, %v", sw, err)
 	}
-	if stored, _, err := phone.Put(ctx, sw.Etag, []byte(`{"v":2}`)); err != nil || !stored {
-		t.Fatalf("put on the subordinate: stored %v, %v", stored, err)
+	if err := writeDataJSON(ctx, phone, `{"v":2}`); err != nil {
+		t.Fatalf("put on the subordinate: %v", err)
 	}
 	waitUntil(t, "the push to the main", func() bool {
 		code, doc := main.send(t, http.MethodGet, "/api/apps/todo/document", "")
@@ -319,4 +319,32 @@ func TestReloadAppsKeepsLinkSessions(t *testing.T) {
 	if ch.isClosed() {
 		t.Error("reloading apps.json closed the link session")
 	}
+}
+
+// writeDataJSON writes body as the app's data.json over cl, in a transaction of
+// its own, over whatever data.json the set holds.
+func writeDataJSON(ctx context.Context, cl *wsclient.Client, body string) error {
+	data := wsclient.Key{ID: "data", Type: "json"}
+	l, err := cl.ListAll(ctx)
+	if err != nil {
+		return err
+	}
+	var ifEtag *string
+	for _, d := range l.Docs {
+		if d.Key == data {
+			ifEtag = &d.Etag
+		}
+	}
+	const tx = "upstream-test-0001"
+	if _, err := cl.Begin(ctx, tx); err != nil {
+		return err
+	}
+	if _, err := cl.Put(ctx, tx, data, ifEtag, int64(len(body)), 0, strings.NewReader(body)); err != nil {
+		return err
+	}
+	r, err := cl.Commit(ctx, tx)
+	if err == nil && !r.Committed {
+		err = errors.New("the commit met a conflict")
+	}
+	return err
 }

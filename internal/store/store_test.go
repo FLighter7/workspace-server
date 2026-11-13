@@ -520,6 +520,37 @@ func TestOpen(t *testing.T) {
 	}
 }
 
+func TestOpenLatest(t *testing.T) {
+	e := newEnv(t)
+	e.commitAll("todo", map[string]string{"a/b.bin": "0123456789"})
+	k := key(t, "a/b.bin")
+	f, info, err := e.s.OpenLatest("todo", k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if info.Etag != etagOf("0123456789") || info.Bytes != 10 {
+		t.Errorf("info = %+v", info)
+	}
+	// Edited by hand: the new bytes, reconciled first.
+	e.writeFile("todo", "a/b.bin", "abc")
+	f, info, err = e.s.OpenLatest("todo", k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(f)
+	f.Close()
+	if string(body) != "abc" || info.Etag != etagOf("abc") || info.Bytes != 3 {
+		t.Errorf("after a hand edit: %q, %+v", body, info)
+	}
+	if _, _, err := e.s.OpenLatest("todo", key(t, "a/c.bin")); !errors.Is(err, ErrStale) {
+		t.Errorf("OpenLatest of no document = %v, want ErrStale", err)
+	}
+	if _, _, err := e.s.OpenLatest("todo", Key{ID: "Bad", Type: "bin"}); !errors.Is(err, ErrBadPath) {
+		t.Errorf("OpenLatest of a bad key = %v, want ErrBadPath", err)
+	}
+}
+
 func TestStats(t *testing.T) {
 	e := newEnv(t)
 	e.quota = 4 << 20

@@ -2,7 +2,14 @@ import { browserDeviceName } from './deviceName.js';
 import { openServerChannel } from './openServerChannel.js';
 import type { FallbackServer, PairingCode, ServerTarget } from './PairingCode.js';
 import type { Pairing, PairingStore } from './PairingStore.js';
-import { ServerClient, type Welcome } from './ServerClient.js';
+import {
+	ServerClient,
+	isStale,
+	listAll,
+	type CommitResult,
+	type DocumentKey,
+	type Welcome,
+} from './ServerClient.js';
 import { DocumentError, WorkspaceError, type WorkspaceErrorCode } from './WorkspaceError.js';
 
 export type SyncStatus =
@@ -26,8 +33,30 @@ export interface SyncState<DocCode extends string = never> {
 /** The part of `ServerClient` the engine uses, so tests can stand in a fake server. */
 export type SyncClient = Pick<
 	ServerClient,
-	'hello' | 'pair' | 'head' | 'get' | 'put' | 'forget' | 'onChanged' | 'onClosed' | 'close'
+	| 'hello'
+	| 'pair'
+	| 'head'
+	| 'list'
+	| 'get'
+	| 'begin'
+	| 'put'
+	| 'commit'
+	| 'abort'
+	| 'forget'
+	| 'onChanged'
+	| 'onClosed'
+	| 'close'
 >;
+
+/**
+ * The one document this engine syncs: `data.json` at the app's root. An
+ * app's set may hold other documents; this engine leaves them alone.
+ */
+export const SYNC_DOCUMENT: Readonly<DocumentKey> = Object.freeze({
+	path: '',
+	id: 'data',
+	type: 'json',
+});
 
 /** The server's document as read: its etag, `null` with an empty body when there is none yet. */
 export interface ServerDocument {
@@ -106,7 +135,11 @@ export const BLOCKED_RETRY_MS = 60_000;
 export const CHANGE_DEBOUNCE_MS = 3000;
 /** A last line of defence against a write loop: past this, writing stops until the app reopens. */
 export const MAX_WRITES_PER_MINUTE = 10;
-/** How many times one sync re-reads and re-merges after another device wrote first. */
+/**
+ * How many times one sync re-reads and re-merges after another device wrote
+ * first, the document changed between the listing and the read, or a write
+ * failed in a way a fresh read settles.
+ */
 export const MAX_CONFLICT_RETRIES = 3;
 /**
  * How long, from the start of a connection, a pairing with fallback servers
@@ -117,6 +150,31 @@ export const MAX_CONFLICT_RETRIES = 3;
 export const MAIN_GRACE_MS = 2000;
 
 const WRITE_WINDOW_MS = 60_000;
+
+/** A new transaction id: 22 characters of base64url, from 16 random bytes. */
+function newTransactionId(): string {
+	const bytes = crypto.getRandomValues(new Uint8Array(16));
+	let binary = '';
+	for (const byte of bytes) binary += String.fromCharCode(byte);
+
+	return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function isSyncDocument(key: DocumentKey): boolean {
+	return (
+		key.path === SYNC_DOCUMENT.path &&
+		key.id === SYNC_DOCUMENT.id &&
+		key.type === SYNC_DOCUMENT.type
+	);
+}
+
+/**
+ * The failures of a write after which the sync reads and merges again: the
+ * transaction went (another session of this device began one), or the
+ * server failed on its side, possibly after its commit point, so the write
+ * may have landed; the next listing says which.
+ */
+const RETRY_WRITE: ReadonlySet<string> = new Set<WorkspaceErrorCode>(['noTransaction', 'internal']);
 
 /**
  * Errors after which retrying cannot help: sync stops until the device pairs
@@ -204,8 +262,9 @@ function fallbacksFrom(
  * main of the family is the server the device pairs with, so that only its
  * refusals stop sync and the device follows the family through every switch
  * of its main. The server it paired with before becomes a fallback. The
- * device id, the token and `lastEtag` stay: every server of the family
- * admits the same device, and an etag is the document's hash.
+ * device id, the token, `lastEtag` and `lastRevision` stay: every server of
+ * the family admits the same device, an etag is the document's hash, and a
+ * revision the set's.
  */
 function movedTo(pairing: Pairing, main: FallbackServer, welcome: Welcome): Pairing {
 	const before: FallbackServer = {
@@ -253,6 +312,11 @@ function withFallbacks(pairing: Pairing, fallbacks: FallbackServer[]): Pairing {
  * is only ever one connection, and closing it invalidates whatever was
  * still in flight on it. A write is always conditional on the etag read, and
  * a lost race re-reads and re-merges.
+ *
+ * It syncs one document of the app's set, `SYNC_DOCUMENT` (`data.json`): a
+ * sync asks for the set's revision, and when it moved, lists the set, reads
+ * the document at the etag the listing names, and writes it in a
+ * transaction conditional on that etag.
  */
 export class SyncEngine<DocCode extends string = never> {
 	private readonly store: PairingStore;
@@ -707,14 +771,40 @@ export class SyncEngine<DocCode extends string = never> {
 		try {
 			const head = await client.head();
 			if (!current()) return;
-			if (head === pairing.lastEtag && this.syncedCount === this.adapter.changeCount()) {
+			if (head === pairing.lastRevision && this.syncedCount === this.adapter.changeCount()) {
 				this.setState({ status: 'connected' });
 				return;
 			}
 
 			for (let attempt = 0; ; attempt++) {
-				const doc = await client.get();
+				/** Lets the loop go round again, or throws `error` once the attempts are used up. */
+				const retry = (error: WorkspaceError<string>): void => {
+					if (attempt >= MAX_CONFLICT_RETRIES) throw error;
+				};
+
+				const listing = await listAll(client);
 				if (!current()) return;
+				const listed = listing.docs.find(isSyncDocument);
+				if (
+					(listed?.etag ?? null) === pairing.lastEtag &&
+					this.syncedCount === this.adapter.changeCount()
+				) {
+					// Only other documents of the set moved.
+					this.savePairing({ lastRevision: listing.revision });
+					this.setState({ status: 'connected', error: null });
+					return;
+				}
+
+				let doc: ServerDocument = { etag: null, body: new Uint8Array(0) };
+				if (listed) {
+					const read = await client.get(SYNC_DOCUMENT, { etag: listed.etag });
+					if (!current()) return;
+					if (isStale(read)) {
+						retry(new WorkspaceError('The document kept changing while it was read', 'conflict'));
+						continue;
+					}
+					doc = { etag: read.etag, body: read.body };
+				}
 
 				const now = this.now();
 				// Read with the merge, with no await between: the adapter reads the
@@ -726,21 +816,25 @@ export class SyncEngine<DocCode extends string = never> {
 				if (!current()) return;
 
 				let etag = doc.etag;
+				let revision = listing.revision;
 				if (plan.write) {
 					this.guardWrite(now);
-					const put = await client.put(doc.etag, plan.write);
-					if (!current()) return;
-					if (!put.stored) {
-						if (attempt >= MAX_CONFLICT_RETRIES) {
-							throw new WorkspaceError('Another device kept writing first', 'conflict');
-						}
+					const written = await this.write(client, doc.etag, plan.write, current);
+					if (written === null) return;
+					if (written instanceof WorkspaceError) {
+						retry(written);
 						continue;
 					}
-					etag = put.etag;
+					etag = written.docs.find(isSyncDocument)?.etag ?? null;
+					revision = written.revision;
 				}
 
 				this.syncedCount = count;
-				this.savePairing({ lastEtag: etag, lastSyncAt: now.toISOString() });
+				this.savePairing({
+					lastEtag: etag,
+					lastRevision: revision,
+					lastSyncAt: now.toISOString(),
+				});
 				this.retryIndex = 0;
 				this.setState({ status: 'connected', error: null });
 				return;
@@ -749,6 +843,46 @@ export class SyncEngine<DocCode extends string = never> {
 			if (!current()) return;
 			this.fail(asWorkspaceError(error));
 		}
+	}
+
+	/**
+	 * Writes `body` as `SYNC_DOCUMENT` in a transaction of its own, if the
+	 * document still has `ifEtag`. Resolves with the commit, with the error
+	 * to read and merge again after (a conflict, or a failure in
+	 * `RETRY_WRITE`), or with `null` once the client was dropped meanwhile;
+	 * any other failure is thrown.
+	 */
+	private async write(
+		client: SyncClient,
+		ifEtag: string | null,
+		body: Uint8Array,
+		current: () => boolean,
+	): Promise<CommitResult | WorkspaceError<string> | null> {
+		const tx = newTransactionId();
+		let result: CommitResult;
+		try {
+			await client.begin(tx);
+			if (!current()) return null;
+			await client.put(tx, SYNC_DOCUMENT, ifEtag, body);
+			if (!current()) return null;
+			result = await client.commit(tx);
+			if (!current()) return null;
+		} catch (error) {
+			if (!current()) return null;
+			const failure = asWorkspaceError(error);
+			// A failure after the commit point may have applied the write and
+			// ended the transaction; one before it leaves the transaction open,
+			// which the next begin discards. Either way the next listing tells.
+			if (RETRY_WRITE.has(failure.code)) return failure;
+			throw failure;
+		}
+		if (result.committed) return result;
+
+		// A conflict leaves the transaction open; the next begin would discard
+		// it, but it need not wait for that.
+		await client.abort(tx);
+		if (!current()) return null;
+		return new WorkspaceError('Another device kept writing first', 'conflict');
 	}
 
 	/** Counts a write, refusing it past the limit. */
@@ -790,8 +924,8 @@ export class SyncEngine<DocCode extends string = never> {
 			return;
 		}
 
-		// A refusal retrying will not cure by itself (tooLarge, notJson, a
-		// conflict that kept recurring…): say so, and try again on the next
+		// A refusal retrying will not cure by itself (quota, a conflict that
+		// kept recurring…): say so, and try again on the next
 		// trigger. An open connection stays open for it; one that closed is
 		// reconnected then.
 		this.setState({ status: 'error', error });

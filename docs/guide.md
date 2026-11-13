@@ -4,9 +4,9 @@
 
 ## What it is
 
-`workspace-server` is a small program you run on your own computer. It keeps each app's data as one JSON file in a folder on your disk, and it is the meeting point through which that app's devices (your phone, your laptop) sync with each other.
+`workspace-server` is a small program you run on your own computer. It keeps each app's data as plain files in a folder on your disk, and it is the meeting point through which that app's devices (your phone, your laptop) sync with each other.
 
-- **It knows nothing about the apps' data.** It stores what an app sends, checks only that it is JSON, and tells versions apart by their hash. There is no database and no schema.
+- **It knows nothing about the apps' data.** It stores what an app sends, in whatever format the app chose, and tells versions apart by their hash. There is no database and no schema.
 - **It works over your local network.** Devices connect to it over WebRTC. After a one-time pairing, a device connects by itself whenever its app is open.
 - **It needs no outside services.** There is no domain, no certificate to install, no account and no internet connection involved.
 
@@ -278,7 +278,7 @@ To run a second, separate server, or one on other ports for one run:
 
 ## Known limits
 
-- **Scope:** local network and IPv4 only. No accounts, one document per app.
+- **Scope:** local network and IPv4 only. No accounts; the server never merges what two devices wrote.
 - **Windows:** finding the server by its `.local` name takes about a second, but devices also have its IP addresses.
 - **Windows, background mode:** the server started by `start` or at login has no console window. Closing a window therefore no longer stops it: use the Stop button on the web page, or `stop`.
 - **Tested so far:**

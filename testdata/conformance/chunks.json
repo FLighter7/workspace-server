@@ -1,24 +1,28 @@
 {
-	"about": "A body of this many bytes goes out as binary messages of these sizes, after the frame that announces it.",
+	"about": "A body of this many bytes, sent from this offset, goes out as binary messages of these sizes after the frame that announces it: the bytes past the offset, cut into pieces of chunkBytes from the offset on. A put's body is cut the same way, and a receiver takes pieces of any size up to chunkBytes.",
 	"cases": [
 		{
 			"bytes": 0,
+			"offset": 0,
 			"chunks": []
 		},
 		{
 			"bytes": 1,
+			"offset": 0,
 			"chunks": [
 				1
 			]
 		},
 		{
 			"bytes": 16384,
+			"offset": 0,
 			"chunks": [
 				16384
 			]
 		},
 		{
 			"bytes": 16385,
+			"offset": 0,
 			"chunks": [
 				16384,
 				1
@@ -26,10 +30,39 @@
 		},
 		{
 			"bytes": 40000,
+			"offset": 0,
 			"chunks": [
 				16384,
 				16384,
 				7232
+			]
+		},
+		{
+			"bytes": 40000,
+			"offset": 40000,
+			"chunks": []
+		},
+		{
+			"bytes": 40000,
+			"offset": 39999,
+			"chunks": [
+				1
+			]
+		},
+		{
+			"bytes": 40000,
+			"offset": 1000,
+			"chunks": [
+				16384,
+				16384,
+				6232
+			]
+		},
+		{
+			"bytes": 40000,
+			"offset": 23616,
+			"chunks": [
+				16384
 			]
 		}
 	]

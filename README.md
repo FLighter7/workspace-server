@@ -1,8 +1,8 @@
 # workspace-server
 
-A small program you run on your own computer: it keeps each app's data as one JSON file on your disk and syncs that app's devices over WebRTC on your local network.
+A small program you run on your own computer: it keeps each app's data as plain files on your disk and syncs that app's devices over WebRTC on your local network.
 
-Небольшая программа, которую вы запускаете на своём компьютере: она хранит данные каждого приложения одним JSON-файлом на вашем диске и синхронизирует устройства этого приложения по WebRTC в локальной сети.
+Небольшая программа, которую вы запускаете на своём компьютере: она хранит данные каждого приложения обычными файлами на вашем диске и синхронизирует устройства этого приложения по WebRTC в локальной сети.
 
 ## Documentation
 

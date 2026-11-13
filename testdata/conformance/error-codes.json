@@ -6,8 +6,10 @@
 		"badSecret",
 		"badToken",
 		"blocked",
-		"tooLarge",
-		"notJson",
+		"badPath",
+		"quota",
+		"noTransaction",
+		"incomplete",
 		"notAuthenticated",
 		"internal",
 		"notMain"

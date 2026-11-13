@@ -1,10 +1,14 @@
 package wsclient
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,7 +21,7 @@ func TestPutWaitsForTheBuffer(t *testing.T) {
 	body := make([]byte, BufferHigh+3*ChunkBytes)
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := cl.Put(context.Background(), nil, body)
+		_, err := cl.Put(context.Background(), testTx, testKey, nil, int64(len(body)), 0, bytes.NewReader(body))
 		done <- err
 	}()
 	waitFor(t, "the sender to pause", func() bool { return fc.BufferedAmount() > BufferHigh })
@@ -28,7 +32,7 @@ func TestPutWaitsForTheBuffer(t *testing.T) {
 	}
 	fc.drain()
 	waitFor(t, "the rest of the body", func() bool { _, b, _ := fc.sent(); return len(b) == len(body) })
-	cl.Receive(true, []byte(`{"t":"stored","etag":"e1"}`))
+	cl.Receive(true, []byte(`{"t":"staged","path":"","id":"data","type":"bin","received":1097728}`))
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
@@ -42,11 +46,13 @@ func TestBrokenServerFramesEndTheClient(t *testing.T) {
 	}{
 		"not JSON":              {{true, `{"t":`}},
 		"no t":                  {{true, `{"etag":null}`}},
-		"a negative body":       {{true, `{"t":"doc","etag":null,"bytes":-1}`}},
+		"a negative body":       {{true, `{"t":"doc","path":"","id":"a","type":"b","etag":"e","bytes":-1}`}},
+		"an offset past a body": {{true, `{"t":"doc","path":"","id":"a","type":"b","etag":"e","bytes":1,"offset":2}`}},
+		"a doc nobody asked":    {{true, `{"t":"doc","path":"","id":"a","type":"b","etag":"e","bytes":1}`}},
 		"binary with no body":   {{false, "x"}},
-		"a body overrun":        {{true, `{"t":"doc","etag":null,"bytes":1}`}, {false, "xy"}},
-		"text inside a body":    {{true, `{"t":"doc","etag":null,"bytes":2}`}, {false, "x"}, {true, `{"t":"head","etag":null}`}},
-		"a reply nobody waited": {{true, `{"t":"head","etag":null}`}},
+		"a reply nobody waited": {{true, `{"t":"head","revision":null}`}},
+		"a malformed changed":   {{true, `{"t":"changed"}`}},
+		"a malformed diverged":  {{true, `{"t":"diverged","servers":[{"name":"x"}]}`}},
 		"a malformed app list":  {{true, `{"t":"apps","apps":[{"name":"x"}]}`}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -76,24 +82,35 @@ func TestPushesDuringARequest(t *testing.T) {
 	fc := &fakeChannel{}
 	cl := NewClient(fc, "todo")
 	var heard []string
-	cl.OnChanged(func(etag string) { heard = append(heard, etag) })
+	cl.OnChanged(func(rev *string) {
+		if rev == nil {
+			heard = append(heard, "empty")
+			return
+		}
+		heard = append(heard, *rev)
+	})
 	cl.OnApps(func(list []App) { heard = append(heard, "apps:"+list[0].ID) })
+	cl.OnDiverged(func(list []DivergedServer) { heard = append(heard, "diverged:"+list[0].ServerID) })
+	cl.OnResolved(func(server string) { heard = append(heard, "resolved:"+server) })
 	done := make(chan error, 1)
-	var etag *string
+	var rev *string
 	go func() {
 		var err error
-		etag, err = cl.Head(context.Background())
+		rev, err = cl.Head(context.Background())
 		done <- err
 	}()
 	waitFor(t, "head", func() bool { f, _, _ := fc.sent(); return len(f) == 1 })
-	cl.Receive(true, []byte(`{"t":"changed","etag":"e2"}`))
+	cl.Receive(true, []byte(`{"t":"changed","revision":"r2"}`))
+	cl.Receive(true, []byte(`{"t":"changed","revision":null}`))
 	cl.Receive(true, []byte(`{"t":"apps","apps":[{"id":"todo","name":"Todo"}]}`))
-	cl.Receive(true, []byte(`{"t":"head","etag":"e3"}`))
-	if err := <-done; err != nil || etag == nil || *etag != "e3" {
-		t.Fatalf("Head = %v, %v; want e3", etag, err)
+	cl.Receive(true, []byte(`{"t":"diverged","servers":[{"serverId":"Lp7tOp0123ab","name":"Laptop","since":"2026-11-13T09:00:00Z"}]}`))
+	cl.Receive(true, []byte(`{"t":"resolved","server":"Lp7tOp0123ab"}`))
+	cl.Receive(true, []byte(`{"t":"head","revision":"r3"}`))
+	if err := <-done; err != nil || rev == nil || *rev != "r3" {
+		t.Fatalf("Head = %v, %v; want r3", rev, err)
 	}
-	if !slices.Equal(heard, []string{"e2", "apps:todo"}) {
-		t.Errorf("heard %v, want e2 and the app list", heard)
+	if want := []string{"r2", "empty", "apps:todo", "diverged:Lp7tOp0123ab", "resolved:Lp7tOp0123ab"}; !slices.Equal(heard, want) {
+		t.Errorf("heard %v, want %v", heard, want)
 	}
 }
 
@@ -145,5 +162,122 @@ func TestCandidates(t *testing.T) {
 	}
 	if got := candidates(context.Background(), []string{"a.local"}, DialOptions{}); len(got) != 0 {
 		t.Errorf("candidates without a resolver %v, want none", got)
+	}
+}
+
+const testTx = "tx-0123456789abcdef"
+
+var testKey = Key{ID: "data", Type: "bin"}
+
+// async runs f, which makes one request, and returns a channel of its error.
+func async(f func() error) chan error {
+	done := make(chan error, 1)
+	go func() { done <- f() }()
+	return done
+}
+
+// A doc's body goes to the writer as it arrives; a writer that fails gets
+// nothing more, the rest of the body is read and dropped, the get fails with
+// the writer's error, and the client stays usable.
+func TestGetStreamsIntoTheWriter(t *testing.T) {
+	fc := &fakeChannel{}
+	cl := NewClient(fc, "todo")
+	var got bytes.Buffer
+	done := async(func() error { _, err := cl.Get(context.Background(), testKey, nil, 0, &got); return err })
+	waitFor(t, "get", func() bool { f, _, _ := fc.sent(); return len(f) == 1 })
+	cl.Receive(true, []byte(`{"t":"doc","path":"","id":"data","type":"bin","etag":"e1","bytes":5,"offset":0}`))
+	cl.Receive(false, []byte("ab"))
+	if got.String() != "ab" {
+		t.Errorf("the writer holds %q before the body is complete, want ab", got.String())
+	}
+	cl.Receive(false, []byte("cde"))
+	if err := <-done; err != nil || got.String() != "abcde" {
+		t.Fatalf("Get = %v, %q", err, got.String())
+	}
+
+	w := &failingWriter{after: 2}
+	done = async(func() error { _, err := cl.Get(context.Background(), testKey, nil, 0, w); return err })
+	waitFor(t, "the second get", func() bool { f, _, _ := fc.sent(); return len(f) == 2 })
+	cl.Receive(true, []byte(`{"t":"doc","path":"","id":"data","type":"bin","etag":"e1","bytes":5,"offset":0}`))
+	cl.Receive(false, []byte("ab"))
+	cl.Receive(false, []byte("cd"))
+	cl.Receive(false, []byte("e"))
+	if err := <-done; !errors.Is(err, errDiskFull) {
+		t.Fatalf("Get = %v, want the writer's error", err)
+	}
+	if w.calls != 2 {
+		t.Errorf("the writer was called %d times, want 2: none after it failed", w.calls)
+	}
+	done = async(func() error { _, err := cl.Head(context.Background()); return err })
+	waitFor(t, "head", func() bool { f, _, _ := fc.sent(); return len(f) == 3 })
+	cl.Receive(true, []byte(`{"t":"head","revision":null}`))
+	if err := <-done; err != nil {
+		t.Errorf("Head after a failed writer = %v", err)
+	}
+}
+
+var errDiskFull = errors.New("disk full")
+
+type failingWriter struct{ after, calls int }
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	w.calls++
+	if w.calls >= w.after {
+		return 0, errDiskFull
+	}
+	return len(p), nil
+}
+
+// A doc that is not the one asked for breaks the protocol.
+func TestGetOfAnotherDocument(t *testing.T) {
+	fc := &fakeChannel{}
+	cl := NewClient(fc, "todo")
+	done := async(func() error { _, err := cl.Get(context.Background(), testKey, nil, 0, io.Discard); return err })
+	waitFor(t, "get", func() bool { f, _, _ := fc.sent(); return len(f) == 1 })
+	cl.Receive(true, []byte(`{"t":"doc","path":"","id":"other","type":"bin","etag":"e1","bytes":0,"offset":0}`))
+	if err := <-done; !HasCode(err, CodeProtocol) || !fc.isClosed() {
+		t.Errorf("Get = %v, closed %v; want a protocol error", err, fc.isClosed())
+	}
+}
+
+// A put whose body ends before its announced size ends the client: the
+// server would take the next frame for the rest of it.
+func TestPutWithAShortBody(t *testing.T) {
+	fc := &fakeChannel{}
+	cl := NewClient(fc, "todo")
+	_, err := cl.Put(context.Background(), testTx, testKey, nil, 10, 0, strings.NewReader("short"))
+	if err == nil || !fc.isClosed() || !HasCode(cl.Err(), CodeClosed) {
+		t.Errorf("Put = %v, closed %v, Err %v; want the client ended", err, fc.isClosed(), cl.Err())
+	}
+	if _, err := cl.Put(context.Background(), testTx, testKey, nil, 1, 2, strings.NewReader("")); err == nil {
+		t.Error("a put whose offset is past its size was sent")
+	}
+}
+
+// ListAll reads every page at one revision, and starts over when the set
+// changes between pages.
+func TestListAllPages(t *testing.T) {
+	fc := &fakeChannel{}
+	cl := NewClient(fc, "todo")
+	var l Listing
+	done := async(func() error { var err error; l, err = cl.ListAll(context.Background()); return err })
+	answer := func(n int, frame string) {
+		t.Helper()
+		waitFor(t, fmt.Sprintf("list %d", n), func() bool { f, _, _ := fc.sent(); return len(f) == n })
+		cl.Receive(true, []byte(frame))
+	}
+	answer(1, `{"t":"list","revision":"r1","docs":[{"path":"","id":"a","type":"txt","etag":"e1","bytes":1}],"removed":[],"cursor":"d:a.txt"}`)
+	answer(2, `{"t":"stale","revision":"r2"}`)
+	answer(3, `{"t":"list","revision":"r2","docs":[{"path":"","id":"a","type":"txt","etag":"e1","bytes":1}],"removed":[],"cursor":"d:a.txt"}`)
+	answer(4, `{"t":"list","revision":"r2","docs":[{"path":"","id":"b","type":"txt","etag":"e2","bytes":2}],"removed":[{"path":"","id":"c","type":"txt","at":"2026-11-13T10:00:00Z"}]}`)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	frames, _, _ := fc.sent()
+	if frames[1]["revision"] != "r1" || frames[1]["cursor"] != "d:a.txt" || frames[2]["revision"] != nil || frames[3]["revision"] != "r2" {
+		t.Errorf("sent %v", frames)
+	}
+	if *l.Revision != "r2" || len(l.Docs) != 2 || l.Docs[1].ID != "b" || len(l.Removed) != 1 {
+		t.Errorf("listing %+v", l)
 	}
 }

@@ -649,9 +649,10 @@ func newServer(opts serverOptions, logger *log.Logger) (*server, error) {
 		Now:      time.Now,
 		Role:     func() string { return s.link.Role() },
 		Logf:     func(format string, args ...any) { s.logf("hub: "+format, args...) },
-		// A device's write here goes on to the main when this server is a
-		// subordinate.
-		Stored: func(app string) { s.link.LocalWrite(app) },
+		// Every new revision of an app here wakes the link, which pushes
+		// it on to the main when this server is a subordinate (and finds
+		// its own writes already in step).
+		Changed: func(app string, _ *string) { s.link.LocalWrite(app) },
 		// A subordinate's page asks for a code for a browser on its
 		// computer: the one this server's page would issue.
 		Invite: s.IssuePairing,

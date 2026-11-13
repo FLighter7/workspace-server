@@ -2,9 +2,17 @@
 // frames with a "t" field, and document bodies as binary messages of at most
 // ChunkBytes each. A Session holds the state of one channel; a Backend (the
 // hub) answers what the frames ask for.
+//
+// Bodies never sit whole in memory: a put's body goes chunk by chunk into a
+// Sink the backend gives, written in the message handler as it arrives, and
+// a doc's body is read chunk by chunk from the file the backend opened, as
+// the channel takes it.
 package protocol
 
-import "time"
+import (
+	"io"
+	"time"
+)
 
 // Version is the protocol version a client's hello or pair must carry.
 const Version = 1
@@ -12,16 +20,33 @@ const Version = 1
 // ChunkBytes is the largest binary message the server sends.
 const ChunkBytes = 16384
 
-// Error codes sent in error frames.
+// ListPage is the most entries, documents and tombstones together, that one
+// list frame carries.
+const ListPage = 500
+
+// listPage is the page size the session uses: ListPage, smaller in tests.
+var listPage = ListPage
+
+// Error codes sent in error frames. CodeProtocol closes the session; the
+// others leave it open, except where a frame's handling says otherwise
+// (hello, pair).
 const (
 	CodeProtocol         = "protocol"
 	CodeUnknownApp       = "unknownApp"
 	CodeBadSecret        = "badSecret"
 	CodeBadToken         = "badToken"
-	CodeTooLarge         = "tooLarge"
-	CodeNotJSON          = "notJson"
 	CodeNotAuthenticated = "notAuthenticated"
 	CodeInternal         = "internal"
+	// CodeBadPath: a document's path, id or type breaks the rules of a key,
+	// or its path is taken on disk by something that is no document.
+	CodeBadPath = "badPath"
+	// CodeQuota: the app's files would exceed its quota with the
+	// transaction.
+	CodeQuota = "quota"
+	// CodeNoTransaction: no open transaction of that id for this device.
+	CodeNoTransaction = "noTransaction"
+	// CodeIncomplete: a commit found a body that has not fully arrived.
+	CodeIncomplete = "incomplete"
 	// CodeBlocked answers hello and pair from an address blocked after too
 	// many failed attempts; nothing else is checked. It is temporary: the
 	// pairing still stands.
@@ -46,28 +71,146 @@ const (
 	KindServer = "server"
 )
 
+// The sides a resolve may keep when an app's servers diverged.
+const (
+	KeepMain        = "main"
+	KeepSubordinate = "subordinate"
+)
+
 // Error is a refusal sent to the client as an error frame. Message is
-// English, for a developer.
+// English, for a developer. It is an error too, so that a Sink can return
+// one.
 type Error struct {
 	Code    string
 	Message string
 }
 
-// Welcome is what a welcome frame tells an authenticated client. Etag is nil
-// when the app has no document, and always on a link session. Role is
-// RoleMain or RoleSubordinate; an empty Role is left out of the frame.
-// Term is the family's term as this server knows it (see docs/protocol.md,
-// "Switching the main"); 0 is left out of the frame. Subordinates is what a
-// main lists: nil leaves the field out of the frame (a subordinate), and an
-// empty, non-nil list sends [] (a main without any).
+func (e *Error) Error() string { return e.Code + ": " + e.Message }
+
+// Welcome is what a welcome frame tells an authenticated client. Revision is
+// the revision of the app's set, nil for an empty set, and always on a link
+// session. Role is RoleMain or RoleSubordinate; an empty Role is left out of
+// the frame. Term is the family's term as this server knows it (see
+// docs/protocol.md, "Switching the main"); 0 is left out of the frame.
+// Subordinates is what a main lists: nil leaves the field out of the frame
+// (a subordinate), and an empty, non-nil list sends [] (a main without any).
+// Diverged lists the servers whose divergence on the app waits for a
+// device's choice; empty leaves the field out.
 type Welcome struct {
 	ServerID     string
 	Name         string
-	Etag         *string
+	Revision     *string
 	Hosts        []string
 	Role         string
 	Term         int
 	Subordinates []ServerInfo
+	Diverged     []DivergedServer
+}
+
+// Key names a document as the frames carry it: its folder ("" for the app's
+// root), its id and its type. The backend checks it.
+type Key struct {
+	Path string `json:"path"`
+	ID   string `json:"id"`
+	Type string `json:"type"`
+}
+
+// String returns the key's canonical form, "path/id.type", or "id.type" at
+// the app's root: what a listing is sorted by, byte for byte.
+func (k Key) String() string {
+	if k.Path == "" {
+		return k.ID + "." + k.Type
+	}
+	return k.Path + "/" + k.ID + "." + k.Type
+}
+
+// DocInfo is a document of an app's set: its etag (the lowercase hex
+// SHA-256 of its bytes) and its size.
+type DocInfo struct {
+	Key
+	Etag  string `json:"etag"`
+	Bytes int64  `json:"bytes"`
+}
+
+// Removed is the tombstone of a deleted document, and when it went (RFC
+// 3339 UTC).
+type Removed struct {
+	Key
+	At string `json:"at"`
+}
+
+// Listing is an app's set: its revision (nil for an empty set), its
+// documents and its tombstones, each sorted by Key.String(), byte for byte.
+type Listing struct {
+	Revision *string
+	Docs     []DocInfo
+	Removed  []Removed
+}
+
+// Doc is a document opened for a get. Body reads its bytes from the start;
+// the session seeks it to the offset asked for, reads it as the channel
+// takes it, and closes it.
+type Doc struct {
+	DocInfo
+	Body io.ReadSeekCloser
+}
+
+// Stale answers a request made against a view that the set has left: the
+// document asked for is not there (with that etag), or the listing moved
+// on. Revision is the set's revision now.
+type Stale struct {
+	Revision *string
+}
+
+// Staged is a change an open transaction holds, as began reports it for
+// resuming: a put of Bytes bytes, of which Received have arrived, or a
+// delete. IfEtag nil means the document must not exist at the commit.
+type Staged struct {
+	Key
+	Delete   bool    `json:"delete,omitempty"`
+	IfEtag   *string `json:"ifEtag"`
+	Bytes    int64   `json:"bytes"`
+	Received int64   `json:"received"`
+}
+
+// DocEtag is a document and its etag, nil when it does not exist.
+type DocEtag struct {
+	Key
+	Etag *string `json:"etag"`
+}
+
+// Committed is what a commit changed: the set's new revision, and each
+// document written, with its etag, or deleted, with a nil etag.
+type Committed struct {
+	Revision *string
+	Docs     []DocEtag
+}
+
+// Conflict answers a commit whose documents are not at the etags it
+// expects: the set's revision now, and the current etag of each document
+// that conflicts. The transaction stays open.
+type Conflict struct {
+	Revision *string
+	Docs     []DocEtag
+}
+
+// DivergedServer is a server whose copy of an app diverged from its main's,
+// and since when (RFC 3339 UTC), as welcome and diverged frames carry it.
+type DivergedServer struct {
+	ServerID string `json:"serverId"`
+	Name     string `json:"name"`
+	Since    string `json:"since"`
+}
+
+// Sink receives a put's body. The session writes each binary message into
+// it as it arrives, in the message handler, and closes it when the body
+// stops, complete or not; it also closes it when the session ends under the
+// body, so that a later put resumes from what arrived. Close may be called
+// more than once, and concurrently with a Write. An error from either that
+// is an *Error is answered as such; any other is answered as internal.
+type Sink interface {
+	Write(p []byte) (int, error)
+	Close() error
 }
 
 // AppInfo is one entry of the app list a server-kind session is told.
@@ -177,11 +320,39 @@ type Backend interface {
 	// session; an error with CodeProtocol closes the session, any other is
 	// answered and the session stays open.
 	Invite(s *Session) (code string, expires time.Time, err *Error)
+
+	// The documents, for app sessions only. An error with CodeProtocol
+	// closes the session; any other is answered, and the session stays
+	// open.
+
+	// Head returns the revision of app's set, nil for an empty set.
 	Head(app string) (*string, *Error)
-	Get(app string) ([]byte, *string, *Error)
-	// MaxBytes is the largest body a put to app may announce.
-	MaxBytes(app string) int64
-	Put(from *Session, app, device string, ifEtag *string, body []byte) (etag string, conflict bool, current *string, err *Error)
+	// List returns app's set, sorted as Listing says.
+	List(app string) (Listing, *Error)
+	// Get opens the document k of app if its etag is *etag, or whatever its
+	// etag when etag is nil. A document that is not there (with that etag)
+	// is a *Stale.
+	Get(app string, k Key, etag *string) (Doc, *Stale, *Error)
+	// Begin opens device's transaction tx on app, or returns to it, and
+	// returns what it has staged. It discards the device's other open
+	// transaction on the app.
+	Begin(app, device, tx string) ([]Staged, *Error)
+	// Put stages a body of size bytes for k in device's transaction tx, to
+	// be written from offset on, and returns the Sink that takes the bytes
+	// past offset.
+	Put(app, device, tx string, k Key, ifEtag *string, size, offset int64) (Sink, *Error)
+	// Delete stages the removal of k in device's transaction tx.
+	Delete(app, device, tx string, k Key, ifEtag *string) *Error
+	// Commit applies device's transaction tx, all of it or nothing, and
+	// tells every other session of the app the new revision. A *Conflict
+	// leaves the transaction open.
+	Commit(from *Session, app, device, tx string) (Committed, *Conflict, *Error)
+	// Abort discards device's transaction tx.
+	Abort(app, device, tx string) *Error
+	// Resolve settles a divergence of the app's servers: server is the
+	// subordinate's server id, keep KeepMain or KeepSubordinate.
+	Resolve(from *Session, app, device, server, keep string) *Error
+
 	// Forget deletes the device and closes its sessions. It answers the
 	// client's forget, and it also undoes a pairing the client has not
 	// confirmed (see Session) when its session ends: then it may be called

@@ -2,7 +2,11 @@ package protocol
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -12,10 +16,13 @@ const (
 	maxBuffered = 1 << 20
 	// lowWater is the buffered amount at which a paused sender resumes.
 	lowWater = 256 << 10
-	// queueSlack is how many bytes of replies and pushes may wait to be sent,
-	// beyond one document of the app's largest size. A session that queues
-	// more is not reading what it asks for, and is closed.
-	queueSlack = 1 << 20
+	// maxQueuedText is how many bytes of text frames may wait to be sent. A
+	// session that queues more is not reading what it asks for, and is
+	// closed.
+	maxQueuedText = 1 << 20
+	// maxQueuedStreams is how many document bodies may wait to be sent,
+	// besides the one being sent. Each holds an open file, never its bytes.
+	maxQueuedStreams = 4
 )
 
 // Session is one data channel speaking the sync protocol. Incoming messages
@@ -39,12 +46,18 @@ type Session struct {
 	mu            sync.Mutex
 	timer         *time.Timer
 	queue         []outgoing
-	queued        int64 // bytes in queue
-	queueLimit    int64 // the most queued may reach; see queueLocked
+	queuedText    int64 // bytes of text in queue
+	queuedStreams int   // bodies in queue
 	authenticated bool
-	app, device   string     // app is empty on a link session
-	held          *string    // the latest push that arrived before the welcome
-	heldApps      *[]AppInfo // the latest app list pushed before the welcome
+	app, device   string // app is empty on a link session
+	// holding and held are the latest changed push that arrived before the
+	// welcome: held is its revision, which may be nil.
+	holding  bool
+	held     *string
+	heldApps *[]AppInfo // the latest app list pushed before the welcome
+	// sink is the put body being received, which the session closes when it
+	// ends under it, so that what arrived is kept for a resume.
+	sink Sink
 	// unconfirmed is set by a successful pair until the client sends its next
 	// frame, which shows that it got its token. A session that ends before
 	// that undoes the pairing: the client may never have stored the token.
@@ -56,24 +69,29 @@ type Session struct {
 // putState is the put whose body is arriving.
 type putState struct {
 	active    bool
-	ifEtag    *string
-	announced int64
-	remaining int64
-	body      []byte
-	limit     int64 // when announced exceeds it, the body is counted, not kept
+	key       Key
+	remaining int64 // bytes of the body still to arrive
+	received  int64 // what staged reports: the offset, plus what was written
+	sink      Sink  // nil when the put was refused: the body is discarded
+	refusal   *Error
 }
 
-func (p *putState) tooLarge() bool { return p.announced > p.limit }
-
 // outgoing is one queued item: a text frame and the body that follows it, or
-// the order to close once everything before it has been sent.
+// the order to close once everything before it has been sent. A body is read
+// from its file as it is sent, n bytes, and then closed.
 type outgoing struct {
 	text  string
-	body  []byte
+	body  io.ReadCloser
+	n     int64
 	close bool
 }
 
-func (o outgoing) size() int64 { return int64(len(o.text) + len(o.body)) }
+// closeBody closes o's body, if it has one: an item that will not be sent.
+func (o outgoing) closeBody() {
+	if o.body != nil {
+		_ = o.body.Close()
+	}
+}
 
 // NewSession starts a session over ch, the channel from remote. It sets the
 // channel's low-buffer threshold and callback, and starts the auth deadline.
@@ -87,7 +105,6 @@ func NewSession(ch Channel, remote string, b Backend, opt Options) *Session {
 		low:        make(chan struct{}, 1),
 		done:       make(chan struct{}),
 		senderDone: make(chan struct{}),
-		queueLimit: queueSlack,
 	}
 	ch.SetBufferedAmountLowThreshold(lowWater)
 	ch.OnBufferedAmountLow(func() { signal(s.low) })
@@ -98,6 +115,56 @@ func NewSession(ch Channel, remote string, b Backend, opt Options) *Session {
 	}
 	go s.sendLoop()
 	return s
+}
+
+// textFrame is every field a client frame may carry. server is a server's
+// connection data in announce and term, and a server id in resolve, so it is
+// decoded by the frame that reads it; revision is kept raw, so that a list
+// can tell null from absent.
+type textFrame struct {
+	T        string          `json:"t"`
+	Proto    *int            `json:"proto"`
+	App      string          `json:"app"`
+	Device   string          `json:"device"`
+	Token    string          `json:"token"`
+	Secret   string          `json:"secret"`
+	Name     string          `json:"name"`
+	Kind     *string         `json:"kind"`
+	Server   json.RawMessage `json:"server"`
+	Term     *int            `json:"term"`
+	Devices  *[]DeviceEntry  `json:"devices"`
+	Removed  []Tombstone     `json:"removed"`
+	Revision json.RawMessage `json:"revision"`
+	Cursor   *string         `json:"cursor"`
+	Path     string          `json:"path"`
+	ID       string          `json:"id"`
+	Type     string          `json:"type"`
+	Etag     *string         `json:"etag"`
+	IfEtag   *string         `json:"ifEtag"`
+	Bytes    *int64          `json:"bytes"`
+	Offset   *int64          `json:"offset"`
+	Tx       string          `json:"tx"`
+	Keep     string          `json:"keep"`
+}
+
+func (f *textFrame) key() Key { return Key{Path: f.Path, ID: f.ID, Type: f.Type} }
+
+// serverInfo decodes server as a server's connection data; nil when it is
+// absent or null.
+func (f *textFrame) serverInfo() (*ServerInfo, error) {
+	if len(f.Server) == 0 {
+		return nil, nil
+	}
+	var si *ServerInfo
+	err := json.Unmarshal(f.Server, &si)
+	return si, err
+}
+
+// documentFrames are the frames of an app session's documents, which a link
+// session does not have.
+var documentFrames = map[string]bool{
+	"head": true, "list": true, "get": true, "begin": true, "put": true,
+	"delete": true, "commit": true, "abort": true, "resolve": true,
 }
 
 // HandleText handles one incoming text message. Incoming messages are handled
@@ -113,31 +180,18 @@ func (s *Session) HandleText(msg string) {
 		s.fail(CodeProtocol, "text frame before the put body was complete")
 		return
 	}
-	var f struct {
-		T       string         `json:"t"`
-		Proto   *int           `json:"proto"`
-		App     string         `json:"app"`
-		Device  string         `json:"device"`
-		Token   string         `json:"token"`
-		Secret  string         `json:"secret"`
-		Name    string         `json:"name"`
-		Kind    *string        `json:"kind"`
-		IfEtag  *string        `json:"ifEtag"`
-		Bytes   *int64         `json:"bytes"`
-		Server  *ServerInfo    `json:"server"`
-		Term    *int           `json:"term"`
-		Devices *[]DeviceEntry `json:"devices"`
-		Removed []Tombstone    `json:"removed"`
-	}
+	var f textFrame
 	if err := json.Unmarshal([]byte(msg), &f); err != nil {
 		s.fail(CodeProtocol, "malformed text frame: "+err.Error())
 		return
 	}
 	switch f.T {
-	case "hello", "pair", "head", "get", "put", "forget", "apps", "announce", "invite", "term":
+	case "hello", "pair", "forget", "apps", "announce", "invite", "term":
 	default:
-		s.fail(CodeProtocol, fmt.Sprintf("unknown frame type %q", f.T))
-		return
+		if !documentFrames[f.T] {
+			s.fail(CodeProtocol, fmt.Sprintf("unknown frame type %q", f.T))
+			return
+		}
 	}
 
 	authenticated, app, device := s.identity()
@@ -158,60 +212,85 @@ func (s *Session) HandleText(msg string) {
 		s.reply(&Error{CodeNotAuthenticated, "send hello or pair first"})
 		return
 	}
-	if app == "" && (f.T == "head" || f.T == "get" || f.T == "put") {
-		s.fail(CodeProtocol, "a link session has no document; say hello for an app")
+	if app == "" && documentFrames[f.T] {
+		s.fail(CodeProtocol, "a link session has no documents; say hello for an app")
 		return
 	}
 
 	switch f.T {
 	case "head":
-		etag, e := s.b.Head(app)
+		rev, e := s.b.Head(app)
 		if e != nil {
-			s.reply(e)
+			s.answer(e)
 			return
 		}
-		s.queueFrame(etagFrame{"head", etag}, nil)
+		s.queueFrame(revisionFrame{"head", rev})
+	case "list":
+		s.list(app, &f)
 	case "get":
-		doc, etag, e := s.b.Get(app)
+		s.get(app, &f)
+	case "begin":
+		staged, e := s.b.Begin(app, device, f.Tx)
 		if e != nil {
-			s.reply(e)
+			s.answer(e)
 			return
 		}
-		s.queueFrame(docFrame{"doc", etag, len(doc)}, doc)
+		if staged == nil {
+			staged = []Staged{}
+		}
+		s.queueFrame(beganFrame{"began", f.Tx, staged})
 	case "put":
-		if f.Bytes == nil || *f.Bytes < 0 {
-			s.fail(CodeProtocol, "put needs a non-negative bytes field")
+		s.startPut(app, device, &f)
+	case "delete":
+		k := f.key()
+		if e := s.b.Delete(app, device, f.Tx, k, f.IfEtag); e != nil {
+			s.answer(e)
 			return
 		}
-		// A missing ifEtag reads as null: a put is always conditional.
-		s.put = putState{
-			active:    true,
-			ifEtag:    f.IfEtag,
-			announced: *f.Bytes,
-			remaining: *f.Bytes,
-			limit:     s.b.MaxBytes(app),
+		s.queueFrame(stagedFrame{"staged", k, 0})
+	case "commit":
+		c, conflict, e := s.b.Commit(s, app, device, f.Tx)
+		switch {
+		case e != nil:
+			s.answer(e)
+		case conflict != nil:
+			s.queueFrame(txResultFrame{"conflict", conflict.Revision, docEtags(conflict.Docs)})
+		default:
+			s.queueFrame(txResultFrame{"committed", c.Revision, docEtags(c.Docs)})
 		}
-		if s.put.remaining == 0 {
-			s.finishPut(app, device)
+	case "abort":
+		if e := s.b.Abort(app, device, f.Tx); e != nil {
+			s.answer(e)
+			return
 		}
+		s.queueFrame(abortedFrame{"aborted", f.Tx})
+	case "resolve":
+		var server string
+		if json.Unmarshal(f.Server, &server) != nil || server == "" || f.Keep != KeepMain && f.Keep != KeepSubordinate {
+			s.fail(CodeProtocol, `resolve needs a server id and keep "main" or "subordinate"`)
+			return
+		}
+		if e := s.b.Resolve(s, app, device, server, f.Keep); e != nil {
+			s.answer(e)
+			return
+		}
+		s.queueFrame(resolvedFrame{"resolved", server})
 	case "forget":
 		s.b.Forget(app, device)
 		s.closeAfter()
 	case "apps":
 		list, e := s.b.Apps(s)
-		switch {
-		case e == nil:
-			s.queueFrame(appsFrame{"apps", appList(list)}, nil)
-		case e.Code == CodeProtocol:
-			s.fail(e.Code, e.Message)
-		default:
-			s.reply(e)
+		if e != nil {
+			s.answer(e)
+			return
 		}
+		s.queueFrame(appsFrame{"apps", appList(list)})
 	case "announce":
+		si, err := f.serverInfo()
 		switch {
 		case app != "":
 			s.fail(CodeProtocol, "only a link session may announce a server")
-		case f.Server == nil:
+		case err != nil || si == nil:
 			s.fail(CodeProtocol, "announce needs a server")
 		default:
 			// The backend answers with PushDevices itself, so that the answer
@@ -220,12 +299,8 @@ func (s *Session) HandleText(msg string) {
 			if f.Devices != nil {
 				handover = &Registry{Devices: *f.Devices, Removed: f.Removed}
 			}
-			if e := s.b.Announce(s, *f.Server, handover); e != nil {
-				if e.Code == CodeProtocol {
-					s.fail(e.Code, e.Message)
-				} else {
-					s.reply(e)
-				}
+			if e := s.b.Announce(s, *si, handover); e != nil {
+				s.answer(e)
 			}
 		}
 	case "invite":
@@ -234,36 +309,194 @@ func (s *Session) HandleText(msg string) {
 			return
 		}
 		code, expires, e := s.b.Invite(s)
-		switch {
-		case e == nil:
-			s.queueFrame(invitedFrame{"invited", code, expires.UTC().Format(time.RFC3339)}, nil)
-		case e.Code == CodeProtocol:
-			s.fail(e.Code, e.Message)
-		default:
-			s.reply(e)
+		if e != nil {
+			s.answer(e)
+			return
 		}
+		s.queueFrame(invitedFrame{"invited", code, expires.UTC().Format(time.RFC3339)})
 	case "term":
+		si, err := f.serverInfo()
 		switch {
 		case app != "":
 			s.fail(CodeProtocol, "only a link session may tell a term")
 			return
-		case f.Term == nil || *f.Term < 0 || f.Server == nil:
+		case f.Term == nil || *f.Term < 0 || err != nil || si == nil:
 			s.fail(CodeProtocol, "term needs a term of 0 or more and a server")
 			return
 		}
-		a, e := s.b.Term(s, *f.Term, *f.Server, f.Device, f.Token)
-		switch {
-		case e == nil:
-			s.queueFrame(termFrame{"term", a.Term, a.Main}, nil)
-		case e.Code == CodeProtocol:
-			s.fail(e.Code, e.Message)
-		default:
-			s.reply(e)
+		a, e := s.b.Term(s, *f.Term, *si, f.Device, f.Token)
+		if e != nil {
+			s.answer(e)
+			return
 		}
+		s.queueFrame(termFrame{"term", a.Term, a.Main})
 	}
 }
 
-// HandleBinary handles one incoming binary message: a piece of a put body.
+// list answers a list frame with one page of the app's set. A list that
+// names a revision is answered only at that revision, and with stale
+// otherwise; a list with a cursor (the next page) must name one, the
+// revision of the pages before it.
+func (s *Session) list(app string, f *textFrame) {
+	pinned := len(f.Revision) > 0
+	var want *string
+	if pinned && json.Unmarshal(f.Revision, &want) != nil {
+		s.fail(CodeProtocol, "a list's revision is a string or null")
+		return
+	}
+	if f.Cursor != nil && !pinned {
+		s.fail(CodeProtocol, "a list with a cursor names the revision of the pages before it")
+		return
+	}
+	l, e := s.b.List(app)
+	if e != nil {
+		s.answer(e)
+		return
+	}
+	if pinned && !sameRevision(l.Revision, want) {
+		s.queueFrame(revisionFrame{"stale", l.Revision})
+		return
+	}
+	docs, removed, next, ok := page(l, f.Cursor)
+	if !ok {
+		s.fail(CodeProtocol, "a list's cursor is one the server gave")
+		return
+	}
+	s.queueFrame(listFrame{"list", l.Revision, docs, removed, next})
+}
+
+// Cursors name the last entry of the page before: "d:<key>" a document,
+// "r:<key>" a tombstone.
+const (
+	cursorDoc     = "d:"
+	cursorRemoved = "r:"
+)
+
+// page returns the page of l that follows cursor (the first page when it is
+// nil): the documents first, then the tombstones, at most listPage entries,
+// and the cursor of the next page, empty after the last. ok is false for a
+// cursor the server never gave.
+func page(l Listing, cursor *string) (docs []DocInfo, removed []Removed, next string, ok bool) {
+	d, r := 0, 0
+	if cursor != nil {
+		c := *cursor
+		switch {
+		case strings.HasPrefix(c, cursorDoc):
+			after := c[len(cursorDoc):]
+			d = sort.Search(len(l.Docs), func(i int) bool { return l.Docs[i].Key.String() > after })
+		case strings.HasPrefix(c, cursorRemoved):
+			after := c[len(cursorRemoved):]
+			d = len(l.Docs)
+			r = sort.Search(len(l.Removed), func(i int) bool { return l.Removed[i].Key.String() > after })
+		default:
+			return nil, nil, "", false
+		}
+	}
+	docs = l.Docs[d:min(len(l.Docs), d+listPage)]
+	room := listPage - len(docs)
+	removed = l.Removed[r:min(len(l.Removed), r+room)]
+	if d+len(docs) < len(l.Docs) || r+len(removed) < len(l.Removed) {
+		if len(removed) > 0 {
+			next = cursorRemoved + removed[len(removed)-1].Key.String()
+		} else {
+			next = cursorDoc + docs[len(docs)-1].Key.String()
+		}
+	}
+	return slicesOr(docs), slicesOr(removed), next, true
+}
+
+// slicesOr returns list, never nil, so that an empty list is [] on the wire.
+func slicesOr[T any](list []T) []T {
+	if list == nil {
+		return []T{}
+	}
+	return list
+}
+
+// get answers a get frame with the document and its body from the offset
+// asked for. An offset past 0 needs the etag of the body it resumes.
+func (s *Session) get(app string, f *textFrame) {
+	var offset int64
+	if f.Offset != nil {
+		offset = *f.Offset
+	}
+	if offset < 0 || offset > 0 && f.Etag == nil {
+		s.fail(CodeProtocol, "a get's offset is 0 or more, and past 0 only with the etag it resumes")
+		return
+	}
+	k := f.key()
+	doc, stale, e := s.b.Get(app, k, f.Etag)
+	switch {
+	case e != nil:
+		s.answer(e)
+		return
+	case stale != nil:
+		s.queueFrame(revisionFrame{"stale", stale.Revision})
+		return
+	}
+	if offset > doc.Bytes {
+		_ = doc.Body.Close()
+		s.fail(CodeProtocol, fmt.Sprintf("offset %d is past the document's %d bytes", offset, doc.Bytes))
+		return
+	}
+	if offset > 0 {
+		if _, err := doc.Body.Seek(offset, io.SeekStart); err != nil {
+			_ = doc.Body.Close()
+			s.reply(&Error{CodeInternal, "the document could not be read"})
+			return
+		}
+	}
+	frame := encode(docFrame{"doc", doc.Key, doc.Etag, doc.Bytes, offset})
+	if doc.Bytes == offset {
+		_ = doc.Body.Close()
+		s.queue1(outgoing{text: frame})
+		return
+	}
+	s.queue1(outgoing{text: frame, body: doc.Body, n: doc.Bytes - offset})
+}
+
+// startPut handles a put frame: the backend stages the body, and the binary
+// messages that follow go into the Sink it gives. A put the backend refuses
+// is answered once its body has arrived, which the session discards; a
+// protocol error closes the session at once.
+func (s *Session) startPut(app, device string, f *textFrame) {
+	if f.Bytes == nil || *f.Bytes < 0 {
+		s.fail(CodeProtocol, "put needs a non-negative bytes field")
+		return
+	}
+	size := *f.Bytes
+	var offset int64
+	if f.Offset != nil {
+		offset = *f.Offset
+	}
+	if offset < 0 || offset > size {
+		s.fail(CodeProtocol, "a put's offset is between 0 and its bytes")
+		return
+	}
+	k := f.key()
+	// A missing ifEtag reads as null: a put is always conditional.
+	sink, e := s.b.Put(app, device, f.Tx, k, f.IfEtag, size, offset)
+	if e != nil && e.Code == CodeProtocol {
+		s.fail(e.Code, e.Message)
+		return
+	}
+	if e == nil && sink == nil {
+		e = &Error{CodeInternal, "the body could not be staged"}
+	}
+	s.put = putState{active: true, key: k, remaining: size - offset, received: offset, refusal: e}
+	if e == nil {
+		s.put.sink = sink
+		s.mu.Lock()
+		s.sink = sink
+		s.mu.Unlock()
+	}
+	if s.put.remaining == 0 {
+		s.finishPut()
+	}
+}
+
+// HandleBinary handles one incoming binary message: a piece of a put body,
+// which goes into the put's Sink at once, before the next message is read.
 func (s *Session) HandleBinary(data []byte) {
 	s.inMu.Lock()
 	defer s.inMu.Unlock()
@@ -279,35 +512,55 @@ func (s *Session) HandleBinary(data []byte) {
 		return
 	}
 	s.put.remaining -= int64(len(data))
-	if !s.put.tooLarge() {
-		s.put.body = append(s.put.body, data...)
+	if s.put.refusal == nil {
+		n, err := s.put.sink.Write(data)
+		s.put.received += int64(n)
+		if err != nil {
+			s.put.refusal = errorOf(err)
+			s.endSink()
+		}
 	}
 	if s.put.remaining == 0 {
-		_, app, device := s.identity()
-		s.finishPut(app, device)
+		s.finishPut()
 	}
 }
 
 // finishPut answers a put whose announced body has fully arrived.
-func (s *Session) finishPut(app, device string) {
+func (s *Session) finishPut() {
+	if s.put.sink != nil {
+		if err := s.endSink(); err != nil && s.put.refusal == nil {
+			s.put.refusal = errorOf(err)
+		}
+	}
 	p := s.put
 	s.put = putState{}
-	if p.tooLarge() {
-		s.reply(&Error{CodeTooLarge, fmt.Sprintf("a body of %d bytes exceeds the app's limit of %d", p.announced, p.limit)})
+	if p.refusal != nil {
+		s.reply(p.refusal)
 		return
 	}
-	if p.body == nil {
-		p.body = []byte{}
+	s.queueFrame(stagedFrame{"staged", p.key, p.received})
+}
+
+// endSink closes the put's Sink, which the session then no longer closes
+// when it ends.
+func (s *Session) endSink() error {
+	sink := s.put.sink
+	s.put.sink = nil
+	s.mu.Lock()
+	if s.sink == sink {
+		s.sink = nil
 	}
-	etag, conflict, current, e := s.b.Put(s, app, device, p.ifEtag, p.body)
-	switch {
-	case e != nil:
-		s.reply(e)
-	case conflict:
-		s.queueFrame(etagFrame{"conflict", current}, nil)
-	default:
-		s.queueFrame(etagFrame{"stored", &etag}, nil)
+	s.mu.Unlock()
+	return sink.Close()
+}
+
+// errorOf is the answer to err, a Sink's error.
+func errorOf(err error) *Error {
+	var e *Error
+	if errors.As(err, &e) {
+		return e
 	}
+	return &Error{CodeInternal, "the body could not be stored"}
 }
 
 func (s *Session) hello(app, device, token string) {
@@ -316,7 +569,7 @@ func (s *Session) hello(app, device, token string) {
 		s.fail(e.Code, e.Message)
 		return
 	}
-	s.authenticate(app, device, w, nil, s.b.MaxBytes(app))
+	s.authenticate(app, device, w, nil)
 }
 
 // pair pairs a device of the kind given, a device when kind is absent. A
@@ -343,24 +596,26 @@ func (s *Session) pair(kind *string, app, secret, name string) {
 		}
 		return
 	}
-	s.authenticate(app, device, w, &pairedFrame{"paired", device, token}, s.b.MaxBytes(app))
+	s.authenticate(app, device, w, &pairedFrame{"paired", device, token})
 }
 
 // authenticate completes a successful Hello or Pair: it queues paired (when
-// given), the welcome, and then the push held since before the welcome, and
-// lets the queue hold one document of maxBytes. If the session closed while
-// the backend was deciding, it sends nothing and tells the backend again, so
-// that a registration made in the call does not linger, and undoes a pairing:
-// the client never got its token.
-func (s *Session) authenticate(app, device string, w Welcome, paired *pairedFrame, maxBytes int64) {
+// given), the welcome, and then the pushes held since before the welcome. If
+// the session closed while the backend was deciding, it sends nothing and
+// tells the backend again, so that a registration made in the call does not
+// linger, and undoes a pairing: the client never got its token.
+func (s *Session) authenticate(app, device string, w Welcome, paired *pairedFrame) {
 	hosts := w.Hosts
 	if hosts == nil {
 		hosts = []string{}
 	}
-	welcome := welcomeFrame{"welcome", Version, w.Role, w.Term, w.ServerID, w.Name, w.Etag, hosts, nil}
+	welcome := welcomeFrame{"welcome", Version, w.Role, w.Term, w.ServerID, w.Name, w.Revision, hosts, nil, nil}
 	if w.Subordinates != nil {
 		list := serverList(w.Subordinates)
 		welcome.Subordinates = &list
+	}
+	if len(w.Diverged) > 0 {
+		welcome.Diverged = w.Diverged
 	}
 
 	s.mu.Lock()
@@ -373,7 +628,6 @@ func (s *Session) authenticate(app, device string, w Welcome, paired *pairedFram
 		return
 	}
 	s.authenticated, s.app, s.device = true, app, device
-	s.queueLimit = max(maxBytes, 0) + queueSlack
 	if s.timer != nil {
 		s.timer.Stop()
 	}
@@ -382,31 +636,70 @@ func (s *Session) authenticate(app, device string, w Welcome, paired *pairedFram
 		s.queueLocked(outgoing{text: encode(paired)})
 	}
 	s.queueLocked(outgoing{text: encode(welcome)})
-	if held := s.held; held != nil && (w.Etag == nil || *w.Etag != *held) {
-		s.queueLocked(outgoing{text: encode(etagFrame{"changed", held})})
+	if s.holding && !sameRevision(s.held, w.Revision) {
+		s.queueLocked(outgoing{text: encode(revisionFrame{"changed", s.held})})
 	}
 	if list := s.heldApps; list != nil {
 		s.queueLocked(outgoing{text: encode(appsFrame{"apps", appList(*list)})})
 	}
-	s.held, s.heldApps = nil, nil
+	s.holding, s.held, s.heldApps = false, nil, nil
 	s.mu.Unlock()
 }
 
-// PushChanged tells the client that the app's document now has etag. It never
-// blocks. Before the welcome has been queued (for instance when called from
-// inside the backend's Hello or Pair) the push is held, only the latest kept,
-// and sent right after the welcome unless the welcome carries the same etag.
-// On a closed session it does nothing.
-func (s *Session) PushChanged(etag string) {
+// sameRevision reports whether two revisions are equal, nil (an empty set)
+// included.
+func sameRevision(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+// PushChanged tells the client that the app's set now has revision, nil for
+// an empty set. It never blocks. Before the welcome has been queued (for
+// instance when called from inside the backend's Hello or Pair) the push is
+// held, only the latest kept, and sent right after the welcome unless the
+// welcome carries the same revision. On a closed session it does nothing.
+func (s *Session) PushChanged(revision *string) {
+	if revision != nil {
+		r := *revision
+		revision = &r
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
 	case s.closed || s.closing:
 	case !s.authenticated:
-		s.held = &etag
+		s.holding, s.held = true, revision
 	default:
-		s.queueLocked(outgoing{text: encode(etagFrame{"changed", &etag})})
+		s.queueLocked(outgoing{text: encode(revisionFrame{"changed", revision})})
 	}
+}
+
+// PushDiverged tells the client the servers whose copy of the app diverged
+// from their main's, which wait for a device's choice. It never blocks.
+// Before the welcome it does nothing: the welcome lists them. On a closed
+// session it does nothing either.
+func (s *Session) PushDiverged(list []DivergedServer) {
+	list = slicesOr(list)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.closing || !s.authenticated {
+		return
+	}
+	s.queueLocked(outgoing{text: encode(divergedFrame{"diverged", list})})
+}
+
+// PushResolved tells the client that the divergence of the server server on
+// the app has been settled. It never blocks. On a session that is closed or
+// not authenticated it does nothing.
+func (s *Session) PushResolved(server string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.closing || !s.authenticated {
+		return
+	}
+	s.queueLocked(outgoing{text: encode(resolvedFrame{"resolved", server})})
 }
 
 // PushApps tells the client the server's app list. It never blocks. Before
@@ -481,9 +774,10 @@ func (s *Session) Authenticated() bool {
 }
 
 // Close closes the session at once, dropping whatever is still queued. The
-// first call closes the channel, then tells the backend, then runs OnClose;
-// later calls do nothing. It is safe from any goroutine, including from
-// inside HandleText and the backend's methods.
+// first call closes the channel, then closes a put body still arriving (what
+// arrived stays staged), then tells the backend, then runs OnClose; later
+// calls do nothing. It is safe from any goroutine, including from inside
+// HandleText and the backend's methods.
 func (s *Session) Close() {
 	s.mu.Lock()
 	first := s.markClosedLocked()
@@ -504,15 +798,19 @@ func (s *Session) authExpired() {
 }
 
 // markClosedLocked marks the session closed and stops the sender and the
-// timer. It reports whether this was the first close.
+// timer; the bodies still queued are closed. It reports whether this was the
+// first close.
 func (s *Session) markClosedLocked() bool {
 	if s.closed {
 		return false
 	}
 	s.closed = true
+	for _, o := range s.queue {
+		o.closeBody()
+	}
 	s.queue = nil
-	s.queued = 0
-	s.held, s.heldApps = nil, nil
+	s.queuedText, s.queuedStreams = 0, 0
+	s.holding, s.held, s.heldApps = false, nil, nil
 	close(s.done)
 	if s.timer != nil {
 		s.timer.Stop()
@@ -525,7 +823,13 @@ func (s *Session) finishClose() {
 	s.mu.Lock()
 	undo, app, device := s.unconfirmed, s.app, s.device
 	s.unconfirmed = false
+	sink := s.sink
+	s.sink = nil
 	s.mu.Unlock()
+	if sink != nil {
+		// What arrived stays staged, synced, for a put that resumes it.
+		_ = sink.Close()
+	}
 	if undo {
 		s.b.Forget(app, device)
 	}
@@ -555,9 +859,19 @@ func (s *Session) confirm() bool {
 	return true
 }
 
+// answer answers a backend's refusal: a protocol error closes the session,
+// any other is a reply.
+func (s *Session) answer(e *Error) {
+	if e.Code == CodeProtocol {
+		s.fail(e.Code, e.Message)
+		return
+	}
+	s.reply(e)
+}
+
 // reply queues an error frame; the channel stays open.
 func (s *Session) reply(e *Error) {
-	s.queueFrame(errorFrame{"error", e.Code, e.Message}, nil)
+	s.queueFrame(errorFrame{"error", e.Code, e.Message})
 }
 
 // fail queues an error frame and closes the channel after it.
@@ -581,25 +895,34 @@ func (s *Session) closeAfter(frames ...any) {
 	s.closing = true
 }
 
-// queueFrame queues frame, followed by body when it announces one.
-func (s *Session) queueFrame(frame any, body []byte) {
+// queueFrame queues a text frame.
+func (s *Session) queueFrame(frame any) {
+	s.queue1(outgoing{text: encode(frame)})
+}
+
+// queue1 queues o, unless the session is closing; then o's body is closed.
+func (s *Session) queue1(o outgoing) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.closing {
+		o.closeBody()
 		return
 	}
-	s.queueLocked(outgoing{text: encode(frame), body: body})
+	s.queueLocked(o)
 }
 
-// queueLocked queues o. A queue that would grow past queueLimit closes the
-// session instead: its client asks for more than it reads. An item that finds
-// the queue empty is always taken, so that a document larger than the limit
-// (one stored before the app's limit was lowered) can still be read.
+// queueLocked queues o. A queue that would hold more than maxQueuedText bytes
+// of text, or more than maxQueuedStreams bodies, closes the session instead:
+// its client asks for more than it reads. A text frame that finds the queue
+// empty is always taken.
 func (s *Session) queueLocked(o outgoing) {
 	if s.closed {
+		o.closeBody()
 		return
 	}
-	if len(s.queue) > 0 && s.queued+o.size() > s.queueLimit {
+	text := int64(len(o.text))
+	if len(s.queue) > 0 && s.queuedText+text > maxQueuedText || o.body != nil && s.queuedStreams >= maxQueuedStreams {
+		o.closeBody()
 		// The caller may hold the backend's locks (PushChanged does), and
 		// closing tells the backend, so the close runs on its own.
 		if s.markClosedLocked() {
@@ -608,14 +931,19 @@ func (s *Session) queueLocked(o outgoing) {
 		return
 	}
 	s.queue = append(s.queue, o)
-	s.queued += o.size()
+	s.queuedText += text
+	if o.body != nil {
+		s.queuedStreams++
+	}
 	signal(s.wake)
 }
 
 // sendLoop is the sender goroutine: it sends the queue in order until the
-// session closes.
+// session closes. A body is read from its file one chunk at a time, into one
+// buffer the channel copies from.
 func (s *Session) sendLoop() {
 	defer close(s.senderDone)
+	var buf []byte
 	for {
 		o, ok := s.next()
 		if !ok {
@@ -626,15 +954,40 @@ func (s *Session) sendLoop() {
 			return
 		}
 		if !s.write(func() error { return s.ch.SendText(o.text) }) {
+			o.closeBody()
 			return
 		}
-		for off := 0; off < len(o.body); off += ChunkBytes {
-			chunk := o.body[off:min(off+ChunkBytes, len(o.body))]
-			if !s.write(func() error { return s.ch.Send(chunk) }) {
-				return
-			}
+		if o.body == nil {
+			continue
+		}
+		if buf == nil {
+			buf = make([]byte, ChunkBytes)
+		}
+		ok = s.stream(o.body, o.n, buf)
+		o.closeBody()
+		if !ok {
+			return
 		}
 	}
+}
+
+// stream sends n bytes of body as binary messages of at most len(buf) bytes.
+// A body that cannot be read to its announced end closes the session: the
+// client could not tell the frames that follow from the body. It reports
+// whether the sender should go on.
+func (s *Session) stream(body io.Reader, n int64, buf []byte) bool {
+	for left := n; left > 0; {
+		chunk := buf[:min(int64(len(buf)), left)]
+		if _, err := io.ReadFull(body, chunk); err != nil {
+			s.Close()
+			return false
+		}
+		if !s.write(func() error { return s.ch.Send(chunk) }) {
+			return false
+		}
+		left -= int64(len(chunk))
+	}
+	return true
 }
 
 // next waits for the next queued item. It reports false once the session is
@@ -650,7 +1003,10 @@ func (s *Session) next() (outgoing, bool) {
 			o := s.queue[0]
 			s.queue[0] = outgoing{}
 			s.queue = s.queue[1:]
-			s.queued -= o.size()
+			s.queuedText -= int64(len(o.text))
+			if o.body != nil {
+				s.queuedStreams--
+			}
 			s.mu.Unlock()
 			return o, true
 		}
@@ -704,17 +1060,58 @@ func encode(frame any) string {
 	return string(b)
 }
 
-// The frames the server sends. An etag is a string or null on the wire.
+// docEtags returns list, never nil.
+func docEtags(list []DocEtag) []DocEtag { return slicesOr(list) }
+
+// The frames the server sends. A revision or an etag that may be missing is
+// a string or null on the wire.
 type (
-	// etagFrame is head, stored, conflict and changed.
-	etagFrame struct {
-		T    string  `json:"t"`
-		Etag *string `json:"etag"`
+	// revisionFrame is head, changed and stale.
+	revisionFrame struct {
+		T        string  `json:"t"`
+		Revision *string `json:"revision"`
+	}
+	listFrame struct {
+		T        string    `json:"t"`
+		Revision *string   `json:"revision"`
+		Docs     []DocInfo `json:"docs"`
+		Removed  []Removed `json:"removed"`
+		Cursor   string    `json:"cursor,omitempty"`
 	}
 	docFrame struct {
-		T     string  `json:"t"`
-		Etag  *string `json:"etag"`
-		Bytes int     `json:"bytes"`
+		T string `json:"t"`
+		Key
+		Etag   string `json:"etag"`
+		Bytes  int64  `json:"bytes"`
+		Offset int64  `json:"offset"`
+	}
+	beganFrame struct {
+		T      string   `json:"t"`
+		Tx     string   `json:"tx"`
+		Staged []Staged `json:"staged"`
+	}
+	stagedFrame struct {
+		T string `json:"t"`
+		Key
+		Received int64 `json:"received"`
+	}
+	// txResultFrame is committed and conflict.
+	txResultFrame struct {
+		T        string    `json:"t"`
+		Revision *string   `json:"revision"`
+		Docs     []DocEtag `json:"docs"`
+	}
+	abortedFrame struct {
+		T  string `json:"t"`
+		Tx string `json:"tx"`
+	}
+	resolvedFrame struct {
+		T      string `json:"t"`
+		Server string `json:"server"`
+	}
+	divergedFrame struct {
+		T       string           `json:"t"`
+		Servers []DivergedServer `json:"servers"`
 	}
 	pairedFrame struct {
 		T      string `json:"t"`
@@ -722,15 +1119,16 @@ type (
 		Token  string `json:"token"`
 	}
 	welcomeFrame struct {
-		T            string        `json:"t"`
-		Proto        int           `json:"proto"`
-		Role         string        `json:"role,omitempty"`
-		Term         int           `json:"term,omitempty"`
-		ServerID     string        `json:"serverId"`
-		Name         string        `json:"name"`
-		Etag         *string       `json:"etag"`
-		Hosts        []string      `json:"hosts"`
-		Subordinates *[]ServerInfo `json:"subordinates,omitempty"`
+		T            string           `json:"t"`
+		Proto        int              `json:"proto"`
+		Role         string           `json:"role,omitempty"`
+		Term         int              `json:"term,omitempty"`
+		ServerID     string           `json:"serverId"`
+		Name         string           `json:"name"`
+		Revision     *string          `json:"revision"`
+		Hosts        []string         `json:"hosts"`
+		Subordinates *[]ServerInfo    `json:"subordinates,omitempty"`
+		Diverged     []DivergedServer `json:"diverged,omitempty"`
 	}
 	errorFrame struct {
 		T       string `json:"t"`

@@ -3,13 +3,14 @@ import type { Pairing, PairingStore } from '../src/PairingStore.js';
 import {
 	BLOCKED_RETRY_MS,
 	CHANGE_DEBOUNCE_MS,
+	SYNC_DOCUMENT,
 	SyncEngine,
 	type SyncAdapter,
 	type SyncEngineOptions,
 	type SyncState,
 } from '../src/SyncEngine.js';
 import { DocumentError, WorkspaceError } from '../src/WorkspaceError.js';
-import { FakeServer } from '../src/testing/FakeServer.js';
+import { FakeClient, FakeServer } from '../src/testing/FakeServer.js';
 import { CODE, makePairing, settle } from './fixtures.js';
 
 const START = new Date('2026-11-07T12:00:00.000Z').getTime();
@@ -166,9 +167,20 @@ describe('SyncEngine', () => {
 		engine.start(true);
 		await settle();
 
-		expect(server.log).toEqual(['connect', 'hello#1', 'head#1', 'get#1', 'put#1']);
+		// The set is empty: there is nothing to read.
+		expect(server.log).toEqual([
+			'connect',
+			'hello#1',
+			'head#1',
+			'list#1',
+			'begin#1',
+			'put#1',
+			'commit#1',
+		]);
 		expect(written()).toEqual([{ ifEtag: null, notes: ['a'] }]);
+		expect(server.puts[0].key).toEqual(SYNC_DOCUMENT);
 		expect(state.pairing?.lastEtag).toBe(server.etag);
+		expect(state.pairing?.lastRevision).toBe(server.revision);
 		expect(state.pairing?.lastSyncAt).toBe('2026-11-07T12:00:00.000Z');
 		expect(last()).toMatchObject({
 			status: 'connected',
@@ -221,10 +233,10 @@ describe('SyncEngine', () => {
 		server.store(encodeNotes(['a', 'b']));
 		server.log.length = 0;
 
-		server.clients[0].emitChanged(server.etag ?? '');
+		server.clients[0].emitChanged(server.revision);
 		await settle();
 
-		expect(server.log).toEqual(['head#1', 'get#1']);
+		expect(server.log).toEqual(['head#1', 'list#1', 'get#1']);
 		expect(state.local).toContain('b');
 	});
 
@@ -241,8 +253,98 @@ describe('SyncEngine', () => {
 		expect(server.log).toEqual([]);
 		await fire();
 
-		expect(server.log).toEqual(['head#1', 'get#1', 'put#1']);
+		expect(server.log).toEqual(['head#1', 'list#1', 'get#1', 'begin#1', 'put#1', 'commit#1']);
 		expect(decodeNotes(server.body)).toEqual(['a', 'one', 'two']);
+	});
+
+	it('only other documents moving reads nothing, and records the revision', async () => {
+		const { engine, server, state } = setup({ local: ['a'] });
+		engine.start(true);
+		await settle();
+		server.storeDocument({ path: 'photos', id: 'p1', type: 'jpg' }, 'jpeg');
+		server.log.length = 0;
+
+		await engine.syncNow();
+
+		expect(server.log).toEqual(['head#1', 'list#1']);
+		expect(state.pairing?.lastRevision).toBe(server.revision);
+		expect(server.text()).toBe(new TextDecoder().decode(encodeNotes(['a'])));
+	});
+
+	it('a write leaves the other documents of the set alone', async () => {
+		const { engine, server } = setup({ local: ['a'] });
+		server.storeDocument({ path: 'photos', id: 'p1', type: 'jpg' }, 'jpeg');
+
+		engine.start(true);
+		await settle();
+
+		expect([...server.documents.keys()].sort()).toEqual(['data.json', 'photos/p1.jpg']);
+	});
+
+	it('a document that changes between the listing and the read is listed again', async () => {
+		const { engine, server, state, adapter } = setup({ local: ['a'] });
+		server.store(encodeNotes(['b']));
+		const plan = vi.spyOn(adapter, 'plan');
+		const original = FakeClient.prototype.get;
+		let raced = false;
+		const get = vi.spyOn(FakeClient.prototype, 'get').mockImplementation(function (
+			this: FakeClient,
+			key,
+			options,
+		) {
+			if (!raced) {
+				raced = true;
+				server.store(encodeNotes(['b', 'c']));
+			}
+			return original.call(this, key, options);
+		});
+
+		engine.start(true);
+		await settle();
+
+		expect(plan).toHaveBeenCalledTimes(1);
+		expect(state.local).toEqual(['a', 'b', 'c']);
+		expect(decodeNotes(server.body)).toEqual(['a', 'b', 'c']);
+		expect(get).toHaveBeenCalledTimes(2);
+		get.mockRestore();
+	});
+
+	it('a commit that fails after the commit point is read again, not written twice', async () => {
+		const { engine, server, state, last } = setup({ local: ['a'] });
+		server.commitError = 'internal';
+		server.commitAppliedFirst = true;
+
+		engine.start(true);
+		await settle();
+
+		expect(server.puts).toHaveLength(1);
+		expect(decodeNotes(server.body)).toEqual(['a']);
+		expect(state.pairing?.lastEtag).toBe(server.etag);
+		expect(last()).toMatchObject({ status: 'connected', error: null });
+	});
+
+	it('a commit that fails before the commit point is written again', async () => {
+		const { engine, server, last } = setup({ local: ['a'] });
+		server.commitError = 'internal';
+
+		engine.start(true);
+		await settle();
+
+		expect(server.puts).toHaveLength(2);
+		expect(decodeNotes(server.body)).toEqual(['a']);
+		expect(last()).toMatchObject({ status: 'connected', error: null });
+	});
+
+	it('a set over its quota waits for the next trigger', async () => {
+		const { engine, server, last, pending } = setup({ local: ['a'] });
+		server.commitError = 'quota';
+
+		engine.start(true);
+		await settle();
+
+		expect(last()).toMatchObject({ status: 'error', error: { code: 'quota' } });
+		expect(pending()).toEqual([]);
+		expect(server.log).not.toContain('close#1');
 	});
 
 	it('conflicts are retried, then reported', async () => {
@@ -536,9 +638,18 @@ describe('SyncEngine', () => {
 			port: 47801,
 			hosts: ['a.local', '192.168.1.5'],
 			lastEtag: server.etag,
+			lastRevision: server.revision,
 			lastSyncAt: '2026-11-07T12:00:00.000Z',
 		});
-		expect(server.log).toEqual(['connect', 'pair#1', 'head#1', 'get#1', 'put#1']);
+		expect(server.log).toEqual([
+			'connect',
+			'pair#1',
+			'head#1',
+			'list#1',
+			'begin#1',
+			'put#1',
+			'commit#1',
+		]);
 		expect(last().status).toBe('connected');
 	});
 
@@ -620,12 +731,12 @@ describe('SyncEngine', () => {
 		// The edit lands after the local state was read for the merge.
 		const realPut = server.clients[0].put.bind(server.clients[0]);
 		let edited = false;
-		vi.spyOn(server.clients[0], 'put').mockImplementation(async (ifEtag, body) => {
+		vi.spyOn(server.clients[0], 'put').mockImplementation(async (...args) => {
 			if (!edited) {
 				edited = true;
 				edit([...state.local, 'during']);
 			}
-			return realPut(ifEtag, body);
+			return realPut(...args);
 		});
 		edit(['a', 'before']);
 		await fire();

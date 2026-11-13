@@ -1,8 +1,10 @@
 // Package hub is the protocol's backend: it authenticates hello and pair
 // against the apps list, the device registry and the pairing secret, answers
-// reads and writes from the document store, tells an app's other sessions
-// about every stored write, and closes the sessions of a device or app that is
-// removed. It also limits failed attempts per IP.
+// reads and transactions from the store (documents.go), tells an app's other
+// sessions every new revision of its set, and closes the sessions of a device
+// or app that is removed. It also limits failed attempts per IP. The link to
+// an upstream server writes through LinkTx, and hears of every new revision
+// through Deps.Changed.
 //
 // A server-kind device (a subordinate server linked to this one) is admitted
 // to every listed app, and also to a link session, which has no app: it is
@@ -61,12 +63,13 @@ type Deps struct {
 	// Logf, if set, receives the text of every internal error; devices get
 	// the error without it.
 	Logf func(format string, args ...any)
-	// Stored, if set, is called after a device's write is stored (Put), once
-	// the hub's locks are released, and must not block. A subordinate passes
-	// it to its link, which then pushes the document to its main. Replace
-	// does not call it: the link writes with Replace, and a hook on its own
-	// writes would send them back where they came from.
-	Stored func(app string)
+	// Changed, if set, is told every new revision of an app's set, whoever
+	// made it: a device's commit, the link's own (LinkTx.Commit), or a
+	// reconcile that took in files changed by hand. It is called once the
+	// hub's locks are released, and must not block. A subordinate passes it
+	// to its link, which compares the set with its main's and its base:
+	// its own commits come back to it too, and find the two in step.
+	Changed func(app string, revision *string)
 	// Invite, if set, issues a pairing code of this server with a new
 	// secret, as its page's "Pair a device" does (the new secret revokes the
 	// previous one). A subordinate asks for one over its link session
@@ -112,11 +115,13 @@ type member struct {
 // Hub routes the sessions of all apps. It is safe for concurrent use.
 //
 // Locking: an app's lock (appLock) orders everything that admits a session
-// to the app or changes its document, devices or listing, so a session is
-// never admitted with a device or app that is being removed, and pushes leave
-// in the order the writes were stored. A server-kind device has sessions of
-// every app and a link session, so its removal cannot take one app's lock:
-// admissions and writes read-lock servers, and that removal write-locks it.
+// to the app or changes its set (a commit, a reconcile), devices or listing,
+// so a session is never admitted with a device or app that is being removed,
+// and pushes leave in the order the revisions were made. A server-kind device
+// has sessions of every app and a link session, so its removal cannot take
+// one app's lock: admissions and commits read-lock servers, and that removal
+// write-locks it. The store has locks of its own, taken under these, never
+// the other way round.
 // mu guards only the session set and is never held while calling into a
 // session: Session.Close calls Closed, which takes mu. Lock order: an app's
 // lock, then servers, then mu.
@@ -285,20 +290,29 @@ func (h *Hub) pairServer(s *protocol.Session, ip, secret, name string) (string, 
 	return d.ID, token, w, nil
 }
 
-// welcome reads the document's etag for s, which the caller has registered:
-// a write stored after the registration is pushed to s (the session holds the
-// push until its welcome is out) and one stored before is in the etag. A link
-// session (app "") has no document. On failure it unregisters s.
+// welcome reconciles the app's set with its files (a file changed by hand is
+// taken in, and the app's sessions are told) and reads its revision for s,
+// which the caller has registered: a commit after the registration is
+// pushed to s (the session holds the push until its welcome is out) and one
+// before is in the revision. A link session (app "") has no documents. On
+// failure it unregisters s.
 func (h *Hub) welcome(s *protocol.Session, app string) (protocol.Welcome, *protocol.Error) {
-	var etag *string
+	var rev *string
 	if app != "" {
+		if err := h.Reconcile(app); err != nil {
+			h.Closed(s)
+			if errors.Is(err, apps.ErrNotFound) {
+				return protocol.Welcome{}, errUnknownApp(app)
+			}
+			return protocol.Welcome{}, h.errInternal(err)
+		}
 		var e *protocol.Error
-		if etag, e = h.Head(app); e != nil {
+		if rev, e = h.Head(app); e != nil {
 			h.Closed(s)
 			return protocol.Welcome{}, e
 		}
 	}
-	w := protocol.Welcome{ServerID: h.d.ServerID, Name: h.d.Name(), Etag: etag, Hosts: h.d.Hosts(), Role: h.role(), Term: h.term()}
+	w := protocol.Welcome{ServerID: h.d.ServerID, Name: h.d.Name(), Revision: rev, Hosts: h.d.Hosts(), Role: h.role(), Term: h.term()}
 	if w.Role == protocol.RoleMain {
 		w.Subordinates = h.subordinates()
 	}
@@ -332,41 +346,6 @@ func (h *Hub) subordinates() []protocol.ServerInfo {
 		out = append(out, protocol.ServerInfo(si))
 	}
 	return out
-}
-
-// Head returns the etag of app's document, nil when there is none.
-func (h *Hub) Head(app string) (*string, *protocol.Error) {
-	_, etag, err := h.d.Store.Read(app)
-	if err != nil {
-		return nil, h.errInternal(err)
-	}
-	return etag, nil
-}
-
-// Get returns app's document and its etag, nil and nil when there is none.
-func (h *Hub) Get(app string) ([]byte, *string, *protocol.Error) {
-	doc, etag, err := h.d.Store.Read(app)
-	if err != nil {
-		return nil, nil, h.errInternal(err)
-	}
-	return doc, etag, nil
-}
-
-// shimMaxBytes caps a put's body until stage 2 of the files plan: the
-// session still holds a body and its replies in memory, and a quota may be
-// up to 1 TiB.
-const shimMaxBytes = int64(1 << 30)
-
-// MaxBytes returns app's size limit, 0 when it is not listed: its quota,
-// which the whole set of its files shares, but at most shimMaxBytes (the
-// shim of the files plan: stage 2 replaces this with the quota checks of
-// the transactions and streams the bodies).
-func (h *Hub) MaxBytes(app string) int64 {
-	a, ok := h.d.Apps.Get(app)
-	if !ok {
-		return 0
-	}
-	return min(a.Quota, shimMaxBytes)
 }
 
 // Apps returns the app list to a session of a server-kind device. Any other
@@ -723,82 +702,6 @@ func (h *Hub) appList() []protocol.AppInfo {
 		out = append(out, protocol.AppInfo{ID: a.ID, Name: a.Name})
 	}
 	return out
-}
-
-// Put stores body as app's document if the stored one has ifEtag, and then
-// tells every other session of the app the new etag, and Deps.Stored. A put
-// from a device removed meanwhile stores nothing.
-func (h *Hub) Put(from *protocol.Session, app, device string, ifEtag *string, body []byte) (string, bool, *string, *protocol.Error) {
-	a, unlock, ok := h.lockListed(app)
-	if !ok {
-		return "", false, nil, &protocol.Error{Code: protocol.CodeUnknownApp, Message: fmt.Sprintf("this server no longer serves the app %q", app)}
-	}
-	stored := false
-	defer func() { // deferred first, so it runs after the locks are released
-		if stored && h.d.Stored != nil {
-			h.d.Stored(app)
-		}
-	}()
-	defer unlock()
-	// Under the app's lock, which RemoveDevice takes too, and the servers
-	// lock, which the removal of a server-kind device takes.
-	h.servers.RLock()
-	defer h.servers.RUnlock()
-	if !h.admitted(device, app) {
-		return "", false, nil, &protocol.Error{Code: protocol.CodeBadToken, Message: "this device has been removed; pair it again"}
-	}
-	etag, err := h.writeLocked(a, body, ifEtag, from)
-	var conflict *store.ConflictError
-	switch {
-	case errors.As(err, &conflict):
-		return "", true, conflict.Current(store.DataKey), nil
-	case errors.Is(err, store.ErrNotJSON):
-		return "", false, nil, &protocol.Error{Code: protocol.CodeNotJSON, Message: "the body is not valid JSON"}
-	case errors.Is(err, store.ErrQuota):
-		// The app's other files leave the document less than its quota.
-		return "", false, nil, &protocol.Error{Code: protocol.CodeTooLarge, Message: "the app's files would exceed its quota"}
-	case err != nil:
-		return "", false, nil, h.errInternal(err)
-	}
-	stored = true
-	return etag, false, nil, nil
-}
-
-// Replace stores body as app's document if the stored one has ifEtag, as a
-// put does, and tells every session of the app the new etag, since none of
-// them wrote it. The link to the upstream server stores the main's document
-// with it. It does not call Deps.Stored. A mismatch is a
-// *store.ConflictError naming the current etag; an app that is not listed is
-// an error wrapping apps.ErrNotFound.
-func (h *Hub) Replace(app string, body []byte, ifEtag *string) (string, error) {
-	a, unlock, ok := h.lockListed(app)
-	if !ok {
-		return "", fmt.Errorf("%w: %q", apps.ErrNotFound, app)
-	}
-	defer unlock()
-	return h.writeLocked(a, body, ifEtag, nil)
-}
-
-// writeLocked writes body as a's document if the stored one has ifEtag, and
-// pushes the new etag to every session of the app but from. The caller holds
-// the app's lock.
-func (h *Hub) writeLocked(a apps.App, body []byte, ifEtag *string, from *protocol.Session) (string, error) {
-	etag, err := h.d.Store.Write(a.ID, body, ifEtag)
-	if err != nil {
-		return "", err
-	}
-	// Still under the app's lock, so each session's changed frames follow the
-	// order the writes were stored, and its last frame carries the newest
-	// etag. A welcome reads its etag outside this lock, so it can be newer
-	// than a push still to come: welcome(e3), changed(e2), changed(e3). That
-	// is all protocol.md promises. PushChanged never blocks and never calls
-	// back into the hub.
-	for _, s := range h.registered(func(m member) bool { return m.app == a.ID }) {
-		if s != from {
-			s.PushChanged(etag)
-		}
-	}
-	return etag, nil
 }
 
 // Forget deletes the device, if it belongs to app or is a server-kind device,

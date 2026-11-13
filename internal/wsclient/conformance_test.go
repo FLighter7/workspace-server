@@ -1,6 +1,7 @@
 package wsclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -138,10 +139,11 @@ func TestConformanceConstants(t *testing.T) {
 		Chunk  int    `json:"chunkBytes"`
 		High   int    `json:"bufferHighBytes"`
 		Low    int    `json:"bufferLowBytes"`
+		Page   int    `json:"listPage"`
 	}
 	conformance.Read(t, "constants.json", &c)
 	if c.Proto != Version || c.Prefix != fmt.Sprintf("wsrv%d.", CodeVersion) || c.Chunk != ChunkBytes ||
-		c.High != BufferHigh || c.Low != BufferLow {
+		c.High != BufferHigh || c.Low != BufferLow || c.Page != ListPage {
 		t.Errorf("constants %+v differ from the client's", c)
 	}
 	var codes struct {
@@ -243,34 +245,56 @@ func TestConformancePairingCodes(t *testing.T) {
 func TestConformanceChunks(t *testing.T) {
 	var v struct {
 		Cases []struct {
-			Bytes  int   `json:"bytes"`
+			Bytes  int64 `json:"bytes"`
+			Offset int64 `json:"offset"`
 			Chunks []int `json:"chunks"`
 		} `json:"cases"`
 	}
 	conformance.Read(t, "chunks.json", &v)
+	k := Key{ID: "data", Type: "bin"}
 	for _, c := range v.Cases {
-		t.Run(fmt.Sprint(c.Bytes), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%d from %d", c.Bytes, c.Offset), func(t *testing.T) {
+			// A put sends the bytes past its offset in these pieces.
 			fc := &fakeChannel{}
 			cl := NewClient(fc, "todo")
 			done := make(chan error, 1)
 			go func() {
-				_, _, err := cl.Put(context.Background(), nil, make([]byte, c.Bytes))
+				_, err := cl.Put(context.Background(), "tx-0123456789abcdef", k, nil, c.Bytes, c.Offset, bytes.NewReader(make([]byte, c.Bytes-c.Offset)))
 				done <- err
 			}()
 			waitFor(t, "the body", func() bool {
 				frames, body, _ := fc.sent()
-				return len(frames) == 1 && len(body) == c.Bytes
+				return len(frames) == 1 && int64(len(body)) == c.Bytes-c.Offset
 			})
 			frames, _, pieces := fc.sent()
-			if want := map[string]any{"t": "put", "ifEtag": nil, "bytes": float64(c.Bytes)}; !reflect.DeepEqual(frames, []map[string]any{want}) {
+			want := map[string]any{"t": "put", "tx": "tx-0123456789abcdef", "path": "", "id": "data", "type": "bin", "ifEtag": nil, "bytes": float64(c.Bytes), "offset": float64(c.Offset)}
+			if !reflect.DeepEqual(frames, []map[string]any{want}) {
 				t.Errorf("frames %v, want %v", frames, want)
 			}
 			if !slices.Equal(pieces, c.Chunks) && !(len(pieces) == 0 && len(c.Chunks) == 0) {
 				t.Errorf("pieces %v, want %v", pieces, c.Chunks)
 			}
-			cl.Receive(true, []byte(`{"t":"stored","etag":"e1"}`))
+			cl.Receive(true, []byte(fmt.Sprintf(`{"t":"staged","path":"","id":"data","type":"bin","received":%d}`, c.Bytes)))
 			if err := <-done; err != nil {
 				t.Error(err)
+			}
+
+			// A get takes a doc's body in pieces of that size.
+			cl2 := NewClient(&fakeChannel{}, "todo")
+			var got bytes.Buffer
+			gdone := make(chan error, 1)
+			etag := "e1"
+			go func() {
+				_, err := cl2.Get(context.Background(), k, &etag, c.Offset, &got)
+				gdone <- err
+			}()
+			waitFor(t, "the get", func() bool { cl2.mu.Lock(); defer cl2.mu.Unlock(); return cl2.pending != nil })
+			cl2.Receive(true, []byte(fmt.Sprintf(`{"t":"doc","path":"","id":"data","type":"bin","etag":"e1","bytes":%d,"offset":%d}`, c.Bytes, c.Offset)))
+			for _, n := range c.Chunks {
+				cl2.Receive(false, make([]byte, n))
+			}
+			if err := <-gdone; err != nil || int64(got.Len()) != c.Bytes-c.Offset {
+				t.Errorf("Get = %v with %d bytes, want %d", err, got.Len(), c.Bytes-c.Offset)
 			}
 		})
 	}
@@ -278,19 +302,39 @@ func TestConformanceChunks(t *testing.T) {
 
 // call is the client call an exchange makes.
 type call struct {
-	Method  string      `json:"method"`
-	Kind    string      `json:"kind"`
-	App     string      `json:"app"`
-	Device  string      `json:"device"`
-	Token   string      `json:"token"`
-	Secret  string      `json:"secret"`
-	Name    string      `json:"name"`
-	IfEtag  *string     `json:"ifEtag"`
-	Body    string      `json:"body"`
-	Server  *Server     `json:"server"`
-	Term    int         `json:"term"`
-	Devices *[]Device   `json:"devices"`
-	Removed []Tombstone `json:"removed"`
+	Method   string          `json:"method"`
+	Kind     string          `json:"kind"`
+	App      string          `json:"app"`
+	Device   string          `json:"device"`
+	Token    string          `json:"token"`
+	Secret   string          `json:"secret"`
+	Name     string          `json:"name"`
+	IfEtag   *string         `json:"ifEtag"`
+	Body     string          `json:"body"`
+	Server   json.RawMessage `json:"server"` // a server's data, or a server id in resolve
+	Term     int             `json:"term"`
+	Devices  *[]Device       `json:"devices"`
+	Removed  []Tombstone     `json:"removed"`
+	Revision json.RawMessage `json:"revision"`
+	Cursor   string          `json:"cursor"`
+	Path     string          `json:"path"`
+	ID       string          `json:"id"`
+	Type     string          `json:"type"`
+	Etag     *string         `json:"etag"`
+	Offset   int64           `json:"offset"`
+	Tx       string          `json:"tx"`
+	Keep     string          `json:"keep"`
+}
+
+func (c *call) key() Key { return Key{Path: c.Path, ID: c.ID, Type: c.Type} }
+
+// server reads the call's server as a server's connection data.
+func (c *call) server() *Server {
+	var s *Server
+	if json.Unmarshal(c.Server, &s) != nil {
+		return nil
+	}
+	return s
 }
 
 type exchange struct {
@@ -298,7 +342,9 @@ type exchange struct {
 	Call         *call            `json:"call"`
 	Client       map[string]any   `json:"client"`
 	ClientBody   string           `json:"clientBody"`
-	Push         *string          `json:"push"`
+	Push         json.RawMessage  `json:"push"` // null is a push too: an empty set
+	PushDiverged []DivergedServer `json:"pushDiverged"`
+	PushResolved *string          `json:"pushResolved"`
 	PushApps     []App            `json:"pushApps"`
 	PushDevices  []Device         `json:"pushDevices"`
 	PushRemoved  []Tombstone      `json:"pushRemoved"`
@@ -323,12 +369,39 @@ func start(cl *Client, c *call) (any, error) {
 		return map[string]any{"device": p.Device, "token": p.Token, "welcome": welcomeResult(w)}, err
 	case "head":
 		return cl.Head(ctx)
+	case "list":
+		var rev *string
+		pinned := len(c.Revision) > 0
+		if pinned {
+			_ = json.Unmarshal(c.Revision, &rev)
+		}
+		page, err := cl.List(ctx, pinned, rev, c.Cursor)
+		if s, ok := IsStale(err); ok {
+			return map[string]any{"stale": s.Revision}, nil
+		}
+		return page, err
 	case "get":
-		etag, body, err := cl.Get(ctx)
-		return map[string]any{"etag": etag, "body": string(body)}, err
+		var body bytes.Buffer
+		doc, err := cl.Get(ctx, c.key(), c.Etag, c.Offset, &body)
+		if s, ok := IsStale(err); ok {
+			return map[string]any{"stale": s.Revision}, nil
+		}
+		return map[string]any{"path": doc.Path, "id": doc.ID, "type": doc.Type, "etag": doc.Etag, "bytes": doc.Bytes, "offset": doc.Offset, "body": body.String()}, err
+	case "begin":
+		return cl.Begin(ctx, c.Tx)
 	case "put":
-		stored, etag, err := cl.Put(ctx, c.IfEtag, []byte(c.Body))
-		return map[string]any{"stored": stored, "etag": etag}, err
+		body := []byte(c.Body)
+		return cl.Put(ctx, c.Tx, c.key(), c.IfEtag, int64(len(body)), c.Offset, bytes.NewReader(body[c.Offset:]))
+	case "delete":
+		return cl.Delete(ctx, c.Tx, c.key(), c.IfEtag)
+	case "commit":
+		return cl.Commit(ctx, c.Tx)
+	case "abort":
+		return map[string]any{"tx": c.Tx}, cl.Abort(ctx, c.Tx)
+	case "resolve":
+		var server string
+		_ = json.Unmarshal(c.Server, &server)
+		return map[string]any{"server": server}, cl.Resolve(ctx, server, c.Keep)
 	case "forget":
 		return nil, cl.Forget(ctx)
 	case "apps":
@@ -338,10 +411,10 @@ func start(cl *Client, c *call) (any, error) {
 		if c.Devices != nil {
 			handover = &Registry{Devices: *c.Devices, Removed: c.Removed}
 		}
-		reg, err := cl.Announce(ctx, *c.Server, handover)
+		reg, err := cl.Announce(ctx, *c.server(), handover)
 		return registryResult(reg), err
 	case "term":
-		a, err := cl.Term(ctx, c.Term, *c.Server, c.Device, c.Token)
+		a, err := cl.Term(ctx, c.Term, *c.server(), c.Device, c.Token)
 		return map[string]any{"term": a.Term, "main": a.Main}, err
 	case "invite":
 		inv, err := cl.Invite(ctx)
@@ -353,7 +426,7 @@ func start(cl *Client, c *call) (any, error) {
 // welcomeResult is w as the vectors write a welcome: role and subordinates
 // only when the frame carried them, an empty list included.
 func welcomeResult(w Welcome) map[string]any {
-	r := map[string]any{"serverId": w.ServerID, "name": w.Name, "etag": w.Etag, "hosts": w.Hosts}
+	r := map[string]any{"serverId": w.ServerID, "name": w.Name, "revision": w.Revision, "hosts": w.Hosts}
 	if w.Role != "" {
 		r["role"] = w.Role
 	}
@@ -362,6 +435,9 @@ func welcomeResult(w Welcome) map[string]any {
 	}
 	if w.Subordinates != nil {
 		r["subordinates"] = w.Subordinates
+	}
+	if w.Diverged != nil {
+		r["diverged"] = w.Diverged
 	}
 	return r
 }
@@ -375,8 +451,8 @@ func registryResult(reg Registry) any {
 	return map[string]any{"devices": reg.Devices, "removed": reg.Removed}
 }
 
-// play sends the server's frames into the client, a body after the frame
-// that announces one, in pieces of at most ChunkBytes.
+// play sends the server's frames into the client, a doc's body after it, in
+// pieces of at most ChunkBytes.
 func play(cl *Client, frames []map[string]any, body string) {
 	for _, f := range frames {
 		if f["t"] == "error" && f["message"] == nil {
@@ -384,7 +460,7 @@ func play(cl *Client, frames []map[string]any, body string) {
 		}
 		b, _ := json.Marshal(f)
 		cl.Receive(true, b)
-		if n, _ := f["bytes"].(float64); n > 0 {
+		if f["t"] == "doc" {
 			for off := 0; off < len(body); off += ChunkBytes {
 				cl.Receive(false, []byte(body[off:min(off+ChunkBytes, len(body))]))
 			}
@@ -400,9 +476,11 @@ func playExchange(t *testing.T, ex exchange) {
 	}
 	cl := NewClient(fc, app)
 
-	if ex.Push != nil || ex.PushApps != nil || ex.PushDevices != nil || ex.PushTakeOver {
+	if ex.Push != nil || ex.PushDiverged != nil || ex.PushResolved != nil || ex.PushApps != nil || ex.PushDevices != nil || ex.PushTakeOver {
 		var heard []any
-		cl.OnChanged(func(etag string) { heard = append(heard, etag) })
+		cl.OnChanged(func(rev *string) { heard = append(heard, rev) })
+		cl.OnDiverged(func(list []DivergedServer) { heard = append(heard, list) })
+		cl.OnResolved(func(server string) { heard = append(heard, server) })
 		cl.OnApps(func(list []App) { heard = append(heard, list) })
 		cl.OnDevices(func(reg Registry) { heard = append(heard, registryResult(reg)) })
 		cl.OnTakeOver(func() { heard = append(heard, "takeOver") })
@@ -417,7 +495,7 @@ func playExchange(t *testing.T, ex exchange) {
 		return
 	}
 
-	if ex.Call.Method == "term" && ex.Call.Server == nil {
+	if ex.Call.Method == "term" && ex.Call.server() == nil {
 		return // a frame this client never sends; only the server's side plays it
 	}
 

@@ -34,14 +34,12 @@ func (e *env) serverDevice(t *testing.T) (id, token string) {
 var todoAndNotes = []any{obj{"id": "notes", "name": "Notes"}, obj{"id": "todo", "name": "Todo"}}
 
 // A server-kind pair needs no app: it makes a device with no app, and the
-// session is its link session, whose welcome has no etag and names the role,
+// session is its link session, whose welcome has no revision and names the role,
 // and which may ask for the app list.
 func TestPairAsAServer(t *testing.T) {
 	e := newEnv(t)
 	e.addApp(t, apps.App{ID: "notes", Name: "Notes"})
-	if _, err := e.store.Write("todo", []byte(`{}`), nil); err != nil {
-		t.Fatal(err)
-	}
+	e.writeDoc(t, "todo", "data.json", `{}`)
 	secret, _ := e.secrets.Issue()
 	s, fc := e.connect(t, "192.168.1.9:5000")
 	s.HandleText(serverPairFrame(secret, "Laptop"))
@@ -56,8 +54,8 @@ func TestPairAsAServer(t *testing.T) {
 	if frames[0]["t"] != "paired" || frames[0]["device"] != list[0].ID {
 		t.Errorf("first frame %v, want paired for %s", frames[0], list[0].ID)
 	}
-	if w := frames[1]; w["t"] != "welcome" || w["etag"] != nil || w["role"] != "main" {
-		t.Errorf("welcome %v, want etag null and role main", w)
+	if w := frames[1]; w["t"] != "welcome" || w["revision"] != nil || w["role"] != "main" {
+		t.Errorf("welcome %v, want revision null and role main", w)
 	}
 	if got := frames[2]; !reflect.DeepEqual(got, obj{"t": "apps", "apps": todoAndNotes}) {
 		t.Errorf("apps %v, want notes and todo", got)
@@ -158,44 +156,6 @@ func TestAppListAndItsChanges(t *testing.T) {
 	}
 }
 
-// A server-kind device writes to any app; Replace writes without a session
-// and tells every session of the app, and refuses an app that is not listed.
-func TestServerKindWritesAndReplace(t *testing.T) {
-	e := newEnv(t)
-	srv, srvToken := e.serverDevice(t)
-	phone, phoneToken := e.device(t, "todo")
-	s, fc := e.login(t, "192.168.1.9:5000", "todo", srv, srvToken)
-	other, otherFc := e.login(t, "192.168.1.10:5000", "todo", phone, phoneToken)
-
-	put(s, nil, []byte(`{"a":1}`))
-	stored := waitFrames(t, fc, "stored", 1)[0]
-	if changed := waitFrames(t, otherFc, "changed", 1)[0]; changed["etag"] != stored["etag"] {
-		t.Errorf("changed %v, want %v", changed, stored["etag"])
-	}
-
-	body := []byte(`{"a":2}`)
-	etag, err := e.hub.Replace("todo", body, ptr(stored["etag"].(string)))
-	if err != nil || etag != store.Etag(body) {
-		t.Fatalf("Replace = %q, %v; want %q", etag, err, store.Etag(body))
-	}
-	// The writer heard no changed for its own put; the other session heard
-	// that one already, so the Replace's is its second.
-	for f, n := range map[*fakeChannel]int{fc: 1, otherFc: 2} {
-		if c := waitFrames(t, f, "changed", n); c[len(c)-1]["etag"] != etag {
-			t.Errorf("last changed %v, want %s", c[len(c)-1], etag)
-		}
-	}
-	settle(t, other, otherFc)
-
-	var conflict *store.ConflictError
-	if _, err := e.hub.Replace("todo", body, nil); !errors.As(err, &conflict) || *conflict.Current(store.DataKey) != etag {
-		t.Errorf("Replace with a stale etag = %v, want a conflict naming %s", err, etag)
-	}
-	if _, err := e.hub.Replace("chess", body, nil); !errors.Is(err, apps.ErrNotFound) {
-		t.Errorf("Replace for an app not listed = %v, want apps.ErrNotFound", err)
-	}
-}
-
 // Removing a server-kind device closes its sessions of every app and its link
 // session; forget from any of them removes it.
 func TestRemoveServerKindDevice(t *testing.T) {
@@ -261,5 +221,111 @@ func TestCloseServers(t *testing.T) {
 	waitFor(t, "the server's session to close", srvFc.isClosed)
 	if phoneFc.isClosed() {
 		t.Error("the phone's session closed too")
+	}
+}
+
+// A server-kind device writes to any app. The link's own transaction
+// (LinkTx) writes without a session: it tells every session of the app and
+// Deps.Changed, leaves a conflict open, and refuses an app that is not
+// listed.
+func TestServerKindWritesAndLinkTx(t *testing.T) {
+	e := newEnv(t)
+	srv, srvToken := e.serverDevice(t)
+	phone, phoneToken := e.device(t, "todo")
+	s, fc := e.login(t, "192.168.1.9:5000", "todo", srv, srvToken)
+	other, otherFc := e.login(t, "192.168.1.10:5000", "todo", phone, phoneToken)
+
+	write(s, "data.json", nil, []byte(`{"a":1}`))
+	committed := waitFrames(t, fc, "committed", 1)[0]
+	if changed := waitFrames(t, otherFc, "changed", 1)[0]; changed["revision"] != committed["revision"] {
+		t.Errorf("changed %v, want %v", changed, committed["revision"])
+	}
+	first := committedEtag(committed).(string)
+
+	tx, staged, err := e.hub.BeginLink("todo", newTx())
+	if err != nil || len(staged) != 0 {
+		t.Fatalf("BeginLink = %v, %v", staged, err)
+	}
+	body := []byte(`{"a":2}`)
+	sink, err := tx.Put(keyOf("data.json"), &first, int64(len(body)), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sink.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	_ = sink.Close()
+	if err := tx.Delete(keyOf("gone.md"), nil); err != nil {
+		t.Fatal(err)
+	}
+	c, err := tx.Commit()
+	if err != nil || len(c.Docs) != 2 || *c.Docs[0].Etag != store.Etag(body) {
+		t.Fatalf("Commit = %+v, %v", c, err)
+	}
+	rev := e.revisionOf(t, "todo")
+	// Every session hears it: the writer of the first commit as its first
+	// changed, the other session as its second.
+	for f, n := range map[*fakeChannel]int{fc: 1, otherFc: 2} {
+		if got := waitFrames(t, f, "changed", n); got[len(got)-1]["revision"] != rev {
+			t.Errorf("last changed %v, want %v", got[len(got)-1], rev)
+		}
+	}
+	settle(t, other, otherFc)
+	if got := e.changesHeard(); len(got) != 2 || got[1] != "todo "+rev.(string) {
+		t.Errorf("Changed heard %v", got)
+	}
+
+	// A conflict leaves the link's transaction open.
+	tx, _, err = e.hub.BeginLink("todo", newTx())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Delete(keyOf("data.json"), &first); err != nil {
+		t.Fatal(err)
+	}
+	var conflict *store.ConflictError
+	if _, err := tx.Commit(); !errors.As(err, &conflict) || *conflict.Current(keyOf("data.json")) != store.Etag(body) {
+		t.Fatalf("Commit with a stale etag = %v, want a conflict naming %s", err, store.Etag(body))
+	}
+	if err := tx.Delete(keyOf("data.json"), ptr(store.Etag(body))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Commit(); err != nil {
+		t.Fatalf("Commit after the conflict: %v", err)
+	}
+	if rev := e.revisionOf(t, "todo"); rev != nil {
+		t.Errorf("revision %v, want the set empty", rev)
+	}
+	if got := waitFrames(t, otherFc, "changed", 3); got[2]["revision"] != nil {
+		t.Errorf("changed %v, want null", got[2])
+	}
+
+	// A transaction that returns after the session that began it is gone.
+	id := newTx()
+	tx, _, _ = e.hub.BeginLink("todo", id)
+	sink, err = tx.Put(keyOf("big.bin"), nil, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = sink.Write([]byte("01234"))
+	_ = sink.Close()
+	if _, staged, err := e.hub.BeginLink("todo", id); err != nil || len(staged) != 1 || staged[0].Received != 5 {
+		t.Errorf("BeginLink again = %+v, %v; want the body at 5 bytes", staged, err)
+	}
+
+	if _, _, err := e.hub.BeginLink("chess", newTx()); !errors.Is(err, apps.ErrNotFound) {
+		t.Errorf("BeginLink for an app not listed = %v, want apps.ErrNotFound", err)
+	}
+	if _, err := tx.Commit(); !errors.Is(err, store.ErrIncomplete) {
+		t.Errorf("Commit of an incomplete body = %v, want ErrIncomplete", err)
+	}
+	if err := tx.Abort(); err != nil {
+		t.Errorf("Abort = %v", err)
+	}
+	if err := e.apps.Remove("todo"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Commit(); !errors.Is(err, apps.ErrNotFound) {
+		t.Errorf("Commit for an app no longer listed = %v, want apps.ErrNotFound", err)
 	}
 }

@@ -5,8 +5,10 @@ export const SERVER_ERROR_CODES = [
 	'badSecret',
 	'badToken',
 	'blocked',
-	'tooLarge',
-	'notJson',
+	'badPath',
+	'quota',
+	'noTransaction',
+	'incomplete',
 	'notAuthenticated',
 	'internal',
 	'notMain',
@@ -23,7 +25,7 @@ export type TransportErrorCode = 'connectTimeout' | 'closed';
 /**
  * What the sync engine decides on its own: a different server answered at the
  * paired address, writes are coming too fast, or another device kept writing
- * first.
+ * first (or the app's set kept changing while it was listed).
  */
 export type EngineErrorCode = 'serverChanged' | 'tooManyWrites' | 'conflict';
 

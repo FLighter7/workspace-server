@@ -2,13 +2,15 @@
 // server whose apps it mirrors. The link pairs with the main once, as a
 // server-kind device, and keeps the pairing in upstream.json. It then holds a
 // link session, which tells it the main's app list, and one session per app,
-// over which it keeps the app's document in line with the main's.
+// over which it keeps the app's set of documents in line with the main's.
 //
 // What the link does for each app follows the sync rule in
-// docs/architecture.md (see sync): it pulls when only the main's copy moved,
-// pushes when only this server's did, and when both did, the main's copy
-// wins here and replaces this server's. Neither side ever merges:
-// the devices do, as they always have, and write the result back.
+// docs/architecture.md (sync.go): document by document, against the base
+// both last agreed on (the app's .wss/link.json), it pulls what only the
+// main changed, pushes what only this server changed, and when both changed,
+// the main's set wins here and replaces this server's. Neither side ever
+// merges a document: the devices do, as they always have, and write the
+// result back.
 //
 // Over the link session the link also announces how devices reach this
 // server, which the main hands out to its devices, and keeps the main's
@@ -24,12 +26,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/FLighter7/workspace-server/internal/apps"
 	"github.com/FLighter7/workspace-server/internal/devices"
+	"github.com/FLighter7/workspace-server/internal/hub"
 	"github.com/FLighter7/workspace-server/internal/store"
 	"github.com/FLighter7/workspace-server/internal/wsclient"
 )
@@ -111,12 +115,15 @@ type RefusedError struct {
 func (e *RefusedError) Error() string { return "the upstream server: " + e.Err.Error() }
 func (e *RefusedError) Unwrap() error { return e.Err }
 
-// Writer is what the link writes through: the hub, which stores a document
-// and tells this server's sessions, tells link sessions of this server when
-// its app list changes, and changes this server's own devices and sessions
-// when it becomes the main or steps down.
+// Writer is what the link writes through: the hub, which takes the main's
+// documents in as one transaction (LinkTx) and tells this server's sessions,
+// tells link sessions of this server when its app list changes, and changes
+// this server's own devices and sessions when it becomes the main or steps
+// down.
 type Writer interface {
-	Replace(app string, body []byte, ifEtag *string) (string, error)
+	// BeginLink opens the link's transaction tx on app here, or returns to
+	// it with what it staged.
+	BeginLink(app, tx string) (*hub.LinkTx, []store.Staged, error)
 	AppsChanged()
 	// Adopt merges a registry of the family into this server's own devices.
 	Adopt(list []devices.Entry, removed []devices.Tombstone, self devices.Self) (bool, error)
@@ -171,8 +178,8 @@ type Status struct {
 	Halted    bool   `json:"halted"`
 	Reason    string `json:"reason,omitempty"`
 	LastError string `json:"lastError,omitempty"`
-	// LastSync: the last time a document moved between the two servers: a
-	// pull, a push, or the main's copy replacing this server's.
+	// LastSync: the last time documents moved between the two servers: a
+	// pull, a push, or the main's set replacing this server's.
 	LastSync *time.Time `json:"lastSync,omitempty"`
 	Apps     []string   `json:"apps"` // the apps synced now
 	// Stopped lists the apps the write guard stopped, sorted; they do not
@@ -211,9 +218,15 @@ type Link struct {
 	pushes    map[string][]time.Time   // per app, its pushes within the guard's window
 	stopped   map[string]bool          // the apps the write guard stopped
 	resumes   map[string]chan struct{} // per app, poked by Resume; a stopped app's worker waits on it
-	up        map[string]*string       // per app, the main's etag as last heard
+	up        map[string]*string       // per app, the main's revision as last heard
+	links     map[string]*appLink      // per app, link.json as last read or written
 	cancel    context.CancelFunc
 	closed    bool
+
+	// wrapPull and wrapPush, set by tests, wrap the body of each pull and
+	// push: a test cuts a transfer off with them.
+	wrapPull func(w io.Writer, cl *wsclient.Client) io.Writer
+	wrapPush func(r io.Reader, cl *wsclient.Client) io.Reader
 
 	watchCancel context.CancelFunc // the family watcher, on a main that waits for servers
 
@@ -264,7 +277,7 @@ func Open(d Deps) (*Link, error) {
 		d: d, st: st, fam: fam, kick: make(chan struct{}, 1), watchKick: make(chan struct{}, 1),
 		announce: make(chan struct{}, 1), invites: make(chan inviteReq),
 		pushes: map[string][]time.Time{}, stopped: map[string]bool{}, resumes: map[string]chan struct{}{},
-		up: map[string]*string{}, local: map[string]chan struct{}{},
+		up: map[string]*string{}, links: map[string]*appLink{}, local: map[string]chan struct{}{},
 	}, nil
 }
 
@@ -335,12 +348,12 @@ func (l *Link) NetworkChanged() {
 // reconnects then, and every link session announces. It never blocks.
 func (l *Link) SelfChanged() { poke(l.announce) }
 
-// LocalWrite tells the link that a device stored a document of app on this
+// LocalWrite tells the link that app's set has a new revision on this
 // server, so that the app's worker syncs it with the main at once (a push,
-// usually). The hub calls it after every device's write and never after the
-// link's own, which would go back where they came from. It never blocks.
-// Before the app's first session to the main, and on a main, it does
-// nothing: every session syncs once it opens anyway.
+// usually). The hub calls it after every new revision, the link's own
+// included: the worker finds those in step with the base and the main, and
+// does nothing. It never blocks. Before the app's first session to the main,
+// and on a main, it does nothing: every session syncs once it opens anyway.
 func (l *Link) LocalWrite(app string) {
 	l.localMu.Lock()
 	ch := l.local[app]
@@ -478,7 +491,7 @@ func (l *Link) pair(ctx context.Context, c wsclient.PairingCode) (*state, error)
 		ServerID: w.ServerID, Name: w.Name,
 		Password: c.Password, Fingerprint: c.Fingerprint, Port: c.Port, Hosts: hosts,
 		Device: p.Device, Token: p.Token, LinkedAt: l.d.Now().UTC(),
-		Apps: map[string]appState{}, Term: w.Term,
+		Term: w.Term,
 	}
 	if err := st.save(l.d.Path); err != nil {
 		return nil, fmt.Errorf("save %s: %w", l.d.Path, err)
@@ -494,7 +507,7 @@ func (l *Link) pair(ctx context.Context, c wsclient.PairingCode) (*state, error)
 
 // Unlink ends the link: this server becomes a main again. Its data stays:
 // the apps it took from the main stay listed here, with their documents,
-// and the main keeps its own. The main's devices are no longer
+// and the main keeps its own; the bases agreed with the main go. The main's devices are no longer
 // admitted here (Deps.Admit gets nil), and upstream.json is deleted. When
 // the link is connected, the main is then asked to forget this server, so
 // that it stops handing it out to its devices; forgotten reports whether the
@@ -544,6 +557,7 @@ func (l *Link) Unlink(ctx context.Context) (forgotten bool, err error) {
 	clear(l.pushes)
 	clear(l.up)
 	l.mu.Unlock()
+	l.forgetLinks()
 	if l.d.Admit != nil {
 		l.d.Admit(nil)
 	}
@@ -1017,9 +1031,8 @@ func (l *Link) replicate(reg wsclient.Registry) {
 }
 
 // adopt takes the main's app list: it adds the apps this server does not
-// serve yet to apps.json, forgets the agreed etag of the apps the main no
-// longer serves (a later return is a first link), and returns the ids to
-// sync.
+// serve yet to apps.json, forgets the base of the apps the main no longer
+// serves (a later return is a first link), and returns the ids to sync.
 func (l *Link) adopt(list []wsclient.App) []string {
 	var want []string
 	added := false
@@ -1043,17 +1056,10 @@ func (l *Link) adopt(list []wsclient.App) []string {
 	if added {
 		l.d.Writer.AppsChanged()
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	changed := false
-	for id := range l.st.Apps {
-		if !slices.Contains(want, id) {
-			delete(l.st.Apps, id)
-			changed = true
+	for _, a := range l.d.Apps.List() {
+		if !slices.Contains(want, a.ID) {
+			l.forgetLink(a.ID)
 		}
-	}
-	if changed {
-		l.saveLocked()
 	}
 	slices.Sort(want)
 	return want
@@ -1124,9 +1130,9 @@ func (l *Link) syncApp(ctx context.Context, app string, fatal chan<- error) bool
 }
 
 // appSession syncs app once at the welcome, and again at every changed push
-// from the main and every write by a device here, until the session ends.
-// The sync at the welcome is what sends the main the writes made here while
-// the two could not reach each other.
+// from the main and every new revision here, until the session ends. The
+// sync at the welcome is what sends the main the writes made here while the
+// two could not reach each other.
 func (l *Link) appSession(ctx context.Context, app string) error {
 	st := l.snapshot()
 	cl, err := l.d.Dial(ctx, st.target(), app)
@@ -1134,8 +1140,8 @@ func (l *Link) appSession(ctx context.Context, app string) error {
 		return refused(err)
 	}
 	defer cl.Close()
-	changed := make(chan string, 1)
-	cl.OnChanged(func(etag string) { latest(changed, etag) })
+	changed := make(chan *string, 1)
+	cl.OnChanged(func(rev *string) { latest(changed, rev) })
 	w, err := cl.Hello(ctx, st.Device, st.Token)
 	if err != nil {
 		return refused(err)
@@ -1148,17 +1154,17 @@ func (l *Link) appSession(ctx context.Context, app string) error {
 	case <-local:
 	default:
 	}
-	l.setUp(app, w.Etag)
-	up, err := l.sync(ctx, cl, app, w.Etag)
+	l.setUp(app, w.Revision)
+	up, err := l.sync(ctx, cl, app, st.ServerID, w.Revision)
 	for err == nil {
 		l.setUp(app, up)
 		select {
-		case etag := <-changed:
-			up = &etag
+		case rev := <-changed:
+			up = rev
 		case <-local:
-			select { // the main's newest etag, if one came meanwhile
-			case etag := <-changed:
-				up = &etag
+			select { // the main's newest revision, if one came meanwhile
+			case rev := <-changed:
+				up = rev
 			default:
 			}
 		case <-cl.Done():
@@ -1167,102 +1173,14 @@ func (l *Link) appSession(ctx context.Context, app string) error {
 			return nil
 		}
 		l.setUp(app, up)
-		up, err = l.sync(ctx, cl, app, up)
+		up, err = l.sync(ctx, cl, app, st.ServerID, up)
 	}
 	return err
 }
 
-// mainDoc is the main's document as one sync read it.
-type mainDoc struct {
-	etag *string
-	body []byte
-}
-
-// sync brings app in line with the main, whose document the link last knew
-// to have etag up (nil: none), and returns the etag it knows the main's
-// document to have now. With this server's etag local and base the etag the
-// two last agreed on (if they ever did):
-//
-//   - up = local: that is the agreed base;
-//   - the main has no document, or only this server's copy moved (up is the
-//     base): push: put this server's document to the main if the main's is
-//     still up; on a conflict, decide again with the main's etag;
-//   - only the main moved (local is the base, or this server has none):
-//     pull: write the main's document here if this server's copy is still
-//     local, telling this server's sessions;
-//   - both moved, or they never agreed and differ: the main's copy wins:
-//     written here the same way, replacing this server's. The devices here
-//     merge it with what they hold, as they always do, and write the result
-//     back, which the next sync pushes.
-//
-// Every write is conditional, so a stale up costs a decision, never a
-// document: a write here that loses the race with a device decides again,
-// and so does a main's document that is not the one up said.
-func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app string, up *string) (*string, error) {
-	var got *mainDoc
-	for range syncAttempts {
-		body, local, err := l.d.Store.Read(app)
-		if err != nil {
-			return up, err
-		}
-		base, agreed := l.base(app)
-		switch {
-		case same(up, local):
-			l.agree(app, local)
-			return up, nil
-		case up == nil || (local != nil && agreed && same(up, base)):
-			if !l.allowPush(app) {
-				return up, errTooManyWrites
-			}
-			stored, etag, err := cl.Put(ctx, up, body)
-			if err != nil {
-				return up, refused(err)
-			}
-			if !stored {
-				l.d.Logf("app %q: the main's document changed before this server's reached it (it has %s now); deciding again", app, short(etag))
-				up = etag
-				continue
-			}
-			l.moved(app, *etag, "pushed this server's document %s to the main", short(etag))
-			return etag, nil
-		default:
-			if got == nil || !same(got.etag, up) {
-				etag, doc, err := cl.Get(ctx)
-				if err != nil {
-					return up, refused(err)
-				}
-				got = &mainDoc{etag, doc}
-				if !same(etag, up) { // the main's copy moved again meanwhile
-					up = etag
-					continue
-				}
-			}
-			stored, err := l.d.Writer.Replace(app, got.body, local)
-			var conflict *store.ConflictError
-			if errors.As(err, &conflict) {
-				continue // a device here wrote first
-			}
-			if err != nil {
-				return up, err
-			}
-			if local == nil || (agreed && same(local, base)) {
-				l.moved(app, stored, "pulled the main's document %s", short(&stored))
-			} else {
-				was := "they were never agreed on"
-				if agreed {
-					was = "both changed since they agreed on " + short(base)
-				}
-				l.moved(app, stored, "the main's document %s replaced this server's %s (%s); the devices here merge it back", short(&stored), short(local), was)
-			}
-			return up, nil
-		}
-	}
-	return up, nil
-}
-
 func same(a, b *string) bool { return (a == nil && b == nil) || (a != nil && b != nil && *a == *b) }
 
-// short is an etag's first 8 digits, for the log.
+// short is a revision's or an etag's first 8 digits, for the log.
 func short(e *string) string {
 	if e == nil {
 		return "none"
@@ -1270,30 +1188,10 @@ func short(e *string) string {
 	return (*e)[:min(8, len(*e))]
 }
 
-// base returns the etag app last agreed on, and whether it ever agreed.
-func (l *Link) base(app string) (*string, bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	a, ok := l.st.Apps[app]
-	return a.Base, ok
-}
-
-// agree records etag as app's agreed base.
-func (l *Link) agree(app string, etag *string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if a, ok := l.st.Apps[app]; ok && same(a.Base, etag) {
-		return
-	}
-	l.st.Apps[app] = appState{Base: etag}
-	l.saveLocked()
-}
-
-// moved records that a document moved between the two servers, after which
-// both have etag, and logs what happened.
-func (l *Link) moved(app, etag string, format string, args ...any) {
+// moved records that documents moved between the two servers, and logs
+// what happened.
+func (l *Link) moved(app string, format string, args ...any) {
 	now := l.d.Now().UTC()
-	l.agree(app, &etag)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lastSync = &now

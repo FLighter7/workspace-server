@@ -3,11 +3,15 @@ package upstream
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -158,7 +162,7 @@ func (n *node) open() {
 		Now:      time.Now,
 		Role:     func() string { return n.cur.Load().Role() },
 		Logf:     n.logs.printf,
-		Stored:   func(app string) { n.cur.Load().LocalWrite(app) },
+		Changed:  func(app string, _ *string) { n.cur.Load().LocalWrite(app) },
 		Invite: func() (string, time.Time, error) {
 			secret, expires := n.secrets.Issue()
 			return n.codeWith(secret), expires, nil
@@ -274,29 +278,106 @@ func (n *node) linkTo(up *node) {
 	n.up = up
 }
 
-// etag is the etag of n's document of app, "" when there is none.
-func (n *node) etag(app string) string {
-	_, etag, err := n.store.Read(app)
+// dataKey is the document most tests sync: data.json at the app's root, as
+// todo keeps it.
+const dataKey = "data.json"
+
+// revOne is the revision of a set that holds data.json at etag alone.
+func revOne(etag string) string { return *store.RevisionOf(map[string]string{dataKey: etag}) }
+
+// etag is the etag of n's data.json of app, "" when there is none.
+func (n *node) etag(app string) string { return n.etagOf(app, dataKey) }
+
+// etagOf is the etag of n's document ks of app, "" when there is none.
+func (n *node) etagOf(app, ks string) string { return n.set(app)[ks] }
+
+// set is n's set of app, as etags by key.
+func (n *node) set(app string) map[string]string {
+	n.t.Helper()
+	l, err := n.store.List(app)
 	if err != nil {
 		n.t.Fatal(err)
 	}
-	if etag == nil {
-		return ""
-	}
-	return *etag
+	return setOf(l)
 }
 
+// write writes data.json of app on n, as a device would: n's sessions hear
+// of it. It goes through the hub's own transaction for the link, which a
+// write here would discard on a subordinate, so the tests write so on a
+// main, or on a subordinate before it links.
 func (n *node) write(app, body string, ifEtag *string) string {
 	n.t.Helper()
-	etag, err := n.hub.Replace(app, []byte(body), ifEtag)
+	return n.writeKey(app, dataKey, body, ifEtag)
+}
+
+// writeKey writes the document ks of app on n as write does, and returns
+// its etag.
+func (n *node) writeKey(app, ks, body string, ifEtag *string) string {
+	n.t.Helper()
+	n.change(app, map[string]*string{ks: &body}, map[string]*string{ks: ifEtag})
+	return store.Etag([]byte(body))
+}
+
+// removeKey deletes the document ks of app on n as write writes.
+func (n *node) removeKey(app, ks string, ifEtag *string) {
+	n.t.Helper()
+	n.change(app, map[string]*string{ks: nil}, map[string]*string{ks: ifEtag})
+}
+
+// change writes bodies (nil: a delete) in one transaction, each with its
+// ifEtag, as write does.
+func (n *node) change(app string, bodies, ifEtags map[string]*string) {
+	n.t.Helper()
+	tx, _, err := n.hub.BeginLink(app, newTx())
 	if err != nil {
-		n.t.Fatalf("%s: write %s: %v", n.name, app, err)
+		n.t.Fatalf("%s: begin: %v", n.name, err)
 	}
-	return etag
+	for ks, body := range bodies {
+		k, _ := store.ParseKey(ks)
+		if body == nil {
+			if err := tx.Delete(k, ifEtags[ks]); err != nil {
+				n.t.Fatalf("%s: delete %s: %v", n.name, ks, err)
+			}
+			continue
+		}
+		sink, err := tx.Put(k, ifEtags[ks], int64(len(*body)), 0)
+		if err == nil {
+			_, err = io.WriteString(sink, *body)
+		}
+		if err != nil {
+			n.t.Fatalf("%s: put %s: %v", n.name, ks, err)
+		}
+		_ = sink.Close()
+	}
+	if _, err := tx.Commit(); err != nil {
+		n.t.Fatalf("%s: commit: %v", n.name, err)
+	}
+}
+
+// writeBehind writes data.json of app on n straight into the store, behind
+// the hub: no session hears of it.
+func (n *node) writeBehind(app, body string, ifEtag *string) string {
+	n.t.Helper()
+	tx := newTx()
+	if _, err := n.store.Begin(app, "behind", tx); err != nil {
+		n.t.Fatal(err)
+	}
+	k, _ := store.ParseKey(dataKey)
+	sink, err := n.store.Put(app, "behind", tx, k, ifEtag, int64(len(body)), 0)
+	if err != nil {
+		n.t.Fatal(err)
+	}
+	if _, err := io.WriteString(sink, body); err != nil {
+		n.t.Fatal(err)
+	}
+	if _, err := n.store.Commit(app, "behind", tx); err != nil {
+		n.t.Fatal(err)
+	}
+	return store.Etag([]byte(body))
 }
 
 // device is a device paired with a server over WebRTC, which records the
-// changed pushes it hears.
+// revisions of the changed pushes it hears ("" for an empty set).
 type device struct {
 	id      string
 	cl      *wsclient.Client
@@ -381,29 +462,74 @@ func (n *node) dial(ctx context.Context, app string) *device {
 	}
 	n.t.Cleanup(cl.Close)
 	d := &device{cl: cl}
-	cl.OnChanged(func(etag string) {
+	cl.OnChanged(func(rev *string) {
 		d.mu.Lock()
 		defer d.mu.Unlock()
-		d.heard = append(d.heard, etag)
+		if rev == nil {
+			d.heard = append(d.heard, "")
+			return
+		}
+		d.heard = append(d.heard, *rev)
 	})
 	return d
 }
 
+// heardEtag reports whether d heard that the set holds data.json at etag
+// alone.
 func (d *device) heardEtag(etag string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return slices.Contains(d.heard, etag)
+	return slices.Contains(d.heard, revOne(etag))
 }
 
+// put writes data.json, which must have ifEtag, in a transaction of its
+// own, and returns its new etag.
 func (d *device) put(t *testing.T, ifEtag *string, body string) string {
+	t.Helper()
+	return d.putKey(t, dataKey, ifEtag, body)
+}
+
+// putKey writes the document ks as put does.
+func (d *device) putKey(t *testing.T, ks string, ifEtag *string, body string) string {
+	t.Helper()
+	d.commit(t, func(ctx context.Context, tx string) error {
+		_, err := d.cl.Put(ctx, tx, wireKey(ks), ifEtag, int64(len(body)), 0, strings.NewReader(body))
+		return err
+	})
+	return store.Etag([]byte(body))
+}
+
+// removeKey deletes the document ks, which must have ifEtag, in a
+// transaction of its own.
+func (d *device) removeKey(t *testing.T, ks string, ifEtag *string) {
+	t.Helper()
+	d.commit(t, func(ctx context.Context, tx string) error {
+		_, err := d.cl.Delete(ctx, tx, wireKey(ks), ifEtag)
+		return err
+	})
+}
+
+// commit runs stage in a new transaction and commits it.
+func (d *device) commit(t *testing.T, stage func(ctx context.Context, tx string) error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testDeadline)
 	defer cancel()
-	stored, etag, err := d.cl.Put(ctx, ifEtag, []byte(body))
-	if err != nil || !stored {
-		t.Fatalf("put: stored %v, %v", stored, err)
+	tx := newTx()
+	if _, err := d.cl.Begin(ctx, tx); err != nil {
+		t.Fatalf("begin: %v", err)
 	}
-	return *etag
+	if err := stage(ctx, tx); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	r, err := d.cl.Commit(ctx, tx)
+	if err != nil || !r.Committed {
+		t.Fatalf("commit: %+v, %v", r, err)
+	}
+}
+
+func wireKey(ks string) wsclient.Key {
+	k, _ := store.ParseKey(ks)
+	return wsclient.Key{Path: k.Path, ID: k.ID, Type: k.Type}
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -442,7 +568,7 @@ func TestPullWhenOnlyTheMainMoved(t *testing.T) {
 		t.Errorf("the subordinate's role is %q", role)
 	}
 	waitFor(t, "the first pull", func() bool { return sub.etag("todo") == v1 })
-	waitFor(t, "the agreed etag", func() bool { b, ok := sub.link.base("todo"); return ok && same(b, &v1) })
+	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v1) })
 
 	servers := slices.DeleteFunc(main.devices.List(), func(d devices.Device) bool { return !d.IsServer() })
 	if len(servers) != 1 || servers[0].Name != "Laptop" {
@@ -450,22 +576,25 @@ func TestPullWhenOnlyTheMainMoved(t *testing.T) {
 	}
 
 	local := sub.device("todo")
-	if local.welcome.Etag == nil || *local.welcome.Etag != v1 || local.welcome.Role != RoleSubordinate {
-		t.Errorf("the local device's welcome %+v, want etag %s and role subordinate", local.welcome, v1)
+	if local.welcome.Revision == nil || *local.welcome.Revision != revOne(v1) || local.welcome.Role != RoleSubordinate {
+		t.Errorf("the local device's welcome %+v, want the revision of %s and role subordinate", local.welcome, v1)
 	}
 	phone := main.device("todo")
 	v2 := phone.put(t, &v1, `{"v":2}`)
 
 	waitFor(t, "the second pull", func() bool { return sub.etag("todo") == v2 })
 	waitFor(t, "the local device to hear of it", func() bool { return local.heardEtag(v2) })
-	waitFor(t, "the agreed etag to follow", func() bool { b, _ := sub.link.base("todo"); return same(b, &v2) })
+	waitFor(t, "the agreed etag to follow", func() bool { return sub.agreed("todo", v2) })
 
 	saved, err := load(sub.linkDeps.Path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saved.ServerID != main.id.ServerID || saved.Device != servers[0].ID || !same(saved.Apps["todo"].Base, &v2) {
-		t.Errorf("upstream.json %+v, want the main, the device and base %s", saved, v2)
+	if saved.ServerID != main.id.ServerID || saved.Device != servers[0].ID {
+		t.Errorf("upstream.json %+v, want the main and the device", saved)
+	}
+	if lk := sub.linkFileOf("todo"); lk.ServerID != main.id.ServerID || !reflect.DeepEqual(lk.Base, map[string]string{dataKey: v2}) || lk.Pull != nil || lk.Push != nil {
+		t.Errorf("link.json %+v, want the main and base {data.json: %s}", lk, v2)
 	}
 	if fi, err := os.Stat(sub.linkDeps.Path); err == nil && fi.Mode().Perm()&0o077 != 0 && !isWindows() {
 		t.Errorf("upstream.json mode %v, want readable by its owner only", fi.Mode().Perm())
@@ -513,7 +642,7 @@ func TestAppList(t *testing.T) {
 	if _, ok := sub.apps.Get("notes"); !ok || sub.etag("notes") != notes {
 		t.Errorf("notes on the subordinate after its removal on the main: listed %v, etag %q; want both kept", ok, sub.etag("notes"))
 	}
-	waitFor(t, "notes' agreed etag to go", func() bool { _, ok := sub.link.base("notes"); return !ok })
+	waitFor(t, "notes' base to go", func() bool { _, ok := sub.link.baseOf("notes"); return !ok })
 	if !slices.Equal(sub.link.Status().Apps, []string{"chess", "todo"}) {
 		t.Errorf("synced apps %v, want chess and todo", sub.link.Status().Apps)
 	}
@@ -583,10 +712,41 @@ func (n *node) written(app string) time.Time {
 	return st.Modified
 }
 
-// agreed reports whether n's link has agreed with its main on etag for app.
+// agreed reports whether n's link has agreed with its main on a set of app
+// that holds data.json at etag alone.
 func (n *node) agreed(app, etag string) bool {
-	b, ok := n.link.base(app)
-	return ok && b != nil && *b == etag
+	return n.agreedOn(app, map[string]string{dataKey: etag})
+}
+
+// agreedOn reports whether n's link has agreed with its main on set for app.
+func (n *node) agreedOn(app string, set map[string]string) bool {
+	b, ok := n.link.baseOf(app)
+	return ok && maps.Equal(b, set)
+}
+
+// baseOf is app's base with the main the link follows now, and whether
+// there is one.
+func (l *Link) baseOf(app string) (map[string]string, bool) {
+	st := l.snapshot()
+	if st == nil {
+		return nil, false
+	}
+	lk := l.linkOf(app, st.ServerID)
+	return lk.Base, lk.Base != nil
+}
+
+// linkFileOf reads n's link.json of app as it is on disk.
+func (n *node) linkFileOf(app string) appLink {
+	n.t.Helper()
+	raw, err := n.store.ReadSide(app, linkFile)
+	if err != nil {
+		n.t.Fatal(err)
+	}
+	var lk appLink
+	if err := json.Unmarshal(raw, &lk); err != nil {
+		n.t.Fatal(err)
+	}
+	return lk
 }
 
 func (b *logBuf) count(sub string) int {
@@ -607,11 +767,11 @@ func (d *device) heardCount() int {
 	return len(d.heard)
 }
 
-// What the link logs for each way a document moves.
+// What the link logs for each way documents move.
 const (
-	logPushed   = "pushed this server's document"
-	logPulled   = "pulled the main's document"
-	logReplaced = "replaced this server's"
+	logPushed   = "pushed to the main"
+	logPulled   = "pulled from the main"
+	logReplaced = "the main's set replaced this server's"
 )
 
 // The row "the same etag on both sides": two servers holding the same bytes
@@ -667,6 +827,7 @@ func TestPushWhenOnlyTheSubordinateMoved(t *testing.T) {
 	// Again, at once: the hook after every write, not a reconnect.
 	v3 := tab.put(t, &v2, `{"v":3}`)
 	waitFor(t, "the second push", func() bool { return main.etag("todo") == v3 })
+	waitFor(t, "the agreed etag to follow", func() bool { return sub.agreed("todo", v3) })
 	if n := sub.logs.count(logPushed); n != 2 {
 		t.Errorf("%d pushes, want 2", n)
 	}
@@ -745,8 +906,8 @@ func TestFirstLinkWithDifferentDocuments(t *testing.T) {
 // The main's document changes while the subordinate pushes: the main
 // answers conflict, the subordinate decides again, and both have moved, so
 // the main's copy wins here. To make the race certain, the main's document
-// changes behind the hub, so the subordinate hears no changed and pushes
-// against an etag the main no longer has.
+// changes behind the hub while the push's body is on its way, after the
+// subordinate listed the main's set.
 func TestConflictDuringPush(t *testing.T) {
 	main := startNode(t, "Desk")
 	sub := startNode(t, "Laptop")
@@ -755,10 +916,12 @@ func TestConflictDuringPush(t *testing.T) {
 	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v1) })
 	tab := sub.device("todo")
 
-	v2, err := main.store.Write("todo", []byte(`{"v":2}`), &v1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	v2 := store.Etag([]byte(`{"v":2}`))
+	var once sync.Once
+	sub.link.setWrapPush(func(r io.Reader, _ *wsclient.Client) io.Reader {
+		once.Do(func() { main.writeBehind("todo", `{"v":2}`, &v1) })
+		return r
+	})
 	tab.put(t, &v1, `{"v":1,"laptop":true}`)
 
 	waitFor(t, "the main's copy to win here", func() bool { return sub.etag("todo") == v2 })
@@ -853,6 +1016,20 @@ func tripGuard(t *testing.T, main, sub *node, tab *device, from string) (pushed,
 	over = tab.put(t, &prev, `{"n":"over"}`)
 	waitFor(t, "the guard to stop todo", func() bool { return slices.Contains(sub.link.Status().Stopped, "todo") })
 	return prev, over
+}
+
+// setWrapPush and setWrapPull set what wraps the bodies the link pushes and
+// pulls.
+func (l *Link) setWrapPush(f func(r io.Reader, cl *wsclient.Client) io.Reader) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.wrapPush = f
+}
+
+func (l *Link) setWrapPull(f func(w io.Writer, cl *wsclient.Client) io.Writer) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.wrapPull = f
 }
 
 // pushCount is how many pushes of app the guard counts in its minute now.

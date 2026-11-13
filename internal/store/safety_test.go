@@ -274,20 +274,13 @@ func TestOverQuotaShrinks(t *testing.T) {
 	if _, err := e.s.Put("todo", "dev", txB, key(t, "d.bin"), nil, 400<<10, 0); !errors.Is(err, ErrQuota) {
 		t.Errorf("growing an over-quota set = %v, want ErrQuota", err)
 	}
-	// The shim follows the same rule.
-	e.writeFile("todo", "data.json", `"`+strings.Repeat("d", 500<<10)+`"`)
-	cur := etagOf(`"` + strings.Repeat("d", 500<<10) + `"`)
-	if _, err := e.s.Write("todo", []byte(`{}`), &cur); err != nil {
-		t.Errorf("the shim shrinking an over-quota set: %v", err)
-	}
 }
 
 // I4: tx.json never counts a byte that is not synced: every record that
 // does not complete a body comes after a sync of it, and so does Close.
+// While a body arrives, it is recorded at most once per persistInterval.
 func TestReceivedIsSyncedFirst(t *testing.T) {
 	e := newEnv(t)
-	persistEvery = 100
-	t.Cleanup(func() { persistEvery = 8 << 20 })
 	var syncs []int64 // what tx.json recorded at each sync
 	syncFile = func(f *os.File) error {
 		staged := stagedOnDisk(t, e, txA)
@@ -300,10 +293,12 @@ func TestReceivedIsSyncedFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.clock.add(persistInterval)
 	if _, err := sink.Write(make([]byte, 150)); err != nil { // a record at 150
 		t.Fatal(err)
 	}
-	if _, err := sink.Write(make([]byte, 30)); err != nil { // none
+	e.clock.add(persistInterval - time.Millisecond)
+	if _, err := sink.Write(make([]byte, 30)); err != nil { // none: too soon
 		t.Fatal(err)
 	}
 	if err := sink.Close(); err != nil { // a record at 180

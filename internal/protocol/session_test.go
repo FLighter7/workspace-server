@@ -46,8 +46,8 @@ func authenticate(t *testing.T, s *Session, fc *fakeChannel) {
 var barrierSeq atomic.Int64
 
 func isBarrier(m message) bool {
-	etag, _ := m.text["etag"].(string)
-	return m.text["t"] == "changed" && strings.HasPrefix(etag, "barrier-")
+	rev, _ := m.text["revision"].(string)
+	return m.text["t"] == "changed" && strings.HasPrefix(rev, "barrier-")
 }
 
 // barrier pushes a changed frame and waits until it is sent. The session sends
@@ -55,13 +55,13 @@ func isBarrier(m message) bool {
 // the messages sent before the barrier, leaving out earlier barriers.
 func barrier(t *testing.T, s *Session, fc *fakeChannel) []message {
 	t.Helper()
-	etag := fmt.Sprintf("barrier-%d", barrierSeq.Add(1))
-	s.PushChanged(etag)
+	rev := fmt.Sprintf("barrier-%d", barrierSeq.Add(1))
+	s.PushChanged(&rev)
 	var before []message
 	waitFor(t, "the barrier frame", func() bool {
 		msgs := fc.messages()
 		for i, m := range msgs {
-			if m.text != nil && m.text["t"] == "changed" && m.text["etag"] == etag {
+			if m.text != nil && m.text["t"] == "changed" && m.text["revision"] == rev {
 				before = msgs[:i]
 				return true
 			}
@@ -173,7 +173,7 @@ func TestHelloWelcome(t *testing.T) {
 	fc.waitTexts(t, 1)
 	expectMessages(t, barrier(t, s, fc), obj{
 		"t": "welcome", "proto": float64(1), "serverId": "S", "name": "Desk",
-		"etag": nil, "hosts": []any{"u.local", "192.168.1.5"},
+		"revision": nil, "hosts": []any{"u.local", "192.168.1.5"},
 	})
 	if want := [][3]string{{"todo", "d1", "x"}}; !reflect.DeepEqual(b.hellos, want) {
 		t.Errorf("backend Hello got %v, want %v", b.hellos, want)
@@ -182,14 +182,14 @@ func TestHelloWelcome(t *testing.T) {
 		t.Errorf("Authenticated %v, App %q, Device %q", s.Authenticated(), s.App(), s.Device())
 	}
 
-	t.Run("etag and no hosts", func(t *testing.T) {
+	t.Run("revision and no hosts", func(t *testing.T) {
 		b := newFakeBackend()
-		b.welcome = Welcome{ServerID: "S", Name: "Desk", Etag: ptr("e1")}
+		b.welcome = Welcome{ServerID: "S", Name: "Desk", Revision: ptr("e1")}
 		s, fc := newSession(t, b, Options{})
 		authenticate(t, s, fc)
 		expectMessages(t, barrier(t, s, fc), obj{
 			"t": "welcome", "proto": float64(1), "serverId": "S", "name": "Desk",
-			"etag": "e1", "hosts": []any{},
+			"revision": "e1", "hosts": []any{},
 		})
 	})
 }
@@ -270,7 +270,7 @@ func TestPairUnknownAppKeepsChannelOpen(t *testing.T) {
 
 func TestPairSendsPairedThenWelcome(t *testing.T) {
 	b := newFakeBackend()
-	b.welcome.Etag = ptr("e1")
+	b.welcome.Revision = ptr("e1")
 	s, fc := newSession(t, b, Options{})
 	s.HandleText(pairFrame)
 	fc.waitTexts(t, 2)
@@ -278,7 +278,7 @@ func TestPairSendsPairedThenWelcome(t *testing.T) {
 		obj{"t": "paired", "device": "d1", "token": "tok"},
 		obj{
 			"t": "welcome", "proto": float64(1), "serverId": "S", "name": "Desk",
-			"etag": "e1", "hosts": []any{"u.local", "192.168.1.5"},
+			"revision": "e1", "hosts": []any{"u.local", "192.168.1.5"},
 		},
 	)
 	if want := [][4]string{{"device", "todo", "sec", "Phone"}}; !reflect.DeepEqual(b.pairs, want) {
@@ -308,39 +308,33 @@ func TestNotAuthenticated(t *testing.T) {
 	}
 }
 
-func TestGetEmpty(t *testing.T) {
-	b := newFakeBackend()
-	s, fc := newSession(t, b, Options{})
-	authenticate(t, s, fc)
-	s.HandleText(`{"t":"get"}`)
-	expectMessages(t, barrier(t, s, fc)[1:], obj{"t": "doc", "etag": nil, "bytes": float64(0)})
-}
+// docKey is the document the tests get and put, and getFrame a get of it.
+var docKey = Key{Path: "notes", ID: "n1", Type: "json"}
 
-func TestGetChunks(t *testing.T) {
-	b := newFakeBackend()
-	b.doc, b.docEtag = body(40000), ptr("e1")
-	s, fc := newSession(t, b, Options{})
-	authenticate(t, s, fc)
-	s.HandleText(`{"t":"get"}`)
-	expectMessages(t, barrier(t, s, fc)[1:],
-		obj{"t": "doc", "etag": "e1", "bytes": float64(40000)}, 16384, 16384, 7232)
-	if got := bytes.Join(fc.binaries(), nil); !bytes.Equal(got, b.doc) {
-		t.Error("chunks do not concatenate to the document")
+const getFrame = `{"t":"get","path":"notes","id":"n1","type":"json"}`
+
+// docObj is the doc frame of docKey with etag and size, sent from offset.
+func docObj(etag string, size, offset int) obj {
+	return obj{
+		"t": "doc", "path": "notes", "id": "n1", "type": "json",
+		"etag": etag, "bytes": float64(size), "offset": float64(offset),
 	}
 }
 
 // startPausedGet authenticates, then sends get for a 40000-byte document with
 // the buffer just under 1 MiB, and waits until the sender has sent the first
 // chunk, seen the buffer over 1 MiB and paused.
-func startPausedGet(t *testing.T, b *fakeBackend, s *Session, fc *fakeChannel) {
+func startPausedGet(t *testing.T, b *fakeBackend, s *Session, fc *fakeChannel) []byte {
 	t.Helper()
-	b.doc, b.docEtag = body(40000), ptr("e1")
+	doc := body(40000)
+	b.setDoc(docKey, "e1", doc)
 	authenticate(t, s, fc)
 	fc.setBuffered(1<<20 - 1000)
-	s.HandleText(`{"t":"get"}`)
+	s.HandleText(getFrame)
 	waitFor(t, "the sender to pause after the first chunk", func() bool {
 		return len(fc.binaries()) == 1 && fc.wasPolled()
 	})
+	return doc
 }
 
 func TestGetWaitsForBuffer(t *testing.T) {
@@ -349,7 +343,7 @@ func TestGetWaitsForBuffer(t *testing.T) {
 	if fc.threshold != 256<<10 {
 		t.Errorf("low threshold %d, want 256 KiB", fc.threshold)
 	}
-	startPausedGet(t, b, s, fc)
+	doc := startPausedGet(t, b, s, fc)
 
 	time.Sleep(20 * time.Millisecond)
 	if n := len(fc.binaries()); n != 1 {
@@ -357,20 +351,20 @@ func TestGetWaitsForBuffer(t *testing.T) {
 	}
 	fc.drain()
 	waitFor(t, "the rest of the body", func() bool { return len(fc.binaries()) == 3 })
-	if got := bytes.Join(fc.binaries(), nil); !bytes.Equal(got, b.doc) {
+	if got := bytes.Join(fc.binaries(), nil); !bytes.Equal(got, doc) {
 		t.Error("chunks do not concatenate to the document")
 	}
 }
 
 func TestFramesWaitBehindBodyWithoutBlockingCaller(t *testing.T) {
 	b := newFakeBackend()
-	b.headEtag = ptr("e1")
+	b.head = ptr("r1")
 	s, fc := newSession(t, b, Options{})
 	startPausedGet(t, b, s, fc)
 
 	returned := make(chan struct{})
 	go func() {
-		s.PushChanged("e9")
+		s.PushChanged(ptr("e9"))
 		s.HandleText(`{"t":"head"}`)
 		close(returned)
 	}()
@@ -385,9 +379,9 @@ func TestFramesWaitBehindBodyWithoutBlockingCaller(t *testing.T) {
 
 	fc.drain()
 	expectMessages(t, barrier(t, s, fc)[1:],
-		obj{"t": "doc", "etag": "e1", "bytes": float64(40000)}, 16384, 16384, 7232,
-		obj{"t": "changed", "etag": "e9"},
-		obj{"t": "head", "etag": "e1"},
+		docObj("e1", 40000, 0), 16384, 16384, 7232,
+		obj{"t": "changed", "revision": "e9"},
+		obj{"t": "head", "revision": "r1"},
 	)
 }
 
@@ -395,7 +389,7 @@ func TestCloseDropsQueuedFrames(t *testing.T) {
 	b := newFakeBackend()
 	s, fc := newSession(t, b, Options{})
 	startPausedGet(t, b, s, fc)
-	s.PushChanged("e9")
+	s.PushChanged(ptr("e9"))
 	s.Close()
 	fc.drain()
 	time.Sleep(20 * time.Millisecond)
@@ -408,106 +402,15 @@ func TestCloseDropsQueuedFrames(t *testing.T) {
 	expectNoLateSends(t, fc)
 }
 
-func TestPutAssemblesBody(t *testing.T) {
-	doc := body(20000)
-
-	t.Run("stored", func(t *testing.T) {
-		b := newFakeBackend()
-		s, fc := newSession(t, b, Options{})
-		authenticate(t, s, fc)
-		s.HandleText(`{"t":"put","ifEtag":"e1","bytes":20000}`)
-		s.HandleBinary(doc[:16384])
-		if msgs := barrier(t, s, fc); len(msgs) != 1 || len(b.putCalls()) != 0 {
-			t.Fatalf("before the body was complete: sent %s, puts %d", describe(msgs), len(b.putCalls()))
-		}
-		s.HandleBinary(doc[16384:])
-		expectMessages(t, barrier(t, s, fc)[1:], obj{"t": "stored", "etag": "e2"})
-		puts := b.putCalls()
-		if len(puts) != 1 {
-			t.Fatalf("%d puts, want 1", len(puts))
-		}
-		p := puts[0]
-		if p.app != "todo" || p.device != "d1" || p.ifEtag == nil || *p.ifEtag != "e1" || !bytes.Equal(p.body, doc) {
-			t.Errorf("put app %q device %q ifEtag %v body %d bytes", p.app, p.device, p.ifEtag, len(p.body))
-		}
-	})
-
-	t.Run("conflict", func(t *testing.T) {
-		b := newFakeBackend()
-		b.putConflict, b.putCurrent = true, ptr("cur")
-		s, fc := newSession(t, b, Options{})
-		authenticate(t, s, fc)
-		s.HandleText(`{"t":"put","ifEtag":"e1","bytes":20000}`)
-		s.HandleBinary(doc[:16384])
-		s.HandleBinary(doc[16384:])
-		expectMessages(t, barrier(t, s, fc)[1:], obj{"t": "conflict", "etag": "cur"})
-	})
-
-	t.Run("null ifEtag", func(t *testing.T) {
-		b := newFakeBackend()
-		s, fc := newSession(t, b, Options{})
-		authenticate(t, s, fc)
-		s.HandleText(`{"t":"put","ifEtag":null,"bytes":20000}`)
-		s.HandleBinary(doc[:16384])
-		s.HandleBinary(doc[16384:])
-		expectMessages(t, barrier(t, s, fc)[1:], obj{"t": "stored", "etag": "e2"})
-		if puts := b.putCalls(); len(puts) != 1 || puts[0].ifEtag != nil {
-			t.Errorf("puts %+v, want one with a nil ifEtag", puts)
-		}
-	})
-
-	t.Run("empty body", func(t *testing.T) {
-		b := newFakeBackend()
-		b.putErr = &Error{Code: CodeNotJSON, Message: "body is not JSON"}
-		s, fc := newSession(t, b, Options{})
-		authenticate(t, s, fc)
-		s.HandleText(`{"t":"put","ifEtag":null,"bytes":0}`)
-		expectMessages(t, barrier(t, s, fc)[1:], obj{"t": "error", "code": CodeNotJSON, "message": "body is not JSON"})
-		if puts := b.putCalls(); len(puts) != 1 || len(puts[0].body) != 0 {
-			t.Errorf("puts %+v, want one with an empty body", puts)
-		}
-		if fc.isClosed() {
-			t.Error("channel closed")
-		}
-	})
-}
-
-func TestPutTooLarge(t *testing.T) {
-	b := newFakeBackend()
-	b.maxBytes = 1000
-	b.headEtag = ptr("e1")
-	s, fc := newSession(t, b, Options{})
-	authenticate(t, s, fc)
-
-	s.HandleText(`{"t":"put","ifEtag":null,"bytes":5000}`)
-	s.HandleBinary(body(4000))
-	s.HandleBinary(body(999))
-	if msgs := barrier(t, s, fc); len(msgs) != 1 {
-		t.Fatalf("sent %s before the announced body was consumed", describe(msgs))
-	}
-	s.HandleBinary(body(1))
-	msgs := barrier(t, s, fc)[1:]
-	if len(msgs) != 1 {
-		t.Fatalf("sent %s, want one error frame", describe(msgs))
-	}
-	expectError(t, msgs[0].text, CodeTooLarge)
-	if n := len(b.putCalls()); n != 0 {
-		t.Errorf("backend Put called %d times", n)
-	}
-
-	s.HandleText(`{"t":"head"}`)
-	expectMessages(t, barrier(t, s, fc)[2:], obj{"t": "head", "etag": "e1"})
-	if fc.isClosed() {
-		t.Error("channel closed")
-	}
-}
-
 func TestPutWithoutValidBytesIsProtocolError(t *testing.T) {
 	for _, frame := range []string{
-		`{"t":"put","ifEtag":null}`,
-		`{"t":"put","ifEtag":null,"bytes":-1}`,
-		`{"t":"put","ifEtag":null,"bytes":1.5}`,
-		`{"t":"put","ifEtag":null,"bytes":"10"}`,
+		`{"t":"put","tx":"t","ifEtag":null}`,
+		`{"t":"put","tx":"t","ifEtag":null,"bytes":-1}`,
+		`{"t":"put","tx":"t","ifEtag":null,"bytes":1.5}`,
+		`{"t":"put","tx":"t","ifEtag":null,"bytes":"10"}`,
+		`{"t":"put","tx":"t","ifEtag":null,"bytes":10,"offset":-1}`,
+		`{"t":"put","tx":"t","ifEtag":null,"bytes":10,"offset":11}`,
+		`{"t":"put","tx":"t","ifEtag":null,"bytes":10,"offset":"1"}`,
 	} {
 		t.Run(frame, func(t *testing.T) {
 			b := newFakeBackend()
@@ -533,7 +436,7 @@ func TestBinaryWithoutPutIsProtocolError(t *testing.T) {
 		b := newFakeBackend()
 		s, fc := newSession(t, b, Options{})
 		authenticate(t, s, fc)
-		s.HandleText(`{"t":"put","ifEtag":null,"bytes":2}`)
+		s.HandleText(`{"t":"put","tx":"t","ifEtag":null,"bytes":2}`)
 		s.HandleBinary([]byte("{}"))
 		s.HandleBinary([]byte("{}"))
 		expectClosedWithError(t, fc, CodeProtocol)
@@ -544,7 +447,7 @@ func TestBinaryWithoutPutIsProtocolError(t *testing.T) {
 	t.Run("after a refused put before hello", func(t *testing.T) {
 		b := newFakeBackend()
 		s, fc := newSession(t, b, Options{})
-		s.HandleText(`{"t":"put","ifEtag":null,"bytes":2}`)
+		s.HandleText(`{"t":"put","tx":"t","ifEtag":null,"bytes":2}`)
 		expectError(t, fc.waitTexts(t, 1)[0], CodeNotAuthenticated)
 		s.HandleBinary([]byte("{}"))
 		expectClosedWithError(t, fc, CodeProtocol)
@@ -560,20 +463,24 @@ func TestOverrunIsProtocolError(t *testing.T) {
 		b := newFakeBackend()
 		s, fc := newSession(t, b, Options{})
 		authenticate(t, s, fc)
-		s.HandleText(`{"t":"put","ifEtag":null,"bytes":10}`)
+		s.HandleText(`{"t":"put","tx":"t","ifEtag":null,"bytes":10}`)
 		s.HandleBinary(body(6))
 		s.HandleBinary(body(6))
 		expectClosedWithError(t, fc, CodeProtocol)
-		if n := len(b.putCalls()); n != 0 {
-			t.Errorf("backend Put called %d times", n)
+		// The part that arrived stays staged: the sink is closed, not
+		// written past the body.
+		sink := b.putCalls()[0].sink
+		data, _, closes := sink.state()
+		if len(data) != 6 || closes == 0 {
+			t.Errorf("the sink holds %d bytes and was closed %d times, want 6 and closed", len(data), closes)
 		}
 	})
-	t.Run("too large and overrun", func(t *testing.T) {
+	t.Run("refused and overrun", func(t *testing.T) {
 		b := newFakeBackend()
-		b.maxBytes = 5
+		b.putErr = &Error{CodeQuota, "too big"}
 		s, fc := newSession(t, b, Options{})
 		authenticate(t, s, fc)
-		s.HandleText(`{"t":"put","ifEtag":null,"bytes":10}`)
+		s.HandleText(`{"t":"put","tx":"t","ifEtag":null,"bytes":10}`)
 		s.HandleBinary(body(11))
 		expectClosedWithError(t, fc, CodeProtocol)
 	})
@@ -583,13 +490,17 @@ func TestTextDuringPutBodyIsProtocolError(t *testing.T) {
 	b := newFakeBackend()
 	s, fc := newSession(t, b, Options{})
 	authenticate(t, s, fc)
-	s.HandleText(`{"t":"put","ifEtag":null,"bytes":100}`)
+	s.HandleText(`{"t":"put","tx":"t","ifEtag":null,"bytes":100}`)
 	s.HandleBinary(body(10))
 	s.HandleText(`{"t":"head"}`)
 	expectClosedWithError(t, fc, CodeProtocol)
-	if b.count("head") != 0 || len(b.putCalls()) != 0 {
+	if b.count("head") != 0 {
 		t.Errorf("backend calls %v", b.callLog())
 	}
+	waitFor(t, "the sink to close", func() bool {
+		_, _, closes := b.putCalls()[0].sink.state()
+		return closes > 0
+	})
 }
 
 func TestForget(t *testing.T) {
@@ -607,8 +518,8 @@ func TestForget(t *testing.T) {
 func TestPushChanged(t *testing.T) {
 	s, fc := newSession(t, newFakeBackend(), Options{})
 	authenticate(t, s, fc)
-	s.PushChanged("e9")
-	expectMessages(t, barrier(t, s, fc)[1:], obj{"t": "changed", "etag": "e9"})
+	s.PushChanged(ptr("e9"))
+	expectMessages(t, barrier(t, s, fc)[1:], obj{"t": "changed", "revision": "e9"})
 }
 
 func TestPushChangedAfterCloseIsNoop(t *testing.T) {
@@ -620,7 +531,7 @@ func TestPushChangedAfterCloseIsNoop(t *testing.T) {
 			}
 			s.Close()
 			n := len(fc.messages())
-			s.PushChanged("e9")
+			s.PushChanged(ptr("e9"))
 			time.Sleep(20 * time.Millisecond)
 			if got := fc.messages(); len(got) != n {
 				t.Errorf("sent %s after Close", describe(got[n:]))
@@ -680,44 +591,44 @@ func TestChangedDuringHelloFollowsWelcome(t *testing.T) {
 	welcome := func(etag any) obj {
 		return obj{
 			"t": "welcome", "proto": float64(1), "serverId": "S", "name": "Desk",
-			"etag": etag, "hosts": []any{"u.local", "192.168.1.5"},
+			"revision": etag, "hosts": []any{"u.local", "192.168.1.5"},
 		}
 	}
 	push := func(s *Session) {
-		s.PushChanged("e3")
-		s.PushChanged("e5")
+		s.PushChanged(ptr("e3"))
+		s.PushChanged(ptr("e5"))
 	}
 
 	t.Run("hello, older welcome etag", func(t *testing.T) {
 		b := newFakeBackend()
-		b.welcome.Etag, b.onHello = ptr("e1"), push
+		b.welcome.Revision, b.onHello = ptr("e1"), push
 		s, fc := newSession(t, b, Options{})
 		s.HandleText(helloFrame)
-		expectMessages(t, barrier(t, s, fc), welcome("e1"), obj{"t": "changed", "etag": "e5"})
+		expectMessages(t, barrier(t, s, fc), welcome("e1"), obj{"t": "changed", "revision": "e5"})
 	})
 	t.Run("hello, no document in the welcome", func(t *testing.T) {
 		b := newFakeBackend()
 		b.onHello = push
 		s, fc := newSession(t, b, Options{})
 		s.HandleText(helloFrame)
-		expectMessages(t, barrier(t, s, fc), welcome(nil), obj{"t": "changed", "etag": "e5"})
+		expectMessages(t, barrier(t, s, fc), welcome(nil), obj{"t": "changed", "revision": "e5"})
 	})
 	t.Run("hello, welcome carries the pushed etag", func(t *testing.T) {
 		b := newFakeBackend()
-		b.welcome.Etag, b.onHello = ptr("e5"), push
+		b.welcome.Revision, b.onHello = ptr("e5"), push
 		s, fc := newSession(t, b, Options{})
 		s.HandleText(helloFrame)
 		expectMessages(t, barrier(t, s, fc), welcome("e5"))
 	})
 	t.Run("pair", func(t *testing.T) {
 		b := newFakeBackend()
-		b.welcome.Etag, b.onPair = ptr("e1"), push
+		b.welcome.Revision, b.onPair = ptr("e1"), push
 		s, fc := newSession(t, b, Options{})
 		s.HandleText(pairFrame)
 		expectMessages(t, barrier(t, s, fc),
 			obj{"t": "paired", "device": "d1", "token": "tok"},
 			welcome("e1"),
-			obj{"t": "changed", "etag": "e5"})
+			obj{"t": "changed", "revision": "e5"})
 	})
 	t.Run("refused hello drops the push", func(t *testing.T) {
 		b := newFakeBackend()
@@ -878,63 +789,100 @@ func TestPairingIsUndoneUnlessConfirmed(t *testing.T) {
 	})
 }
 
-func TestQueueLimitClosesSession(t *testing.T) {
+// A client that asks for more bodies than it reads is closed: at most
+// maxQueuedStreams wait behind the one being sent, and every file the
+// session opened is closed in the end.
+func TestStreamLimitClosesSession(t *testing.T) {
 	b := newFakeBackend()
-	b.maxBytes = 50000
 	var onClose atomic.Int32
 	s, fc := newSession(t, b, Options{OnClose: func() { onClose.Add(1) }})
-	startPausedGet(t, b, s, fc) // the first document is out of the queue, in the sender
+	startPausedGet(t, b, s, fc) // the first body is out of the queue, in the sender
 
-	limit := int(b.maxBytes) + queueSlack
-	most := limit/len(b.doc) + 2
-	n := 0
-	for ; n < most && !fc.isClosed(); n++ {
-		s.HandleText(`{"t":"get"}`)
+	for range maxQueuedStreams {
+		s.HandleText(getFrame)
 	}
+	time.Sleep(20 * time.Millisecond)
+	if fc.isClosed() {
+		t.Fatalf("closed with %d bodies queued", maxQueuedStreams)
+	}
+	s.HandleText(getFrame)
 	waitFor(t, "the channel to close", fc.isClosed)
-	if n < limit/(len(b.doc)+100) {
-		t.Errorf("closed after %d queued documents, want about %d", n, limit/len(b.doc))
-	}
 	waitFor(t, "OnClose", func() bool { return onClose.Load() == 1 })
 	if c := b.count("closed"); c != 1 {
 		t.Errorf("backend Closed %d times, want 1", c)
 	}
 	fc.drain()
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-s.senderDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the sender is still running")
+	}
 	if bins := len(fc.binaries()); bins != 1 {
 		t.Errorf("%d chunks sent, want only the first one before the close", bins)
+	}
+	files := b.openFiles()
+	if len(files) != maxQueuedStreams+2 {
+		t.Fatalf("%d files opened, want %d", len(files), maxQueuedStreams+2)
+	}
+	for i, f := range files {
+		if f.closeCount() != 1 {
+			t.Errorf("file %d closed %d times, want 1", i, f.closeCount())
+		}
 	}
 	expectNoLateSends(t, fc)
 }
 
-func TestOneQueuedDocIsAllowed(t *testing.T) {
+func TestQueuedStreamsAreSentInOrder(t *testing.T) {
 	b := newFakeBackend()
-	b.maxBytes = 50000
+	b.head = ptr("r1")
 	s, fc := newSession(t, b, Options{})
 	startPausedGet(t, b, s, fc)
-	s.HandleText(`{"t":"get"}`)
+	for range maxQueuedStreams {
+		s.HandleText(getFrame)
+	}
 	s.HandleText(`{"t":"head"}`)
 	fc.drain()
-	msgs := barrier(t, s, fc)
+	waitFor(t, "every body", func() bool {
+		fc.drain()
+		return len(fc.binaries()) == 3*(maxQueuedStreams+1)
+	})
+	want := []any{}
+	for range maxQueuedStreams + 1 {
+		want = append(want, docObj("e1", 40000, 0), 16384, 16384, 7232)
+	}
+	want = append(want, obj{"t": "head", "revision": "r1"})
+	expectMessages(t, barrier(t, s, fc)[1:], want...)
 	if fc.isClosed() {
 		t.Fatal("channel closed")
 	}
-	if got := len(fc.binaries()); got != 6 {
-		t.Errorf("sent %s, want two whole documents", describe(msgs))
+	for i, f := range b.openFiles() {
+		if f.closeCount() != 1 {
+			t.Errorf("file %d closed %d times, want 1", i, f.closeCount())
+		}
 	}
 }
 
-func TestADocumentOverTheLimitCanStillBeRead(t *testing.T) {
+// A body larger than the text limit streams: the queue holds its file, not
+// its bytes.
+func TestALargeDocumentStreams(t *testing.T) {
 	b := newFakeBackend()
-	b.maxBytes = 1000 // lowered after the document was stored
-	b.doc, b.docEtag = body(queueSlack+5000), ptr("e1")
+	doc := body(3*maxQueuedText + 5000)
+	b.setDoc(docKey, "e1", doc)
 	s, fc := newSession(t, b, Options{})
 	authenticate(t, s, fc)
-	s.HandleText(`{"t":"get"}`)
+	s.HandleText(getFrame)
 	waitFor(t, "the whole document", func() bool {
 		fc.drain() // the client reads
-		return len(bytes.Join(fc.binaries(), nil)) == len(b.doc)
+		return len(bytes.Join(fc.binaries(), nil)) == len(doc)
 	})
+	if !bytes.Equal(bytes.Join(fc.binaries(), nil), doc) {
+		t.Error("chunks do not concatenate to the document")
+	}
+	for _, m := range fc.binaries() {
+		if len(m) > ChunkBytes {
+			t.Fatalf("a binary message of %d bytes", len(m))
+		}
+	}
 	if fc.isClosed() {
 		t.Error("channel closed")
 	}
@@ -945,7 +893,7 @@ func TestPushFloodClosesSession(t *testing.T) {
 	s, fc := newSession(t, b, Options{})
 	startPausedGet(t, b, s, fc)
 	for i := 0; i < 200000 && !fc.isClosed(); i++ {
-		s.PushChanged("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+		s.PushChanged(ptr("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"))
 	}
 	waitFor(t, "the channel to close", fc.isClosed)
 	waitFor(t, "backend Closed", func() bool { return b.count("closed") == 1 })
@@ -1088,7 +1036,7 @@ func TestServerKindPairOpensALinkSession(t *testing.T) {
 				obj{"t": "paired", "device": "d1", "token": "tok"},
 				obj{
 					"t": "welcome", "proto": float64(1), "role": "main", "serverId": "S", "name": "Desk",
-					"etag": nil, "hosts": []any{"u.local", "192.168.1.5"},
+					"revision": nil, "hosts": []any{"u.local", "192.168.1.5"},
 				},
 				obj{"t": "apps", "apps": []any{obj{"id": "todo", "name": "Todo"}}},
 			)
@@ -1120,7 +1068,7 @@ func TestAppsPushedDuringHelloFollowWelcome(t *testing.T) {
 	expectMessages(t, barrier(t, s, fc),
 		obj{
 			"t": "welcome", "proto": float64(1), "serverId": "S", "name": "Desk",
-			"etag": nil, "hosts": []any{"u.local", "192.168.1.5"},
+			"revision": nil, "hosts": []any{"u.local", "192.168.1.5"},
 		},
 		obj{"t": "apps", "apps": []any{}},
 	)

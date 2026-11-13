@@ -352,8 +352,6 @@ func TestSweep(t *testing.T) {
 
 func TestRestartInTheMiddleOfAPut(t *testing.T) {
 	e := newEnv(t)
-	persistEvery = 100
-	t.Cleanup(func() { persistEvery = 8 << 20 })
 	body := strings.Repeat("abcdefghij", 50) // 500 bytes
 	e.begin("todo", "phone", txA)
 	e.put("todo", "phone", txA, "small.json", nil, "{}")
@@ -362,6 +360,10 @@ func TestRestartInTheMiddleOfAPut(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 350; i += 50 {
+		if i == 250 {
+			// Recorded at 300 only: the first write after persistInterval.
+			e.clock.add(persistInterval)
+		}
 		if _, err := io.WriteString(sink, body[i:i+50]); err != nil {
 			t.Fatal(err)
 		}
