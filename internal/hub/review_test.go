@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -252,6 +253,9 @@ func TestCommitOverAnUnreadableHandEdit(t *testing.T) {
 	a.HandleText(frame(obj{"t": "commit", "tx": tx}))
 	f := waitFrames(t, fa, "committed", 1, "conflict", "error")[0]
 	expectError(t, f, protocol.CodeInternal)
+	if logs := e.logs.String(); !strings.Contains(logs, "cannot read now") || !strings.Contains(logs, "the transaction stays open") {
+		t.Errorf("the log does not say that the commit waits for an unreadable file:\n%s", logs)
+	}
 
 	release()
 	a.HandleText(frame(obj{"t": "commit", "tx": tx}))

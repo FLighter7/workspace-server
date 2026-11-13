@@ -406,10 +406,13 @@ func (t *LinkTx) Commit() (store.Committed, error) {
 }
 
 // refusal reports whether err is one of the store's refusals of a commit
-// that leave the transaction open (a conflict aside).
+// that leave the transaction open (a conflict aside). ErrUnreadable is one:
+// it is answered internal, as a passing failure of the server's, but the
+// commit stopped before the store's commit point.
 func refusal(err error) bool {
 	return errors.Is(err, store.ErrIncomplete) || errors.Is(err, store.ErrQuota) ||
-		errors.Is(err, store.ErrBadPath) || errors.Is(err, store.ErrNoTransaction)
+		errors.Is(err, store.ErrBadPath) || errors.Is(err, store.ErrNoTransaction) ||
+		errors.Is(err, store.ErrUnreadable)
 }
 
 // serves refuses an app that is not listed (any more).
@@ -468,6 +471,11 @@ func (h *Hub) storeError(err error) *protocol.Error {
 		// The client's view of its transaction is wrong: the session closes,
 		// and the client's next begin reports what is staged.
 		code = protocol.CodeProtocol
+	case errors.Is(err, store.ErrUnreadable):
+		// A passing failure for the device, which it reads as internal; the
+		// log says which file holds the commit back.
+		h.d.Logf("a commit waits for a file the server cannot read now (another program holds it, or its permissions refuse the server); the transaction stays open: %v", err)
+		return &protocol.Error{Code: protocol.CodeInternal, Message: "internal error; the server's log has the details"}
 	default:
 		return h.errInternal(err)
 	}

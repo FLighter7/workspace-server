@@ -177,6 +177,38 @@ func TestRemove(t *testing.T) {
 	}
 }
 
+// SetQuota changes one app's quota on disk, reports whether it changed,
+// reads 0 as the default, and refuses an unknown app or a quota out of
+// range.
+func TestSetQuota(t *testing.T) {
+	r, path := openFresh(t)
+	if changed, err := r.SetQuota("todo", 2*MinQuota); err != nil || !changed {
+		t.Fatalf("SetQuota = %v, %v; want a change", changed, err)
+	}
+	if changed, err := r.SetQuota("todo", 2*MinQuota); err != nil || changed {
+		t.Errorf("SetQuota of the same quota = %v, %v; want no change", changed, err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := reopened.Get("todo"); a.Quota != 2*MinQuota || a.Name != "Todo" {
+		t.Errorf("after a reopen: %+v, want the new quota and the name kept", a)
+	}
+	if _, err := r.SetQuota("todo", 0); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := r.Get("todo"); a.Quota != DefaultQuota {
+		t.Errorf("a zero quota gave %d, want the default", a.Quota)
+	}
+	if _, err := r.SetQuota("missing", MinQuota); !errors.Is(err, ErrNotFound) {
+		t.Errorf("SetQuota of an unknown app = %v, want ErrNotFound", err)
+	}
+	if _, err := r.SetQuota("todo", MinQuota-1); !errors.Is(err, ErrInvalid) {
+		t.Errorf("SetQuota under the minimum = %v, want ErrInvalid", err)
+	}
+}
+
 func TestReloadIfChanged(t *testing.T) {
 	r, path := openFresh(t)
 

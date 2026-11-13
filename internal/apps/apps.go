@@ -308,6 +308,39 @@ func (r *Registry) Add(a App) error {
 	return nil
 }
 
+// SetQuota sets the quota of the app id, in the file as it is now (a hand
+// edit not yet read is kept), and reports whether it changed. A zero quota
+// is the default. It returns ErrNotFound for an app the registry does not
+// list, and ErrInvalid for a quota out of range or an invalid hand edit.
+func (r *Registry) SetQuota(id string, quota int64) (bool, error) {
+	if quota == 0 {
+		quota = DefaultQuota
+	}
+	if quota < MinQuota || quota > MaxQuota {
+		return false, fmt.Errorf("%w: quota %d is out of range %d-%d", ErrInvalid, quota, MinQuota, MaxQuota)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.catchUp(); err != nil {
+		return false, fmt.Errorf("%w: fix %s first: %v", ErrInvalid, filepath.Base(r.path), err)
+	}
+	old, ok := r.apps[id]
+	if !ok {
+		return false, fmt.Errorf("%w: %q", ErrNotFound, id)
+	}
+	if old.Quota == quota {
+		return false, nil
+	}
+	a := old
+	a.Quota = quota
+	r.apps[id] = a
+	if err := r.write(); err != nil {
+		r.apps[id] = old
+		return false, err
+	}
+	return true, nil
+}
+
 // Remove deletes the app with the given id, from the file as it is now: a
 // hand edit not yet read is kept, and one that already removed the app
 // leaves nothing to do. An invalid hand edit is replaced by the list known
