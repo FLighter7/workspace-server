@@ -7,7 +7,7 @@ How `workspace-server` works, why it was built this way, what limits it has, and
   - the user guide: [guide.md](guide.md);
   - the wire contract with clients: [protocol.md](protocol.md);
   - open work: [TODO.md](TODO.md).
-- **History:** this file condenses the original design (2026-11-07), the Go rewrite plan, its reviews, the Windows checks, the start/stop/delete plan (2026-11-09) and the local hub plan (2026-11-11/12: a subordinate server on the laptop, handing it out to devices, switching the main). The full texts are in git: the spec and plan up to `ad18bef`; the Windows reports in `c925c5e` (mDNS) and `a99ba9e` (server, lock, autostart); the start/stop/delete plan and its check lists in `af855e0`. The local hub plan was a working file outside git: its decisions are L1–L34 below, its limits under "Limits", and what it left open in [TODO.md](TODO.md); its commits run from `9a8cb7e` to `24e3149`. The "Resume" control for an app the write guard stopped, the user's choice of 2026-11-13, is L35. The client package was renamed from `@flighter7/workspace-client` to `@flighter7/wss-client` and set to 1.0.0 on 2026-11-12, before its first publish; nothing a device stores carries the package's name, so no device pairs again. On 2026-11-13 the user chose to publish it first as a release candidate, `1.0.0-rc.1` (server tag `v1.0.0-rc.1`), and `1.0.0` only after checking that by hand.
+- **History:** this file condenses the original design (2026-11-07), the Go rewrite plan, its reviews, the Windows checks, the start/stop/delete plan (2026-11-09) and the local hub plan (2026-11-11/12: a subordinate server on the laptop, handing it out to devices, switching the main). The full texts are in git: the spec and plan up to `ad18bef`; the Windows reports in `c925c5e` (mDNS) and `a99ba9e` (server, lock, autostart); the start/stop/delete plan and its check lists in `af855e0`. The local hub plan was a working file outside git: its decisions are L1–L34 below, its limits under "Limits", and what it left open in [TODO.md](TODO.md); its commits run from `9a8cb7e` to `24e3149`. The "Resume" control for an app the write guard stopped, the user's choice of 2026-11-13, is L35. The client package was renamed from `@flighter7/workspace-client` to `@flighter7/wss-client` and set to 1.0.0 on 2026-11-12, before its first publish; nothing a device stores carries the package's name, so no device pairs again. On 2026-11-13 the user chose to publish it first as a release candidate, `1.0.0-rc.1` (server tag `v1.0.0-rc.1`), and `1.0.0` only after checking that by hand. The same day, still before its first publish, it became `@flighter/wss-client`: the scope `@flighter7` was not the user's npm account (`flighter`), and npm refused the publish with `Scope not found`. The version stayed `1.0.0-rc.1`, and again nothing a device stores changed.
 
 ## What it is and what it is not
 
@@ -124,7 +124,7 @@ The page `internal/web` serves: Vue 3, Vuetify 4 and vue-i18n, built with Vite. 
 
 ### The client package (`client/`)
 
-`@flighter7/wss-client` is the client a TypeScript web app syncs through. It is a pnpm package of its own, not a workspace: the root stays a Go module, and Go ignores the folder. Its README is the documentation for app developers.
+`@flighter/wss-client` is the client a TypeScript web app syncs through. It is a pnpm package of its own, not a workspace: the root stays a Go module, and Go ignores the folder. Its README is the documentation for app developers.
 
 | Module | Job |
 | --- | --- |
@@ -137,7 +137,7 @@ The page `internal/web` serves: Vue 3, Vuetify 4 and vue-i18n, built with Vite. 
 | `SyncEngine.ts` | When to connect, sync and write; retries, halts, the write guard, the conflict loop; the main and its subordinates at once, preferring the main. The app's `SyncAdapter` merges its document; its `DocumentError` halts sync. |
 | `startInPage.ts` | Starts the engine and follows the page's visibility, the back-forward cache and the network. |
 | `WorkspaceError.ts` | The error codes, by kind: server, pairing code, transport, engine. |
-| `testing/` | `FakeServer` and `FakeChannel`, exported as `@flighter7/wss-client/testing` for apps' tests. |
+| `testing/` | `FakeServer` and `FakeChannel`, exported as `@flighter/wss-client/testing` for apps' tests. |
 
 **The contract as data:** `testdata/conformance/` holds the contract as vectors. The client package's `conformance.test.ts` plays them against `ServerClient`, `parsePairingCode` and `buildServerAnswer`. The Go tests play the same files against the `Session` (`internal/protocol`), `EncodeCode` (`internal/pairing`), the reference answer builder (`internal/rtc`) and the Go client (`internal/wsclient`). `frames.json` keeps the exchanges only servers speak (server-kind pairing, link sessions, `apps`, `announce` and `devices`) in a section of their own, `serverKind`, which the client package does not read. A change on one side that the other does not follow fails a test. A change to the contract changes `docs/protocol.md`, the vectors and both sides in one commit.
 
@@ -813,7 +813,7 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 
 ### The client package (agreed with the user, 2026-11-10)
 
-- **C1, one client for every app:** the transport and the sync engine moved out of the todo app into `client/`, published as `@flighter7/wss-client`. An app passes its app id and a `SyncAdapter`, which merges its document. The engine decides when to sync and runs the protocol. The server merges nothing.
+- **C1, one client for every app:** the transport and the sync engine moved out of the todo app into `client/`, published as `@flighter/wss-client`. An app passes its app id and a `SyncAdapter`, which merges its document. The engine decides when to sync and runs the protocol. The server merges nothing.
   - Why: every next app would otherwise copy the most fragile code: the signaling-free answer, flow control, pairing confirmation, retries, the write guard.
   - Cost: a change to the engine reaches an app only through a new package version.
 - **C2, no Protobuf:** considered as a single source for the contract and turned down. The contract stays prose in `protocol.md`, pinned by the vectors in `testdata/conformance/`.

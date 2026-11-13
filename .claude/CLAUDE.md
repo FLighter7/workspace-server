@@ -1,6 +1,6 @@
 # workspace-server: instructions for agents
 
-A Go server that keeps one JSON document per app on the user's disk and syncs that app's devices over signaling-free WebRTC on the LAN. Apps sync through the client package in `client/` (`@flighter7/wss-client`, TypeScript, pnpm). The first app is todo (`FLighter7/todo`, a sibling folder: `../todo`).
+A Go server that keeps one JSON document per app on the user's disk and syncs that app's devices over signaling-free WebRTC on the LAN. Apps sync through the client package in `client/` (`@flighter/wss-client`, TypeScript, pnpm). The first app is todo (`FLighter7/todo`, a sibling folder: `../todo`).
 
 Read before changing anything:
 

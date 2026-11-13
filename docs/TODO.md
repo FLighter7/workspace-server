@@ -4,7 +4,7 @@ Open work, and what is left to check. Remove an item when it is done; add what y
 
 ## Waiting for the user
 
-- **Publish `@flighter7/wss-client`, a release candidate first,** by hand ([architecture.md](architecture.md#packaging-ci-release), "Publishing the package"; the user's decision, 2026-11-13). No version is on npm yet; the first carries fallback servers and following the main. In this order:
+- **Publish `@flighter/wss-client`, a release candidate first,** by hand ([architecture.md](architecture.md#packaging-ci-release), "Publishing the package"; the user's decision, 2026-11-13). No version is on npm yet; the first carries fallback servers and following the main. In this order:
   - publish `1.0.0-rc.1` from the package's folder: `cd client`, then `pnpm publish --access public --tag next` (not `pnpm --dir client publish`, which npm refuses: see "Publishing the package"). Tag the server `v1.0.0-rc.1`, which `release.yml` makes a GitHub pre-release;
   - todo moves from `link:../workspace-server/client` to exactly `1.0.0-rc.1` (a range such as `^1.0.0` does not match a pre-release) and runs its checks (`pnpm test`, `pnpm run lint`, `pnpm run build`, `pnpm run test:e2e`). Until then todo's CI cannot install the link, so its GitHub Pages deploy fails, and the deployed todo is a build from 2026-10-28, from before server sync. In the same stage both guides drop the "Not available yet" note under "A laptop as a second server", since the deployed todo then has fallback servers;
   - the user checks the release candidate by hand. A bug found meanwhile is fixed and goes out the same way as `1.0.0-rc.2` (tag `v1.0.0-rc.2`, todo on exactly `1.0.0-rc.2`);

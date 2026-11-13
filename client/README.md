@@ -1,4 +1,4 @@
-# @flighter7/wss-client
+# @flighter/wss-client
 
 The client for [workspace-server](https://github.com/FLighter7/workspace-server): a small program you run on your own computer that keeps each app's data as one JSON document on your disk and syncs that app's devices over WebRTC on your local network.
 
@@ -17,7 +17,7 @@ The wire contract is the server's [docs/protocol.md](https://github.com/FLighter
 ## Installing
 
 ```sh
-pnpm add @flighter7/wss-client
+pnpm add @flighter/wss-client
 ```
 
 It is ESM only, ships its TypeScript types, and has no dependencies. It runs in browsers: the connection uses `RTCPeerConnection`, and the default pairing store uses `localStorage`.
@@ -32,7 +32,7 @@ import {
 	parsePairingCode,
 	startInPage,
 	type SyncAdapter,
-} from '@flighter7/wss-client';
+} from '@flighter/wss-client';
 
 const adapter: SyncAdapter = {
 	// Moves on every local edit.
@@ -106,12 +106,12 @@ A server can be linked to the user's main server as its **subordinate**: a lapto
 
 ## Testing an app
 
-`@flighter7/wss-client/testing` has a `FakeServer`: pass its `connect` to the engine, and several engines can share one, standing in for several devices. Switches make it fail as a real one can (`connectError`, `helloError`, `pairError`, `conflicts`, `connectGate` for one slow to answer), and `log` records every call. `FakeChannel` stands in for a data channel under `ServerClient`.
+`@flighter/wss-client/testing` has a `FakeServer`: pass its `connect` to the engine, and several engines can share one, standing in for several devices. Switches make it fail as a real one can (`connectError`, `helloError`, `pairError`, `conflicts`, `connectGate` for one slow to answer), and `log` records every call. `FakeChannel` stands in for a data channel under `ServerClient`.
 
 For a main and its subordinates, give each `FakeServer` its own `serverId` and `port`, set `role`, list the subordinates' `entry()` in the main's `subordinates`, let them share the main's `devices`, and pass `FakeServer.route(main, laptop)` as `connect`. Set `term` for a family that switched its main.
 
 ```ts
-import { FakeServer } from '@flighter7/wss-client/testing';
+import { FakeServer } from '@flighter/wss-client/testing';
 
 const server = new FakeServer();
 const engine = new SyncEngine({
