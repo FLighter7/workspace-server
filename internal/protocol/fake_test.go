@@ -348,6 +348,9 @@ type fakeBackend struct {
 	inviteExpires time.Time
 	inviteErr     *Error
 
+	divergedErr *Error
+	divergeds   []divergedCall
+
 	// calls logs every call in order: "hello", "hello returned", "pair",
 	// "pair returned", "head", "list", "get", "begin", "put", "delete",
 	// "commit", "abort", "resolve", "forget", "closed", and the servers'.
@@ -580,6 +583,20 @@ func (b *fakeBackend) Invite(s *Session) (string, time.Time, *Error) {
 	defer b.mu.Unlock()
 	b.calls = append(b.calls, "invite")
 	return b.inviteCode, b.inviteExpires, b.inviteErr
+}
+
+// divergedCall is one call of Diverged.
+type divergedCall struct {
+	app   string
+	since *string
+}
+
+func (b *fakeBackend) Diverged(s *Session, app string, since *string) *Error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = append(b.calls, "diverged")
+	b.divergeds = append(b.divergeds, divergedCall{app, since})
+	return b.divergedErr
 }
 
 func (b *fakeBackend) Closed(s *Session) { b.log("closed") }

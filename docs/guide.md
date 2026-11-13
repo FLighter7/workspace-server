@@ -147,7 +147,7 @@ The PC runs the main server, and a laptop can run a second one that keeps a copy
 3. On the laptop's page, open **Server** and find **Upstream server**. Paste the code and press **Link**, or press **Scan with the camera** and hold the QR code up to the laptop's camera.
 4. The laptop's server is now linked to the main: it takes the main's apps, copies their data, and shows the link's state.
 
-Linking deletes nothing. If both servers already hold an app's data, the main's copy wins on the laptop and replaces the laptop's, and the devices merge the two. A server that other servers are linked to cannot be linked to another main itself.
+Linking deletes nothing by itself. If both servers already hold an app's data and it differs, the two copies have diverged: see "When the two copies differ" below. The laptop also takes each app's quota from the main. A server that other servers are linked to cannot be linked to another main itself.
 
 ### Pairing the laptop's browser
 
@@ -157,8 +157,18 @@ Devices pair only with the main, the laptop's own browser too. On the laptop's p
 
 - **At home** the devices sync with the main, and the laptop's server keeps its copy in step with the main's.
 - **Away**, with the main out of reach, devices paired with the main sync with the laptop's server instead, without pairing again: the main told them about it. The laptop keeps the changes.
-- **Back home**, the laptop sends the main what changed. If both sides changed, the main's copy wins on the laptop and replaces the laptop's, and the devices merge the two, as they always do.
+- **Back home**, the laptop sends the main what changed, and takes what changed on the main. If both sides changed the same data, the two copies have diverged (below).
 - A device paired while the laptop could not reach the main syncs with the laptop only after the two have met again.
+
+### When the two copies differ
+
+If the same data of an app changed on both servers while they were apart, or they are linked for the first time each holding different data, the two copies of the app have **diverged**. Neither server merges or picks one by itself:
+
+- the laptop keeps its own copy, and the main its own; the app stops syncing between the two servers until you choose, while your devices go on syncing with whichever server they reach, and other apps sync as usual;
+- the app on every device, on either server, asks which copy to keep: the main's or the laptop's. The first answer counts, for all of the app's data; a later one changes nothing;
+- the copy you keep replaces the other on the other server, all of it, and the app syncs again. Your devices then merge what they hold with it, as they always do, so a change made only in the other copy comes back from the device that made it.
+
+While an app's copies have diverged, the laptop cannot be made the main in the planned way: choose first.
 
 ### Keeping an eye on it
 
@@ -174,7 +184,7 @@ The laptop's server can take the main's role over: when the laptop becomes the c
 - **While the PC cannot be reached** (switched off, away, broken): press **Make this server the main** on the laptop's page. The page asks again and says what happens next:
   - the laptop's server becomes the main at once;
   - if the PC's server still runs, both act as the main until they meet again; devices sync with whichever one they reach, and nothing is lost;
-  - when the two meet, the one made the main later wins: the PC's server steps down by itself and syncs through the laptop's, its own changes merged in by the devices.
+  - when the two meet, the one made the main later wins: the PC's server steps down by itself and syncs through the laptop's; where both changed an app meanwhile, the copies have diverged, and your devices ask which to keep (see "When the two copies differ").
 - **If the PC is gone for good,** the laptop's page lists it among the servers it waits for. Once you know it will not come back, remove it under **Devices** on the laptop's page.
 - **Devices** keep working throughout: a device paired with the PC finds the laptop's server as the main and from then on treats it as the server it is paired with.
 

@@ -324,6 +324,7 @@ type call struct {
 	Offset   int64           `json:"offset"`
 	Tx       string          `json:"tx"`
 	Keep     string          `json:"keep"`
+	Since    *string         `json:"since"`
 }
 
 func (c *call) key() Key { return Key{Path: c.Path, ID: c.ID, Type: c.Type} }
@@ -339,6 +340,7 @@ func (c *call) server() *Server {
 
 type exchange struct {
 	Name         string           `json:"name"`
+	Session      string           `json:"session"`
 	Call         *call            `json:"call"`
 	Client       map[string]any   `json:"client"`
 	ClientBody   string           `json:"clientBody"`
@@ -349,6 +351,7 @@ type exchange struct {
 	PushDevices  []Device         `json:"pushDevices"`
 	PushRemoved  []Tombstone      `json:"pushRemoved"`
 	PushTakeOver bool             `json:"pushTakeOver"`
+	PushResolve  *Choice          `json:"pushResolve"`
 	Server       []map[string]any `json:"server"`
 	ServerBody   string           `json:"serverBody"`
 	Closes       bool             `json:"closes"`
@@ -416,6 +419,16 @@ func start(cl *Client, c *call) (any, error) {
 	case "term":
 		a, err := cl.Term(ctx, c.Term, *c.server(), c.Device, c.Token)
 		return map[string]any{"term": a.Term, "main": a.Main}, err
+	case "diverged":
+		var since *time.Time
+		if c.Since != nil {
+			at, err := time.Parse(time.RFC3339, *c.Since)
+			if err != nil {
+				panic("a since that is no time: " + *c.Since)
+			}
+			since = &at
+		}
+		return nil, cl.Diverged(ctx, c.App, since)
 	case "invite":
 		inv, err := cl.Invite(ctx)
 		return map[string]any{"code": inv.Code, "expiresAt": inv.ExpiresAt.UTC().Format(time.RFC3339)}, err
@@ -471,12 +484,12 @@ func play(cl *Client, frames []map[string]any, body string) {
 func playExchange(t *testing.T, ex exchange) {
 	fc := &fakeChannel{}
 	app := ""
-	if ex.Call != nil {
+	if ex.Call != nil && ex.Session != "link" {
 		app = ex.Call.App
 	}
 	cl := NewClient(fc, app)
 
-	if ex.Push != nil || ex.PushDiverged != nil || ex.PushResolved != nil || ex.PushApps != nil || ex.PushDevices != nil || ex.PushTakeOver {
+	if ex.Push != nil || ex.PushDiverged != nil || ex.PushResolved != nil || ex.PushApps != nil || ex.PushDevices != nil || ex.PushTakeOver || ex.PushResolve != nil {
 		var heard []any
 		cl.OnChanged(func(rev *string) { heard = append(heard, rev) })
 		cl.OnDiverged(func(list []DivergedServer) { heard = append(heard, list) })
@@ -484,6 +497,7 @@ func playExchange(t *testing.T, ex exchange) {
 		cl.OnApps(func(list []App) { heard = append(heard, list) })
 		cl.OnDevices(func(reg Registry) { heard = append(heard, registryResult(reg)) })
 		cl.OnTakeOver(func() { heard = append(heard, "takeOver") })
+		cl.OnChoice(func(c Choice) { heard = append(heard, map[string]any{"app": c.App, "keep": c.Keep, "since": c.Since}) })
 		play(cl, ex.Server, "")
 		var want any
 		if err := json.Unmarshal(ex.Result, &want); err != nil {
@@ -497,6 +511,9 @@ func playExchange(t *testing.T, ex exchange) {
 
 	if ex.Call.Method == "term" && ex.Call.server() == nil {
 		return // a frame this client never sends; only the server's side plays it
+	}
+	if ex.Call.Method == "diverged" && (ex.Error != "" || ex.Session != "link") {
+		return // nothing answers a diverged this client sends; only the server's side plays refusals
 	}
 
 	type outcome struct {

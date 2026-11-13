@@ -118,6 +118,7 @@ type call struct {
 	Keep     string          `json:"keep"`
 	Revision *string         `json:"revision"`
 	Cursor   *string         `json:"cursor"`
+	Since    json.RawMessage `json:"since"`
 }
 
 func (c *call) key() Key { return Key{Path: c.Path, ID: c.ID, Type: c.Type} }
@@ -150,10 +151,15 @@ type exchange struct {
 	PushDevices  []DeviceEntry              `json:"pushDevices"`
 	PushRemoved  []Tombstone                `json:"pushRemoved"`
 	PushTakeOver bool                       `json:"pushTakeOver"`
-	Server       []obj                      `json:"server"`
-	ServerBody   *string                    `json:"serverBody"`
-	Closes       bool                       `json:"closes"`
-	Error        string                     `json:"error"`
+	PushResolve  *struct {
+		App   string `json:"app"`
+		Keep  string `json:"keep"`
+		Since string `json:"since"`
+	} `json:"pushResolve"`
+	Server     []obj   `json:"server"`
+	ServerBody *string `json:"serverBody"`
+	Closes     bool    `json:"closes"`
+	Error      string  `json:"error"`
 }
 
 type frameVectors struct {
@@ -418,6 +424,8 @@ func TestConformanceExchanges(t *testing.T) {
 				s.PushDevices(Registry{Devices: ex.PushDevices, Removed: ex.PushRemoved})
 			case ex.PushTakeOver:
 				s.PushTakeOver()
+			case ex.PushResolve != nil:
+				s.PushResolve(ex.PushResolve.App, ex.PushResolve.Keep, ex.PushResolve.Since)
 			default:
 				frame, err := json.Marshal(ex.Client)
 				if err != nil {
@@ -566,6 +574,18 @@ func checkCall(t *testing.T, b *fakeBackend, ex exchange) {
 		_ = json.Unmarshal(c.Server, &server)
 		if want := [4]string{"todo", "d1", server, c.Keep}; len(b.resolves) != 1 || b.resolves[0] != want {
 			t.Errorf("backend Resolve got %v, want %v", b.resolves, want)
+		}
+	case "diverged":
+		if ex.Error != "" {
+			if len(b.divergeds) != 0 {
+				t.Errorf("backend Diverged got %+v for a refused frame", b.divergeds)
+			}
+			return
+		}
+		var since *string
+		_ = json.Unmarshal(c.Since, &since)
+		if len(b.divergeds) != 1 || b.divergeds[0].app != c.App || !reflect.DeepEqual(b.divergeds[0].since, since) {
+			t.Errorf("backend Diverged got %+v, want %s since %v", b.divergeds, c.App, since)
 		}
 	case "forget":
 		if !slices.Contains(b.forgets, [2]string{"todo", "d1"}) {

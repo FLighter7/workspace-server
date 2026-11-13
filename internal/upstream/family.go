@@ -39,6 +39,11 @@ const ReasonMainSteppedDown = "mainSteppedDown"
 // this server and its main.
 var ErrNotInStep = errors.New("the documents are not yet the same on this server and its main; try again in a moment")
 
+// ErrDiverged: a planned switch found an app whose documents diverged from
+// the main's: a device chooses which set to keep first, or the switch is
+// forced.
+var ErrDiverged = errors.New("the documents of an app diverged from the main's and wait for a device's choice; choose on a device first, or force the switch")
+
 const (
 	// inStepWait bounds how long a planned switch waits for the documents
 	// to be the same on both servers.
@@ -288,6 +293,9 @@ func (l *Link) Promote(ctx context.Context, force bool) (followed bool, err erro
 		return false, errors.New("this server cannot become the main: it does not know how devices reach it")
 	}
 	if !force {
+		if l.anyDivergence() {
+			return false, ErrDiverged
+		}
 		if err := l.waitInStep(ctx); err != nil {
 			return false, err
 		}
@@ -350,7 +358,11 @@ func (l *Link) Promote(ctx context.Context, force bool) (followed bool, err erro
 	l.mu.Unlock()
 	// A main has no base: should it follow another main again, that is a
 	// first link, never a comparison with what it agreed on long before.
+	// Nor a divergence from a main it no longer follows: the former main,
+	// stepping down, meets whatever differs at its own first link here.
 	l.forgetLinks()
+	l.clearDivergences()
+	l.d.Writer.DivergencesChanged()
 	if l.d.Admit != nil {
 		l.d.Admit(nil) // the main's devices are this server's own now
 	}
@@ -392,6 +404,8 @@ func (l *Link) Follow(sender string, term int, from wsclient.Server, device, tok
 		l.relinkLocked(from, term)
 		l.mu.Unlock()
 		l.d.Logf("the server %q (%s) is the main now, at term %d: this server follows it", from.Name, from.ServerID, term)
+		// A divergence from the main it followed before is moot now.
+		l.d.Writer.DivergencesChanged()
 		return term, from.ServerID, nil
 	}
 	if device == "" && l.fam != nil && l.fam.Credential != nil {
@@ -471,6 +485,10 @@ func (l *Link) stepDown(m wsclient.Server, device, token string, term int, sende
 	l.startLocked()
 	l.mu.Unlock()
 	l.d.Writer.CloseServers(sender)
+	// What its subordinates told it of their divergences: they follow
+	// another main now.
+	l.d.Writer.ForgetDivergences()
+	l.d.Writer.DivergencesChanged()
 	l.d.Logf("stepped down: %q (%s) is the main now, at term %d; this server links to it and hands its devices over", m.Name, m.ServerID, term)
 	return nil
 }
@@ -697,6 +715,7 @@ func (l *Link) findMain(ctx context.Context) bool {
 	clear(l.up)
 	l.mu.Unlock()
 	l.d.Logf("the main stepped down; %q (%s) is the main now, at term %d: this server follows it", m.Name, m.ServerID, best.w.Term)
+	l.d.Writer.DivergencesChanged()
 	return true
 }
 

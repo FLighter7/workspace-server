@@ -25,6 +25,7 @@ const CODE_KEYS: Record<string, MessageKey> = {
 	notLinked: 'linkNotLinked',
 	hasSubordinates: 'linkHasSubordinates',
 	notInStep: 'promoteNotInStep',
+	diverged: 'promoteDiverged',
 	notConnected: 'handOverNotConnected',
 	notStopped: 'resumeNotStopped',
 };

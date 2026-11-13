@@ -663,6 +663,10 @@ func newServer(opts serverOptions, logger *log.Logger) (*server, error) {
 			t, main, err := s.link.Follow(sender, term, wsclient.Server(si), device, token)
 			return protocol.TermAnswer{Term: t, Main: main}, err
 		},
+		// A subordinate's own divergence from its main, which its devices
+		// are asked to settle.
+		OwnDiverged: func(app string) *protocol.DivergedServer { return s.link.OwnDiverged(app) },
+		ChooseOwn:   func(app, keep string) bool { return s.link.ChooseOwn(app, keep) },
 	})
 	s.link, err = upstream.Open(upstream.Deps{
 		Path:       filepath.Join(dir, upstreamFile),

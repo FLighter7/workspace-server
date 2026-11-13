@@ -73,6 +73,31 @@ export function createDevice(notes) {
 	};
 }
 
+/**
+ * Answers a divergence as a person would on this device: says hello to the
+ * server the device is paired with, with its pairing, and keeps `keep`
+ * (`main` or `subordinate`) for the first divergence its welcome lists.
+ * Returns the server id chosen for, `none` when nothing waits, or the error
+ * code. The engine does not ask yet; an app asks through `ServerClient`.
+ */
+export async function chooseDivergence(keep) {
+	const pairing = JSON.parse(localStorage.getItem('e2e.server') ?? 'null');
+	if (!pairing) return 'unpaired';
+	const { channel, close } = await openServerChannel(pairing);
+	try {
+		const client = new ServerClient(channel, { app: 'todo' });
+		const welcome = await client.hello(pairing.device, pairing.token);
+		const waiting = welcome.diverged?.[0];
+		if (!waiting) return 'none';
+		await client.resolve(waiting.serverId, keep);
+		return waiting.serverId;
+	} catch (error) {
+		return error instanceof WorkspaceError ? error.code : String(error);
+	} finally {
+		close();
+	}
+}
+
 /** Pairs with the protocol client alone, for `app`; returns `paired` or the error code. */
 export async function pairAs(app, code) {
 	const target = parsePairingCode(code);

@@ -86,6 +86,16 @@ type Deps struct {
 	// term and main this server follows then. An error is a term this
 	// server cannot act on (a protocol error to the sender).
 	Follow func(sender string, term int, server protocol.ServerInfo, device, token string) (protocol.TermAnswer, error)
+	// OwnDiverged, if set, is this server's own divergence on app from its
+	// main, as a subordinate: this server, and since when, while it waits
+	// for a device's choice; nil otherwise. It is read under the app's lock,
+	// and must not call back into the hub.
+	OwnDiverged func(app string) *protocol.DivergedServer
+	// ChooseOwn, if set, takes a device's choice keep (protocol.KeepMain or
+	// KeepSubordinate) for this server's own divergence on app, and reports
+	// whether it was the first: false when none waits for a choice. It must
+	// not call back into the hub.
+	ChooseOwn func(app, keep string) bool
 }
 
 // Errors of TakeOver.
@@ -330,6 +340,11 @@ func (h *Hub) welcome(s *protocol.Session, app string) (protocol.Welcome, *proto
 	w := protocol.Welcome{ServerID: h.d.ServerID, Name: h.d.Name(), Revision: rev, Hosts: h.d.Hosts(), Role: h.role(), Term: h.term()}
 	if w.Role == protocol.RoleMain {
 		w.Subordinates = h.subordinates()
+	}
+	if app != "" {
+		// A change after this read is pushed to s, which holds the list
+		// until its welcome is out.
+		w.Diverged = h.Divergences(app)
 	}
 	return w, nil
 }
@@ -762,7 +777,7 @@ func (h *Hub) appList() []protocol.AppInfo {
 	list := h.d.Apps.List()
 	out := make([]protocol.AppInfo, 0, len(list))
 	for _, a := range list {
-		out = append(out, protocol.AppInfo{ID: a.ID, Name: a.Name})
+		out = append(out, protocol.AppInfo{ID: a.ID, Name: a.Name, Quota: a.Quota})
 	}
 	return out
 }
@@ -830,6 +845,9 @@ func (h *Hub) RemoveDevice(id string) bool {
 				l.Unlock()
 			}
 			h.DevicesChanged()
+			if d.Server != nil {
+				h.dropServerDivergences(d.Server.ServerID)
+			}
 		}
 		return removed
 	}

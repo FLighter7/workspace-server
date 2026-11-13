@@ -204,6 +204,7 @@
 	"promoteForceOk": "Mimo to ustaw jako główny",
 	"promotedForced": "Ten serwer jest teraz główny. Stary serwer główny odda rolę, gdy się spotkają; pozostałe serwery przejdą, gdy tylko ten do nich dotrze.",
 	"promoteNotInStep": "Dokumenty na tym serwerze i na serwerze głównym nie są jeszcze takie same. Spróbuj za chwilę.",
+	"promoteDiverged": "Dokumenty aplikacji rozeszły się z serwerem głównym. Wybierz na urządzeniu, którą kopię zachować, i spróbuj ponownie.",
 	"stateLookingForMain": "Szuka nowego serwera głównego",
 	"mainSteppedDownText": "Serwer główny przekazał rolę innemu serwerowi. Ten serwer szuka nowego serwera głównego wśród powiązanych z nim serwerów i sam się z nim powiąże.",
 	"waitingText": "Ten serwer przejął rolę głównego. Te serwery przejdą do niego, gdy tylko do nich dotrze:",

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FLighter7/workspace-server/internal/protocol"
 	"github.com/FLighter7/workspace-server/internal/store"
 	"github.com/FLighter7/workspace-server/internal/wsclient"
 )
@@ -55,7 +56,7 @@ func TestBothSidesChangeDifferentDocuments(t *testing.T) {
 		return maps.Equal(main.set("todo"), want) && maps.Equal(sub.set("todo"), want)
 	})
 	waitFor(t, "the agreed set", func() bool { return sub.agreedOn("todo", want) })
-	if sub.logs.count(logPulled) != 2 || sub.logs.count(logPushed) != 1 || sub.logs.has(logReplaced) {
+	if sub.logs.count(logPulled) != 2 || sub.logs.count(logPushed) != 1 || sub.logs.has(logReplaced) || sub.logs.has(logDiverged) {
 		t.Errorf("pulls %d, pushes %d, replaced %v; want the first link's pull, then one pull and one push",
 			sub.logs.count(logPulled), sub.logs.count(logPushed), sub.logs.has(logReplaced))
 	}
@@ -91,15 +92,15 @@ func TestDeletesBothWays(t *testing.T) {
 	if !maps.Equal(main.set("todo"), want) || !maps.Equal(sub.set("todo"), want) {
 		t.Errorf("sets %v and %v, want %v on both", main.set("todo"), sub.set("todo"), want)
 	}
-	if sub.logs.has(logReplaced) {
+	if sub.logs.has(logReplaced) || sub.logs.has(logDiverged) {
 		t.Error("a delete was taken for a divergence")
 	}
 }
 
 // A first link: two empty sets agree on an empty set, which link.json keeps;
 // an empty side takes the other's set, whole; two different sets that are
-// not empty diverge, and the main's set replaces this server's, documents
-// only this server held included.
+// not empty diverge, and once a device keeps the main's, it replaces this
+// server's, documents only this server held included.
 func TestFirstLinks(t *testing.T) {
 	t.Run("both empty", func(t *testing.T) {
 		main := startNode(t, "Desk")
@@ -136,7 +137,10 @@ func TestFirstLinks(t *testing.T) {
 		want := map[string]string{dataKey: main.write("todo", `{"main":1}`, nil)}
 		sub.write("todo", `{"laptop":1}`, nil)
 		sub.writeKey("todo", "only-here.md", "mine", nil)
+		tab := sub.device("todo")
 		sub.linkTo(main)
+		waitFor(t, "the divergence", func() bool { _, ok := sub.divergenceFile("todo"); return ok })
+		tab.resolve(t, sub.id.ServerID, protocol.KeepMain)
 		waitFor(t, "the main's set to replace this server's", func() bool { return maps.Equal(sub.set("todo"), want) })
 		waitFor(t, "the agreed set", func() bool { return sub.agreedOn("todo", want) })
 		if !maps.Equal(main.set("todo"), want) {
@@ -169,15 +173,15 @@ func TestBaseAfterARestart(t *testing.T) {
 		return maps.Equal(main.set("todo"), want) && maps.Equal(sub.set("todo"), want)
 	})
 	waitFor(t, "the agreed set", func() bool { return sub.agreedOn("todo", want) })
-	if sub.logs.has(logReplaced) {
+	if sub.logs.has(logReplaced) || sub.logs.has(logDiverged) {
 		t.Error("the writes were taken for a divergence: the base did not survive the restart")
 	}
 }
 
 // A base agreed with another main is no base: the files plan's decision 6.
 // Here, a link.json that names another server: the two sets, both changed,
-// are a first link's, and the main's set wins, where the base would have
-// pushed this server's.
+// are a first link's, and diverge, where the base would have pushed this
+// server's; a device keeps the main's.
 func TestBaseOfAnotherMain(t *testing.T) {
 	main := startNode(t, "Desk")
 	sub := startNode(t, "Laptop")
@@ -196,6 +200,8 @@ func TestBaseOfAnotherMain(t *testing.T) {
 	tab.put(t, &v1, `{"v":1,"laptop":true}`)
 	sub.openLink()
 
+	waitFor(t, "the divergence", func() bool { _, ok := sub.divergenceFile("todo"); return ok })
+	tab.resolve(t, sub.id.ServerID, protocol.KeepMain)
 	waitFor(t, "the main's set to win here", func() bool { return sub.etag("todo") == v1 })
 	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v1) })
 	if !sub.logs.has("agreed with another main") || !sub.logs.has(logReplaced) {

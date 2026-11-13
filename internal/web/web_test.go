@@ -1355,6 +1355,7 @@ func TestPromoteAndHandOver(t *testing.T) {
 		{upstream.ErrNotLinked, http.StatusConflict, "notLinked"},
 		{upstream.ErrBusy, http.StatusConflict, "busy"},
 		{upstream.ErrNotInStep, http.StatusConflict, "notInStep"},
+		{upstream.ErrDiverged, http.StatusConflict, "diverged"},
 		{&upstream.RefusedError{Reason: upstream.ReasonUnreachable, Err: errors.New("away")}, http.StatusBadGateway, "upstream"},
 		{errors.New("disk"), http.StatusInternalServerError, "internal"},
 	} {

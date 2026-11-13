@@ -55,6 +55,9 @@ type Session struct {
 	holding  bool
 	held     *string
 	heldApps *[]AppInfo // the latest app list pushed before the welcome
+	// heldDiverged is the latest diverged list pushed before the welcome,
+	// sent after it: the welcome's list may have been read before the push.
+	heldDiverged *[]DivergedServer
 	// sink is the put body being received, which the session closes when it
 	// ends under it, so that what arrived is kept for a resume.
 	sink Sink
@@ -145,6 +148,7 @@ type textFrame struct {
 	Offset   *int64          `json:"offset"`
 	Tx       string          `json:"tx"`
 	Keep     string          `json:"keep"`
+	Since    json.RawMessage `json:"since"`
 }
 
 func (f *textFrame) key() Key { return Key{Path: f.Path, ID: f.ID, Type: f.Type} }
@@ -205,7 +209,7 @@ func (s *Session) HandleText(msg string) {
 		return
 	}
 	switch f.T {
-	case "hello", "pair", "forget", "apps", "announce", "invite", "term":
+	case "hello", "pair", "forget", "apps", "announce", "invite", "term", "diverged":
 	default:
 		if !documentFrames[f.T] {
 			s.fail(CodeProtocol, fmt.Sprintf("unknown frame type %q", f.T))
@@ -348,6 +352,25 @@ func (s *Session) HandleText(msg string) {
 			return
 		}
 		s.queueFrame(termFrame{"term", a.Term, a.Main})
+	case "diverged":
+		// A subordinate tells its copy of an app's state; nothing answers.
+		var since *string
+		switch {
+		case app != "":
+			s.fail(CodeProtocol, "only a link session may tell a divergence")
+			return
+		case f.App == "" || len(f.Since) == 0 || json.Unmarshal(f.Since, &since) != nil:
+			s.fail(CodeProtocol, "diverged needs an app and since, a time or null")
+			return
+		case since != nil:
+			if _, err := time.Parse(time.RFC3339, *since); err != nil {
+				s.fail(CodeProtocol, "diverged needs since in RFC 3339")
+				return
+			}
+		}
+		if e := s.b.Diverged(s, f.App, since); e != nil {
+			s.answer(e)
+		}
 	}
 }
 
@@ -677,7 +700,10 @@ func (s *Session) authenticate(app, device string, w Welcome, paired *pairedFram
 	if list := s.heldApps; list != nil {
 		s.queueLocked(outgoing{text: encode(appsFrame{"apps", appList(*list)})})
 	}
-	s.holding, s.held, s.heldApps = false, nil, nil
+	if list := s.heldDiverged; list != nil {
+		s.queueLocked(outgoing{text: encode(divergedFrame{"diverged", *list})})
+	}
+	s.holding, s.held, s.heldApps, s.heldDiverged = false, nil, nil, nil
 	s.mu.Unlock()
 }
 
@@ -727,16 +753,33 @@ func (s *Session) AnswerConflict(c Conflict) {
 
 // PushDiverged tells the client the servers whose copy of the app diverged
 // from their main's, which wait for a device's choice. It never blocks.
-// Before the welcome it does nothing: the welcome lists them. On a closed
-// session it does nothing either.
+// Before the welcome the list is held, only the latest kept, and sent right
+// after the welcome, whose own list may be older. On a closed session it
+// does nothing.
 func (s *Session) PushDiverged(list []DivergedServer) {
 	list = slicesOr(list)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.closed || s.closing:
+	case !s.authenticated:
+		s.heldDiverged = &list
+	default:
+		s.queueLocked(outgoing{text: encode(divergedFrame{"diverged", list})})
+	}
+}
+
+// PushResolve tells the client, a subordinate on its link session, a
+// device's choice for the divergence of its copy of app that began at
+// since: keep is KeepMain or KeepSubordinate. It never blocks. On a session
+// that is closed or not authenticated it does nothing.
+func (s *Session) PushResolve(app, keep, since string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.closing || !s.authenticated {
 		return
 	}
-	s.queueLocked(outgoing{text: encode(divergedFrame{"diverged", list})})
+	s.queueLocked(outgoing{text: encode(resolveFrame{"resolve", app, keep, since})})
 }
 
 // PushResolved tells the client that the divergence of the server server on
@@ -1161,6 +1204,14 @@ type (
 	divergedFrame struct {
 		T       string           `json:"t"`
 		Servers []DivergedServer `json:"servers"`
+	}
+	// resolveFrame is a main's push to a subordinate's link session: a
+	// device's choice for the subordinate's divergence on app since since.
+	resolveFrame struct {
+		T     string `json:"t"`
+		App   string `json:"app"`
+		Keep  string `json:"keep"`
+		Since string `json:"since"`
 	}
 	pairedFrame struct {
 		T      string `json:"t"`

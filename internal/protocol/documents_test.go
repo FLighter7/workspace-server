@@ -485,7 +485,10 @@ func TestDivergedAndResolvedPushes(t *testing.T) {
 	b := newFakeBackend()
 	b.welcome.Diverged = list
 	s, fc := newSession(t, b, Options{})
-	s.PushDiverged(list) // before the welcome: the welcome says it
+	// Before the welcome: held, and sent after it, whose list the backend
+	// may have read before this push.
+	s.PushDiverged(list)
+	s.PushDiverged(nil)
 	s.HandleText(helloFrame)
 	s.PushDiverged(list)
 	s.PushResolved("Lp7tOp0123ab")
@@ -495,6 +498,7 @@ func TestDivergedAndResolvedPushes(t *testing.T) {
 			"t": "welcome", "proto": float64(1), "serverId": "S", "name": "Desk", "revision": nil,
 			"hosts": []any{"u.local", "192.168.1.5"}, "diverged": []any{server},
 		},
+		obj{"t": "diverged", "servers": []any{}},
 		obj{"t": "diverged", "servers": []any{server}},
 		obj{"t": "resolved", "server": "Lp7tOp0123ab"},
 	)

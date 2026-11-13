@@ -8,7 +8,8 @@ import { SCRATCH, Server, buildServer, onLoopback } from './servers.js';
  * The built package against a main and its subordinate, two real servers
  * on this machine: a device pairs with the main only, learns the
  * subordinate from the main's welcome, syncs through it while the main is
- * away, and every copy converges once they meet again.
+ * away, and every copy converges once they meet again, after a device chose
+ * which copy to keep where both had changed.
  */
 
 let tmp = '';
@@ -44,6 +45,11 @@ async function notesOn(server: Server): Promise<string[]> {
 /** Whether the server is linked to its main and connected. */
 async function linked(server: Server): Promise<boolean> {
 	return ((await server.api('GET', '/api/upstream')) as { connected: boolean }).connected;
+}
+
+/** The apps whose copy on a subordinate diverged from its main's and wait for a choice. */
+async function divergedOn(server: Server): Promise<string[]> {
+	return ((await server.api('GET', '/api/upstream')) as { diverged?: string[] }).diverged ?? [];
 }
 
 test.beforeAll(async () => {
@@ -122,10 +128,16 @@ test('edits on both sides while the two servers cannot meet converge', async () 
 	await add(b, 'desk-side');
 	await expect.poll(() => notesOn(main), { timeout: 15_000 }).toContain('desk-side');
 
-	// They meet: the main's copy wins on the laptop, replacing its own, and
-	// the devices merge what each holds.
+	// They meet: the two copies diverged. The laptop keeps its own until a
+	// device chooses; here one keeps the main's, which replaces the laptop's,
+	// and the devices merge what each holds.
 	await laptop.run();
 	await expect.poll(() => linked(laptop), { timeout: 20_000 }).toBe(true);
+	const laptopId = ((await laptop.api('GET', '/api/status')) as { serverId: string }).serverId;
+	await expect.poll(() => divergedOn(laptop), { timeout: 20_000 }).toEqual(['todo']);
+	await expect
+		.poll(() => b.evaluate(() => window.harness.chooseDivergence('main')), { timeout: 20_000 })
+		.toBe(laptopId);
 	await reconnect(a);
 	const all = ['a', 'away', 'b', 'desk-side', 'laptop-side'];
 	await expect.poll(() => notesOn(main), { timeout: 30_000 }).toEqual(all);

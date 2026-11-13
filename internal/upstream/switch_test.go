@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/FLighter7/workspace-server/internal/protocol"
 )
 
 // These tests switch the main of a family of real servers in this process,
@@ -148,7 +150,8 @@ func TestTakeOver(t *testing.T) {
 // syncs through it, and the tablet follows it when the laptop reaches it.
 // The term survives a restart. When the desk comes back, the two mains
 // meet: the higher term wins, the desk steps down by itself and links to
-// the laptop, its own writes made meanwhile replaced there and merged back
+// the laptop; its own writes made meanwhile diverge from the laptop's, and
+// once a device keeps the laptop's, they are replaced there and merged back
 // by its devices.
 func TestForcedSwitchThenTheMainsMeet(t *testing.T) {
 	desk := startNode(t, "Desk")
@@ -195,6 +198,13 @@ func TestForcedSwitchThenTheMainsMeet(t *testing.T) {
 	laptop.link.NetworkChanged()
 	followsMain(t, desk, laptop, 1)
 	isMain(t, laptop, 1)
+	// The desk, a subordinate with no base, keeps its own document: the two
+	// diverged, and a device chooses.
+	waitFor(t, "the desk's divergence", func() bool { _, ok := desk.divergenceFile("todo"); return ok })
+	if desk.etag("todo") == v2 {
+		t.Fatal("the desk took the laptop's document before a device chose")
+	}
+	desk.connect("todo", phone, phoneToken).resolve(t, desk.id.ServerID, protocol.KeepMain)
 	waitFor(t, "the desk to take the laptop's document", func() bool { return desk.etag("todo") == v2 })
 	desk.restart()
 	if desk.link.Term() != 1 || desk.link.Role() != RoleSubordinate {

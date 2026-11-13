@@ -1022,7 +1022,7 @@ func TestServerKindPairOpensALinkSession(t *testing.T) {
 		t.Run(frame, func(t *testing.T) {
 			b := newFakeBackend()
 			b.welcome.Role = RoleMain
-			b.apps = []AppInfo{{ID: "todo", Name: "Todo"}}
+			b.apps = []AppInfo{{ID: "todo", Name: "Todo", Quota: 1 << 20}}
 			s, fc := newSession(t, b, Options{})
 			s.HandleText(`{"t":"pair","proto":1,"kind":"server","app":"todo","secret":"sec","name":"Laptop"}`)
 			if want := [][4]string{{KindServer, "", "sec", "Laptop"}}; !reflect.DeepEqual(b.pairs, want) {
@@ -1038,7 +1038,7 @@ func TestServerKindPairOpensALinkSession(t *testing.T) {
 					"t": "welcome", "proto": float64(1), "role": "main", "serverId": "S", "name": "Desk",
 					"revision": nil, "hosts": []any{"u.local", "192.168.1.5"},
 				},
-				obj{"t": "apps", "apps": []any{obj{"id": "todo", "name": "Todo"}}},
+				obj{"t": "apps", "apps": []any{obj{"id": "todo", "name": "Todo", "quota": float64(1 << 20)}}},
 			)
 
 			s.HandleText(frame)
@@ -1072,12 +1072,12 @@ func TestAppsPushedDuringHelloFollowWelcome(t *testing.T) {
 		},
 		obj{"t": "apps", "apps": []any{}},
 	)
-	s.PushApps([]AppInfo{{ID: "todo", Name: "Todo"}})
-	expectMessages(t, barrier(t, s, fc)[2:], obj{"t": "apps", "apps": []any{obj{"id": "todo", "name": "Todo"}}})
+	s.PushApps([]AppInfo{{ID: "todo", Name: "Todo", Quota: 1 << 20}})
+	expectMessages(t, barrier(t, s, fc)[2:], obj{"t": "apps", "apps": []any{obj{"id": "todo", "name": "Todo", "quota": float64(1 << 20)}}})
 
 	s.Close()
 	before := len(fc.messages())
-	s.PushApps([]AppInfo{{ID: "todo", Name: "Todo"}})
+	s.PushApps([]AppInfo{{ID: "todo", Name: "Todo", Quota: 1 << 20}})
 	if n := len(fc.messages()) + len(fc.lateSends()); n != before {
 		t.Errorf("a push after Close sent %d messages", n-before)
 	}

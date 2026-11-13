@@ -284,14 +284,6 @@ func wireDocs(list []store.DocEtag) []protocol.DocEtag {
 	return docs
 }
 
-// Resolve settles a divergence of the app's servers. Stage 3 of the files
-// plan brings divergence; until then no app has one, so every resolve finds
-// it settled, as one that another device's answer settled first: the session
-// answers resolved.
-func (h *Hub) Resolve(from *protocol.Session, app, device, server, keep string) *protocol.Error {
-	return h.serves(app)
-}
-
 // Reconcile takes the files of app changed by hand into its set
 // (store.Reconcile) and, when that changed the revision, tells every session
 // of the app and Deps.Changed. The hub does it at every hello for the app.

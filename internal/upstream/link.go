@@ -135,6 +135,16 @@ type Writer interface {
 	Linked(serverID string) bool
 	// CloseServers closes the sessions of server-kind devices but except's.
 	CloseServers(except string)
+	// DivergedChanged tells the sessions of app this server's divergences
+	// as they are now; DivergencesChanged does so for every app.
+	DivergedChanged(app string)
+	DivergencesChanged()
+	// OwnResolved tells the sessions of app that a choice from the main
+	// settled this server's divergence on it.
+	OwnResolved(app string)
+	// ForgetDivergences forgets what this server's subordinates told it of
+	// their divergences: it follows a main now.
+	ForgetDivergences()
 }
 
 // Deps are what the link works with.
@@ -182,6 +192,10 @@ type Status struct {
 	// pull, a push, or the main's set replacing this server's.
 	LastSync *time.Time `json:"lastSync,omitempty"`
 	Apps     []string   `json:"apps"` // the apps synced now
+	// Diverged lists the apps whose documents diverged from the main's and
+	// wait for a device's choice, sorted; they do not sync with the main
+	// until one chooses.
+	Diverged []string `json:"diverged,omitempty"`
 	// Stopped lists the apps the write guard stopped, sorted; they do not
 	// sync until they are resumed or the link starts again.
 	Stopped []string `json:"stopped,omitempty"`
@@ -242,6 +256,16 @@ type Link struct {
 	// link's own work under mu (saving upstream.json, say).
 	localMu sync.Mutex
 	local   map[string]chan struct{} // per app, a write by a device here
+
+	// divMu guards divs, each app's diverged.json as last read or written
+	// (nil: none), and orders the choices made for it. It is taken under
+	// the hub's app lock (OwnDiverged), so the link never calls the hub
+	// holding it.
+	divMu sync.Mutex
+	divs  map[string]*divergence
+	// divTell: an app's divergence changed, and the link session tells the
+	// main.
+	divTell chan struct{}
 }
 
 // Open loads the link from deps.Path; a missing file is a main's state. It
@@ -279,6 +303,7 @@ func Open(d Deps) (*Link, error) {
 		announce: make(chan struct{}, 1), invites: make(chan inviteReq),
 		pushes: map[string][]time.Time{}, stopped: map[string]bool{}, resumes: map[string]chan struct{}{},
 		up: map[string]*string{}, links: map[string]*appLink{}, hidden: map[string][2]*string{}, local: map[string]chan struct{}{},
+		divs: map[string]*divergence{}, divTell: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -386,6 +411,11 @@ func poke(ch chan struct{}) {
 
 // Status reports the link.
 func (l *Link) Status() Status {
+	return l.statusDiverged(l.status())
+}
+
+// status reports the link but its divergences.
+func (l *Link) status() Status {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	st := Status{Linked: l.st != nil, Apps: []string{}, Promoting: l.promoting}
@@ -411,6 +441,15 @@ func (l *Link) Status() Status {
 		st.Stopped = append(st.Stopped, id)
 	}
 	slices.Sort(st.Stopped)
+	return st
+}
+
+// statusDiverged adds the apps that wait for a device's choice to st. It
+// reads diverged.json, so it runs outside mu.
+func (l *Link) statusDiverged(st Status) Status {
+	if st.Linked {
+		st.Diverged = l.divergedApps()
+	}
 	return st
 }
 
@@ -448,6 +487,7 @@ func (l *Link) Pair(ctx context.Context, code string) error {
 	if err != nil {
 		return err
 	}
+	l.d.Writer.ForgetDivergences()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.st, l.lastErr = st, ""
@@ -559,6 +599,8 @@ func (l *Link) Unlink(ctx context.Context) (forgotten bool, err error) {
 	clear(l.up)
 	l.mu.Unlock()
 	l.forgetLinks()
+	l.clearDivergences()
+	l.d.Writer.DivergencesChanged()
 	if l.d.Admit != nil {
 		l.d.Admit(nil)
 	}
@@ -884,6 +926,15 @@ func (l *Link) session(ctx context.Context) error {
 	cl.OnDevices(func(reg wsclient.Registry) { latest(registries, reg) })
 	takeOvers := make(chan struct{}, 1)
 	cl.OnTakeOver(func() { poke(takeOvers) })
+	var choicesMu sync.Mutex
+	var choiceList []wsclient.Choice
+	choices := make(chan struct{}, 1)
+	cl.OnChoice(func(c wsclient.Choice) {
+		choicesMu.Lock()
+		choiceList = append(choiceList, c)
+		choicesMu.Unlock()
+		poke(choices)
+	})
 	w, err := cl.Hello(ctx, st.Device, st.Token)
 	if err != nil {
 		return refused(err)
@@ -934,6 +985,10 @@ func (l *Link) session(ctx context.Context) error {
 	sctx, cancel := context.WithCancel(ctx)
 	fatal := make(chan error, 1)
 	workers := map[string]appWorker{}
+	// What this session told the main of each app's divergence, and the
+	// apps the main lists.
+	told := map[string]string{}
+	var want []string
 	var wg sync.WaitGroup
 	defer func() {
 		cancel()
@@ -943,7 +998,7 @@ func (l *Link) session(ctx context.Context) error {
 	for {
 		select {
 		case list := <-lists:
-			want := l.adopt(list)
+			want = l.adopt(list)
 			for id, w := range workers {
 				if !slices.Contains(want, id) {
 					w.stop()
@@ -965,6 +1020,21 @@ func (l *Link) session(ctx context.Context) error {
 				}
 			}
 			l.setSyncing(want)
+			if err := l.tellDivergences(ctx, cl, st.ServerID, want, told); err != nil {
+				return err
+			}
+		case <-l.divTell:
+			if err := l.tellDivergences(ctx, cl, st.ServerID, want, told); err != nil {
+				return err
+			}
+		case <-choices:
+			choicesMu.Lock()
+			list := choiceList
+			choiceList = nil
+			choicesMu.Unlock()
+			for _, c := range list {
+				l.takeChoice(c)
+			}
 		case reg := <-registries:
 			l.replicate(reg)
 		case <-takeOvers:
@@ -1038,28 +1108,43 @@ func (l *Link) replicate(reg wsclient.Registry) {
 }
 
 // adopt takes the main's app list: it adds the apps this server does not
-// serve yet to apps.json, and returns the ids to sync.
+// serve yet to apps.json, gives every app the main's quota, and returns the
+// ids to sync. A quota out of this server's range is left as it was, and
+// logged.
 func (l *Link) adopt(list []wsclient.App) []string {
 	var want []string
-	added := false
+	changed := false
 	for _, a := range list {
 		if !apps.ValidID(a.ID) {
 			continue
 		}
 		if _, ok := l.d.Apps.Get(a.ID); !ok {
-			err := l.d.Apps.Add(apps.App{ID: a.ID, Name: a.Name})
+			err := l.d.Apps.Add(apps.App{ID: a.ID, Name: a.Name, Quota: a.Quota})
+			if errors.Is(err, apps.ErrInvalid) && a.Quota != 0 {
+				l.d.Logf("app %q: the main's quota of %d bytes is out of range here; it gets this server's default", a.ID, a.Quota)
+				err = l.d.Apps.Add(apps.App{ID: a.ID, Name: a.Name})
+			}
 			switch {
 			case err == nil:
-				added = true
+				changed = true
 				l.d.Logf("app %q added: the main serves it", a.ID)
 			case !errors.Is(err, apps.ErrExists):
 				l.d.Logf("app %q: cannot add it, so it does not sync: %v", a.ID, err)
 				continue
 			}
 		}
+		if a.Quota != 0 {
+			switch moved, err := l.d.Apps.SetQuota(a.ID, a.Quota); {
+			case err != nil:
+				l.d.Logf("app %q: cannot take the main's quota of %d bytes: %v", a.ID, a.Quota, err)
+			case moved:
+				changed = true
+				l.d.Logf("app %q: its quota is the main's now, %d bytes", a.ID, a.Quota)
+			}
+		}
 		want = append(want, a.ID)
 	}
-	if added {
+	if changed {
 		l.d.Writer.AppsChanged()
 	}
 	slices.Sort(want)
@@ -1089,12 +1174,14 @@ type appWorker struct {
 // guard stopped has no session to the main: its worker waits until the app
 // is resumed (Resume), and then opens one, whose welcome syncs it at once.
 // A new link clears the guard (startLocked), so a restart resumes it too.
+// An app that diverged from the main waits the same way, until a device
+// chooses which set to keep (diverge.go), which also pokes it.
 func (l *Link) worker(ctx context.Context, app string, fatal chan<- error) {
 	resumed := l.resumeSignal(app)
 	for {
 		// Checked again after every signal: one left over from a resume
 		// that found no worker waiting must not end a later stop.
-		for l.isStopped(app) {
+		for l.isStopped(app) || l.isPaused(app) {
 			select {
 			case <-resumed:
 			case <-ctx.Done():
@@ -1108,8 +1195,8 @@ func (l *Link) worker(ctx context.Context, app string, fatal chan<- error) {
 }
 
 // syncApp keeps app's session to the main up, reconnecting after a backoff,
-// and reports true when the write guard stopped app, false when ctx ended
-// or the link failed for good.
+// and reports true when the write guard stopped app or it diverged, false
+// when ctx ended or the link failed for good.
 func (l *Link) syncApp(ctx context.Context, app string, fatal chan<- error) bool {
 	delay := l.d.MinBackoff
 	last := ""
@@ -1122,6 +1209,9 @@ func (l *Link) syncApp(ctx context.Context, app string, fatal chan<- error) bool
 		if errors.Is(err, errTooManyWrites) {
 			l.stop(app)
 			return true
+		}
+		if errors.Is(err, errPaused) {
+			return true // the worker waits for a device's choice
 		}
 		if halts(err) && !wsclient.HasCode(err, "unknownApp") {
 			select {
@@ -1174,7 +1264,8 @@ func (l *Link) appSession(ctx context.Context, app string) error {
 	default:
 	}
 	l.setUp(app, w.Revision)
-	up, err := l.sync(ctx, cl, app, st.ServerID, w.Revision)
+	main := mainRef{ServerID: st.ServerID, Name: st.Name}
+	up, err := l.sync(ctx, cl, app, main, w.Revision)
 	for err == nil {
 		l.setUp(app, up)
 		select {
@@ -1192,7 +1283,7 @@ func (l *Link) appSession(ctx context.Context, app string) error {
 			return nil
 		}
 		l.setUp(app, up)
-		up, err = l.sync(ctx, cl, app, st.ServerID, up)
+		up, err = l.sync(ctx, cl, app, main, up)
 	}
 	return err
 }

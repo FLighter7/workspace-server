@@ -180,10 +180,21 @@ type Paired struct {
 	Token  string `json:"token"`
 }
 
-// App is one entry of a server's app list.
+// App is one entry of a server's app list: its id, name and quota in bytes
+// (0 when the server named none).
 type App struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Quota int64  `json:"quota"`
+}
+
+// Choice is a main's push to a subordinate's link session: a device chose
+// Keep (KeepMain or KeepSubordinate) for the divergence of the
+// subordinate's copy of App that began at Since (RFC 3339).
+type Choice struct {
+	App   string
+	Keep  string
+	Since string
 }
 
 // incoming is one frame as received. A doc's body is not kept: it goes to
@@ -206,7 +217,7 @@ type pending struct {
 // Client speaks the protocol over one data channel for one app, or for no
 // app: a link session. One request runs at a time; a later call waits for
 // the one before it. Pushes reach the listeners set with OnChanged,
-// OnDiverged, OnResolved, OnApps, OnDevices and OnTakeOver, which run on the
+// OnDiverged, OnResolved, OnApps, OnDevices, OnTakeOver and OnChoice, which run on the
 // goroutine that calls Receive and must not block or call the Client. A
 // request given up through its context ends the Client, whose replies would
 // no longer pair up with requests.
@@ -226,6 +237,7 @@ type Client struct {
 	onApps     func(list []App)
 	onDevices  func(reg Registry)
 	onTakeOver func()
+	onChoice   func(ch Choice)
 
 	done chan struct{} // closed when the client ends
 	low  chan struct{} // the channel's buffer drained to BufferLow
@@ -301,6 +313,15 @@ func (c *Client) OnTakeOver(f func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onTakeOver = f
+}
+
+// OnChoice sets the listener of resolve pushes on a link session: a device
+// of the main chose which copy of an app to keep, this server's or the
+// main's.
+func (c *Client) OnChoice(f func(ch Choice)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onChoice = f
 }
 
 // Done is closed when the client ends: the channel closed, the server broke
@@ -446,7 +467,7 @@ func (c *Client) piece(data []byte) (*incoming, error) {
 func (c *Client) dispatch(in incoming) {
 	c.mu.Lock()
 	onChanged, onDiverged, onResolved := c.onChanged, c.onDiverged, c.onResolved
-	onApps, onDevices, onTakeOver, p := c.onApps, c.onDevices, c.onTakeOver, c.pending
+	onApps, onDevices, onTakeOver, onChoice, p := c.onApps, c.onDevices, c.onTakeOver, c.onChoice, c.pending
 	c.mu.Unlock()
 
 	switch in.t {
@@ -509,6 +530,18 @@ func (c *Client) dispatch(in incoming) {
 	case "takeOver":
 		if onTakeOver != nil {
 			onTakeOver()
+		}
+		return
+	case "resolve":
+		app, ok1 := readString(in.frame["app"])
+		keep, ok2 := readString(in.frame["keep"])
+		since, ok3 := readString(in.frame["since"])
+		if !ok1 || app == "" || !ok2 || (keep != KeepMain && keep != KeepSubordinate) || !ok3 {
+			c.fail(protocolError("a malformed resolve"))
+			return
+		}
+		if onChoice != nil {
+			onChoice(Choice{App: app, Keep: keep, Since: since})
 		}
 		return
 	case "error":
@@ -775,6 +808,23 @@ func (c *Client) Invite(ctx context.Context) (Invitation, error) {
 	return inv, err
 }
 
+// Diverged tells the main, over a link session, the state of this server's
+// copy of app: since is when it diverged from the main's and began to wait
+// for a device's choice, nil when no divergence of it waits for one. Nothing
+// answers it: it returns once the frame is sent.
+func (c *Client) Diverged(ctx context.Context, app string, since *time.Time) error {
+	c.reqMu.Lock()
+	defer c.reqMu.Unlock()
+	if err := c.Err(); err != nil {
+		return err
+	}
+	frame := map[string]any{"t": "diverged", "app": app, "since": nil}
+	if since != nil {
+		frame["since"] = since.UTC().Format(time.RFC3339)
+	}
+	return c.send(ctx, frame, nil)
+}
+
 // Forget asks the server to delete this device. It returns once the server
 // has closed the channel, or after a short wait.
 func (c *Client) Forget(ctx context.Context) error {
@@ -959,8 +1009,9 @@ func readRegistry(frame map[string]json.RawMessage) (Registry, error) {
 
 func readApps(frame map[string]json.RawMessage) ([]App, error) {
 	var raw []struct {
-		ID   *string `json:"id"`
-		Name *string `json:"name"`
+		ID    *string         `json:"id"`
+		Name  *string         `json:"name"`
+		Quota json.RawMessage `json:"quota"`
 	}
 	if json.Unmarshal(frame["apps"], &raw) != nil || raw == nil {
 		return nil, protocolError("a malformed apps")
@@ -973,6 +1024,13 @@ func readApps(frame map[string]json.RawMessage) ([]App, error) {
 		app := App{ID: *a.ID}
 		if a.Name != nil {
 			app.Name = *a.Name
+		}
+		if a.Quota != nil {
+			q, ok := readCount(a.Quota)
+			if !ok {
+				return nil, protocolError("a malformed apps")
+			}
+			app.Quota = q
 		}
 		list = append(list, app)
 	}

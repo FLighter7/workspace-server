@@ -31,7 +31,7 @@ func (e *env) serverDevice(t *testing.T) (id, token string) {
 	return d.ID, token
 }
 
-var todoAndNotes = []any{obj{"id": "notes", "name": "Notes"}, obj{"id": "todo", "name": "Todo"}}
+var todoAndNotes = []any{obj{"id": "notes", "name": "Notes", "quota": float64(50 << 20)}, obj{"id": "todo", "name": "Todo", "quota": float64(50 << 20)}}
 
 // A server-kind pair needs no app: it makes a device with no app, and the
 // session is its link session, whose welcome has no revision and names the role,
@@ -124,7 +124,7 @@ func TestAppListAndItsChanges(t *testing.T) {
 	waitFrames(t, linkFc, "welcome", 1)
 	appSession, appFc := e.login(t, "192.168.1.9:5001", "todo", srv, srvToken)
 	appSession.HandleText(`{"t":"apps"}`)
-	if f := waitFrames(t, appFc, "apps", 1)[0]; !reflect.DeepEqual(f["apps"], []any{obj{"id": "todo", "name": "Todo"}}) {
+	if f := waitFrames(t, appFc, "apps", 1)[0]; !reflect.DeepEqual(f["apps"], []any{obj{"id": "todo", "name": "Todo", "quota": float64(50 << 20)}}) {
 		t.Errorf("apps on an app session %v, want todo", f)
 	}
 
@@ -137,7 +137,7 @@ func TestAppListAndItsChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.hub.AppsChanged()
-	if f := waitFrames(t, linkFc, "apps", 2)[1]; !reflect.DeepEqual(f["apps"], []any{obj{"id": "todo", "name": "Todo"}}) {
+	if f := waitFrames(t, linkFc, "apps", 2)[1]; !reflect.DeepEqual(f["apps"], []any{obj{"id": "todo", "name": "Todo", "quota": float64(50 << 20)}}) {
 		t.Errorf("pushed apps %v, want todo", f)
 	}
 	settle(t, appSession, appFc)

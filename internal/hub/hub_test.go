@@ -148,6 +148,9 @@ type env struct {
 	secrets  *pairing.Secrets
 	refusals *pairing.Refusals
 
+	// deps, set by a tweak, changes the hub's Deps before the hub is made.
+	deps func(*Deps)
+
 	hookMu   sync.Mutex
 	onName   func()           // runs inside every welcome, after the session is registered
 	onChange func(app string) // runs in every Deps.Changed
@@ -203,7 +206,7 @@ func newEnv(t *testing.T, tweaks ...func(*env)) *env {
 	for _, tweak := range tweaks {
 		tweak(e)
 	}
-	e.hub = New(Deps{
+	d := Deps{
 		ServerID: "srv-1",
 		Name:     e.name,
 		Hosts:    func() []string { return []string{"u.local", "192.168.1.5"} },
@@ -215,7 +218,11 @@ func newEnv(t *testing.T, tweaks ...func(*env)) *env {
 		Now:      clk.Now,
 		Logf:     e.logs.printf,
 		Changed:  e.changed,
-	})
+	}
+	if e.deps != nil {
+		e.deps(&d)
+	}
+	e.hub = New(d)
 	return e
 }
 

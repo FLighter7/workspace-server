@@ -204,6 +204,7 @@
 	"promoteForceOk": "Make it the main anyway",
 	"promotedForced": "This server is the main now. The old main steps down when the two meet; the other servers follow when this server reaches them.",
 	"promoteNotInStep": "The documents are not yet the same on this server and the main. Try again in a moment.",
+	"promoteDiverged": "The documents of an app diverged from the main's. Choose on a device which copy to keep, then try again.",
 	"stateLookingForMain": "Looking for the new main",
 	"mainSteppedDownText": "The main handed its role to another server. This server is looking for the new main among the servers linked to it, and links to it by itself.",
 	"waitingText": "This server took over as the main. These servers follow it as soon as it reaches them:",

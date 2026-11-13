@@ -13,6 +13,7 @@ declare global {
 	interface Window {
 		harness: {
 			createDevice(notes: string[]): Device;
+			chooseDivergence(keep: 'main' | 'subordinate'): Promise<string>;
 			pairAs(app: string, code: string): Promise<string>;
 			documents(app: string, code: string, size: number): Promise<Record<string, unknown> | string>;
 		};

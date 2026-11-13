@@ -238,6 +238,18 @@ describe('UpstreamPanel making this server the main', () => {
 		expect(text()).toContain('The documents are not yet the same on this server and the main.');
 	});
 
+	it('says when an app diverged from the main', async () => {
+		upstream.mockResolvedValue(linked);
+		vi.spyOn(serverApi, 'promote').mockRejectedValue(new ApiError('diverged', 'diverged'));
+		mountPage(Page);
+		await settle();
+		button('Make this server the main').click();
+		await settle();
+		button('Make it the main', dialog()).click();
+		await settle();
+		expect(text()).toContain('Choose on a device which copy to keep, then try again.');
+	});
+
 	it('says that it looks for the new main when its main stepped down', async () => {
 		upstream.mockResolvedValue({ ...linked, connected: false, reason: 'mainSteppedDown' });
 		mountPage(Page);

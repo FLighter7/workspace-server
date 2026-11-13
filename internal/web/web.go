@@ -199,7 +199,7 @@ type Backend interface {
 	// family. planned (force false) needs the main reachable and the
 	// documents the same on both, and reports whether the former main
 	// followed; forced changes this server alone. Its errors wrap
-	// upstream.ErrNotLinked, ErrBusy or ErrNotInStep, or are an
+	// upstream.ErrNotLinked, ErrBusy, ErrNotInStep or ErrDiverged, or are an
 	// *upstream.RefusedError, or are internal.
 	PromoteUpstream(ctx context.Context, force bool) (followed bool, err error)
 	// HandOver asks the subordinate serverID to take the role of main over,

@@ -213,10 +213,13 @@ type Sink interface {
 	Close() error
 }
 
-// AppInfo is one entry of the app list a server-kind session is told.
+// AppInfo is one entry of the app list a server-kind session is told: the
+// app's id, its name and its quota in bytes, which a subordinate takes as
+// its own.
 type AppInfo struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Quota int64  `json:"quota"`
 }
 
 // ServerInfo is how a device reaches a server: a pairing code without the
@@ -352,9 +355,20 @@ type Backend interface {
 	Commit(from *Session, app, device, tx string) *Error
 	// Abort discards device's transaction tx.
 	Abort(app, device, tx string) *Error
-	// Resolve settles a divergence of the app's servers: server is the
-	// subordinate's server id, keep KeepMain or KeepSubordinate.
+	// Resolve is a device's choice for a divergence of the app's servers:
+	// server is the subordinate's server id, keep KeepMain or
+	// KeepSubordinate. The session answers resolved once it returns without
+	// an error, whether the choice was the first (the backend then tells the
+	// app's other sessions resolved itself) or came after another, or the
+	// server had no divergence waiting.
 	Resolve(from *Session, app, device, server, keep string) *Error
+	// Diverged is told, on a subordinate's link session, the state of its
+	// copy of app: since (RFC 3339 UTC) is when it diverged from this
+	// server's and began to wait for a device's choice, nil when no
+	// divergence of it waits for one (none, or a device chose). The session
+	// calls it only for a link session, sends no answer, and closes on an
+	// error with CodeProtocol; the backend returns no other error.
+	Diverged(s *Session, app string, since *string) *Error
 
 	// Forget deletes the device and closes its sessions. It answers the
 	// client's forget, and it also undoes a pairing the client has not

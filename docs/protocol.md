@@ -16,6 +16,7 @@ This is the contract between `workspace-server` and an app's client. The referen
 - **The data:** each app holds a set of documents, plain files on the server's disk, in any format. A device lists the set, reads documents at the etags the listing named, and writes them in transactions that apply all or nothing and fail on a conflict; bodies are streamed in pieces, and a read or a write cut off resumes from where it stopped. See "Documents and the set" and "Transactions".
 - **Servers as clients:** a workspace-server can link to another as its subordinate. It speaks this same protocol as a device of kind `server`; see "Servers: roles, server-kind devices and link sessions". An app's client never needs that part.
 - **Fallback servers:** a main lists its subordinates in every `welcome`, and a device may sync with any of them, with the same device id and token, when the main is out of reach; see "Subordinates: fallback servers for a device".
+- **Divergence:** when a subordinate's copy of an app and its main's both changed apart, the devices of the app are asked which copy to keep; see "Divergence".
 - **Switching the main:** a subordinate can take the role of main over; every `welcome` names the family's `term`, and a device follows the main of the highest term it reaches; see "Switching the main".
 
 ## The pairing code
@@ -164,6 +165,7 @@ The first client frame, `hello` or `pair`, carries `proto: 1`. Any other number 
 | `resolve {server, keep}` | `resolved {server}` |
 | `forget` | the device entry is deleted; the server closes every session of the device |
 | `apps` (server-kind devices only) | `apps {apps}` |
+| `diverged {app, since}` (link sessions) | nothing: the main keeps it (see "Divergence between servers") |
 | `announce {server, devices?, removed?}` (link sessions) | `devices {devices, removed}` |
 | `invite` (link sessions) | `invited {code, expiresAt}` |
 | `term {term, server, device?, token?}` (link sessions) | `term {term, main}` |
@@ -173,9 +175,10 @@ The first client frame, `hello` or `pair`, carries `proto: 1`. Any other number 
 |  | `apps {apps}`: to every link session after the server's app list changes |
 |  | `devices {devices, removed}`: to every link session that announced, after the device registry changes |
 |  | `takeOver`: to a subordinate's link session, when its main hands it the role of main |
+|  | `resolve {app, keep, since}`: to a subordinate's link session, a choice a device of the main made for its divergence (see "Divergence between servers") |
 |  | `error {code, message}` |
 
-`pair` may also carry `kind`, and a server-kind device's `hello` may leave `app` out; both, `apps`, `announce`, `invite`, `term` and `takeOver`, are for servers only (see "Servers: roles, server-kind devices and link sessions" and "Switching the main").
+`pair` may also carry `kind`, and a server-kind device's `hello` may leave `app` out; both, `apps`, `diverged` from a client, `announce`, `invite`, `term`, `takeOver` and `resolve` from the server, are for servers only (see "Servers: roles, server-kind devices and link sessions" and "Switching the main").
 
 ### Values
 
@@ -184,7 +187,7 @@ The first client frame, `hello` or `pair`, carries `proto: 1`. Any other number 
 - **`role`** is `"main"` or `"subordinate"`: whether the server is linked to an upstream server (see "Servers"). A server from before roles sends none. An app's client may ignore it.
 - **`term`** is the family's term, a whole number: it goes up by one every time a subordinate becomes the main (see "Switching the main"). A main names its own, a subordinate its main's. It is left out at 0, as it is by a server whose family never switched its main and by a server from before terms; absent reads as 0. An app's client may ignore it; the reference client uses it to follow the main.
 - **`subordinates`** is sent by a main only, always, `[]` when it has none: the servers linked to it that serve its devices too, sorted by name. A subordinate, and a server from before subordinates, sends none. Each entry is a pairing code without the secret, `{serverId, name, password, fingerprint, port, hosts}`, with the fingerprint in uppercase colon hex (`AB:CD:…`, 32 bytes) as the answer's `a=fingerprint` line takes it. A client leaves out an entry it cannot build a connection to (see the vectors' tolerated frames). See "Subordinates: fallback servers for a device".
-- **`diverged`** lists the servers whose divergence on the app waits for a device's choice, `[{serverId, name, since}]` (`since` in RFC 3339 UTC); it is left out when there is none (see "Divergence").
+- **`diverged`** lists the divergences of the app that wait for a device's choice, `[{serverId, name, since}]`: the subordinate whose copy diverged, and since when (RFC 3339 UTC); it is left out when there is none (see "Divergence").
 - **`device`** is the device id, 16 characters.
 - **`token`** is 32 random bytes, base64url.
 - **`name`** in `pair` is the device's display name, shown on the server's page.
@@ -245,12 +248,13 @@ Every write is a transaction: `begin`, then `put`s and `delete`s, then `commit`,
 
 ### Divergence
 
-A subordinate holds a copy of its main's apps (see "Servers"). When both servers changed the same documents differently while they could not reach each other, the two copies of an app have **diverged**, and a device chooses which copy to keep.
+A subordinate holds a copy of its main's apps (see "Servers"). When both servers changed the same document differently while they could not reach each other, or the two meet for the first time each holding documents that differ, the two copies of the app have **diverged**. The subordinate then keeps its own copy and stops syncing the app with its main, and every device of the app, on either server, is asked which copy to keep: the main's or the subordinate's, for the app's whole set. The servers merge nothing.
 
-- **`diverged {servers: [{serverId, name, since}]}`** lists the servers whose copy of the app diverged from their main's and waits for a choice; `[]` once none does. Every `welcome` carries the same list as `diverged` while it is not empty.
-- **`resolve {server, keep}`** settles the divergence of `server`, a subordinate's server id: `keep` is `"main"` (the subordinate's copy becomes the main's) or `"subordinate"` (the other way round), for the app's whole set. Without a server id, or with another `keep`, it is `protocol`, and the channel closes.
-- **`resolved {server}`** answers `resolve`, and goes to every session of the app once a divergence is settled, by whichever device chose first.
-- **This version of the server never reports a divergence:** a subordinate still settles one at once by the main's copy (see [architecture.md](architecture.md), "The sync rule"), and answers every `resolve` with `resolved` at once, as one that another device settled first. A client should handle the frames all the same.
+- **`diverged {servers: [{serverId, name, since}]}`** lists the divergences of the app that wait for a device's choice, `[]` once none does: `serverId` and `name` name the subordinate whose copy diverged, `since` is when (RFC 3339 UTC). A main lists every subordinate of its own whose copy of the app diverged and that no device chose for yet; a subordinate lists itself. The list may be longer than one entry only on a main. Every `welcome` of the app carries the same list while it is not empty. A `diverged` follows every change; one may also follow a `welcome` that already named the same list.
+- **`resolve {server, keep}`** is a device's choice for the divergence of `server`, a subordinate's server id from that list: `keep` is `"main"` (the subordinate's copy becomes the main's) or `"subordinate"` (the main's copy becomes the subordinate's), for the app's whole set, so documents only the other copy holds are deleted. Without a server id, or with another `keep`, it is `protocol`, and the channel closes.
+- **`resolved {server}`** answers every `resolve`. The first choice wins: the other sessions of the app on that server get `resolved {server}` too, and a `diverged` without it. A later choice, or one for a server with no divergence waiting (another device chose, it is over, or there never was one), changes nothing and is answered `resolved` all the same, so the device closes its question either way.
+- **Which choice is first** is the subordinate's to say. A choice made on the subordinate counts at once; one made on the main counts when it reaches the subordinate: at once while the two are linked, otherwise when they next are. If a device of the subordinate chose meanwhile, the main's choice is dropped; the devices that chose on the main were answered `resolved`, and see the outcome as the set they sync next. A choice made on the main is not shown to the subordinate's devices until it reaches the subordinate.
+- **Afterwards** the subordinate makes the other copy equal to the one kept, and the app syncs again. The devices see the copy that was not kept change like any other write (`changed`), and merge what they hold with the set they find, as they always do; a change only that copy held stays only on the devices that still hold it.
 
 ### Pairing outcomes
 
@@ -288,7 +292,7 @@ Codes:
 
 **A code the client does not know** should be treated as a temporary server error: report it and retry later. Do not treat it as a reason to drop the pairing. Codes may be added without a new `proto`.
 
-- **Before authentication,** every frame but `hello` and `pair` (`head`, `list`, `get`, `begin`, `put`, `delete`, `commit`, `abort`, `resolve`, `forget`, `apps`, `announce`, `invite`, `term`) gets `notAuthenticated`.
+- **Before authentication,** every frame but `hello` and `pair` (`head`, `list`, `get`, `begin`, `put`, `delete`, `commit`, `abort`, `resolve`, `forget`, `apps`, `diverged`, `announce`, `invite`, `term`) gets `notAuthenticated`.
 - **After authentication,** a second `hello`/`pair` is a `protocol` error.
 - **A frame with an unknown `t`** gets `error {code: 'protocol'}` and the channel closes, before authentication or after.
 - **`protocol` always closes the channel;** every other error answers the frame and leaves the session open, except where `hello` and `pair` say otherwise.
@@ -317,9 +321,14 @@ A workspace-server can be a **subordinate** of another, its **main**: it mirrors
   - `forget` deletes the server-kind device and closes every session of it.
   - A `hello` without `app` from a device of an app gets `unknownApp`, as it always did; from an unknown device or with a wrong token, `badToken`.
 - **App sessions:** a server-kind device says `hello {proto, app, device, token}` for any app the server lists, and the session works as a device's.
-- **The app list:** `apps` asks for the server's apps; the answer is `apps {apps: [{id, name}, …]}`, sorted by id, `[]` when there is none.
+- **The app list:** `apps` asks for the server's apps; the answer is `apps {apps: [{id, name, quota}, …]}`, sorted by id, `[]` when there is none. `quota` is the app's quota in bytes (see "Limits"): a subordinate takes it as its own, so the two servers refuse the same sets. A client reads a missing `quota` as none given.
   - Only sessions of a server-kind device may ask. Any other session gets `protocol`, and the channel closes; before authentication the answer is `notAuthenticated`.
   - Every link session also gets `apps {apps}` unasked whenever the list changes, never before its `welcome`. The answer and the push look alike: each carries the whole current list, so act on the latest.
+- **Divergence between servers:** a subordinate tells its main the state of its copy of each app over its link session, and the main hands a choice made there back the same way. The devices' side is "Divergence" above.
+  - **`diverged {app, since}`** from the subordinate: `since` (RFC 3339 UTC) is when its copy of `app` diverged from the main's and began to wait for a device's choice; `null` when none waits (it never diverged, the divergence is over, or a device chose, on either server). Nothing answers it. The subordinate sends it for every app the main lists at every link session, and again whenever that changes.
+  - **The main** lists every subordinate whose copy waits to its own sessions of the app, and keeps it, with a choice its devices make, across a restart, until the subordinate tells `null`. A `since` other than the one it keeps is a new divergence, for which a choice made before does not count. An app the main does not list, and a server that never announced itself, are ignored.
+  - Only a link session may send it; on any other session, without `app`, or with a `since` that is neither `null` nor RFC 3339, the answer is `protocol`, and the channel closes. Before authentication it is `notAuthenticated`.
+  - **`resolve {app, keep, since}`**, pushed by the main to the subordinate's link session: a device of the main chose `keep` (`"main"` or `"subordinate"`) for the divergence of `app` that began at `since`. The main pushes it once the choice is made, and again whenever the subordinate tells `diverged` with that `since`. The subordinate takes it when no choice was made for that divergence yet, and ignores it otherwise; either way it then tells `diverged {app, since: null}`.
 - **Removals:** removing a server-kind device closes every session of it. A server that becomes a subordinate itself closes the sessions of its own server-kind devices; they reconnect, read the new `role`, and look for the main of their family among its servers (see "Switching the main").
 - **Announcing:** `announce {server: {serverId, name, password, fingerprint, port, hosts}}` on a link session tells the main how devices reach the subordinate: one entry of `subordinates`, the same rules. The main keeps it with the server-kind device and lists it in every `welcome` from then on.
   - A subordinate that was a main and stepped down to this one (see "Switching the main") hands its own registry over in its first `announce`: `devices` and `removed`, in the form of the `devices` frame below. The main merges it into its own (the union, less every device removed on either side) and answers with the result. Only a main takes one; a subordinate answers `protocol`.
@@ -343,7 +352,7 @@ A workspace-server can be a **subordinate** of another, its **main**: it mirrors
   - The device pairs with the main, not with the subordinate, and learns the subordinate from the main's `welcome` (`subordinates`); the subordinate admits it once the main's device registry reaches it.
   - Only a link session may ask. On a device's session or an app session, the answer is `protocol`, and the channel closes. A subordinate, whose codes would be refused, answers `notMain`, and the session stays open. A server-side failure is `internal`; the session stays open.
   - A main from before `invite` answers `protocol` and closes the link session, which the subordinate opens again.
-- **`proto` stays 1.** Nothing an old client meets changed: `role`, `term` and `subordinates` are more `welcome` fields, which clients ignore (see the vectors' tolerated frames); `notMain` is a new code, which an old client reads as `internal` (a temporary error); `kind`, a `hello` without `app`, `apps`, `announce`, `invite` and `term` come only from servers, `apps` frames go only to server-kind sessions, `devices` frames only to link sessions that announced, `invited` and `term` frames only answer their requests, and `takeOver` goes only to a subordinate's link session.
+- **`proto` stays 1.** Nothing an old client meets changed: `role`, `term` and `subordinates` are more `welcome` fields, which clients ignore (see the vectors' tolerated frames); `notMain` is a new code, which an old client reads as `internal` (a temporary error); `kind`, a `hello` without `app`, `apps`, `diverged`, `announce`, `invite` and `term` come only from servers, `apps` frames go only to server-kind sessions, `devices` frames only to link sessions that announced, `invited` and `term` frames only answer their requests, and `takeOver` and `resolve` go only to a subordinate's link session.
 
 ## Switching the main
 
@@ -357,8 +366,8 @@ A **family** is a main and the subordinates linked to it. The main is the server
   - The answer is `term {term, main}`: the term and the `serverId` of the main the receiver follows now. `main` is the sender's id when it follows the sender.
   - Only a link session may send it; on any other session, without a `term` of 0 or more or a valid `server`, with the receiver's own id, or when the receiver cannot act on it (a main with no credential for the sender), the answer is `protocol`, and the channel closes. Before authentication it is `notAuthenticated`.
 - **`takeOver`:** a main sends it, unasked, on the link session of the subordinate the user hands the role to. The subordinate then switches as planned (below). There is no answer: the switch shows when the subordinate tells the main `term`.
-- **A planned switch:** the subordinate makes sure the documents are the same on both servers, takes the term up by one, makes the main's registry its own, mints a server-kind credential for the main, and tells it `term`. The main steps down and links to it. The main's other subordinates find their main answering as a subordinate, and look for the new main: they say `hello` to every server of the family their registry lists, and follow the highest that answers as a main above their old one. The new main also tells them `term` when it reaches them.
-- **A forced switch:** the subordinate does the same without the main and without the documents' check. If the main still runs, both act as main until they meet; the new main tells the old one `term` whenever it reaches it, and the old main steps down by itself. Two subordinates made the main apart, at the same term, settle by the server id the same way.
+- **A planned switch:** the subordinate makes sure the documents are the same on both servers (it refuses while a copy of an app diverged and waits for a choice), takes the term up by one, makes the main's registry its own, mints a server-kind credential for the main, and tells it `term`. The main steps down and links to it. The main's other subordinates find their main answering as a subordinate, and look for the new main: they say `hello` to every server of the family their registry lists, and follow the highest that answers as a main above their old one. The new main also tells them `term` when it reaches them.
+- **A forced switch:** the subordinate does the same without the main and without the documents' check, and drops a divergence of its own, which was from the main it no longer follows. If the main still runs, both act as main until they meet; the new main tells the old one `term` whenever it reaches it, and the old main steps down by itself. Its first link as a subordinate compares the two copies of each app afresh: copies that differ have diverged, and the devices are asked (see "Divergence"). Two subordinates made the main apart, at the same term, settle by the server id the same way.
 - **Devices** keep their pairing: every server of the family admits the same device id and token. A device paired with the old main finds it answering as a subordinate, or not at all, and the new main answering as a main; the reference client then makes the new main the server it is paired with (see "Subordinates: fallback servers for a device").
 
 ## Subordinates: fallback servers for a device
@@ -368,12 +377,13 @@ A device pairs only with a main. The main's `welcome` lists its subordinates (`s
 - **The same pairing:** the device says `hello` to a subordinate with the device id and token it got from the main. A device paired after the subordinate's last link is not known there yet and gets `badToken`, which on a subordinate does not mean the pairing is gone.
 - **Which server:** the reference client connects to the main and its subordinates at once, takes the main if it answers within a short grace period, and otherwise a subordinate that did. It takes a `welcome` only from a `serverId` it knows; a `welcome` from another one is `serverChanged`, which stops sync when it comes from the main's own address. Only the main's refusals stop sync.
 - **The revision and the etags** are hashes of the bytes on every server, so the revision and the etags a device last synced at are valid on all of them: a subordinate that holds the same set is not read again.
+- **A divergence** is asked on every server of the family: a device on the subordinate sees the subordinate's own (`diverged`, "Divergence"), a device on the main every subordinate's, and a choice made on either counts.
 - **Keep the list current:** each `welcome` from the main replaces the list; one without `subordinates` (from a subordinate, or an older server) leaves it as it was.
 - **Follow the main:** after a switch of the main, a fallback answers as the main and the paired server as a subordinate, or not at all. The reference client then takes the fallback, when its `term` is at least the one the paired server last named as the main, as the server it is paired with; the server it paired with before becomes a fallback. Of two servers answering as mains (a family split for a while), it takes the higher `term`, unless the paired server answers as a main first.
 - **Pairing and forgetting** go to the main: a subordinate answers `pair` with `notMain`, and a `forget` sent to a subordinate does not reach the main. A subordinate's page shows no code of its own; for a browser on its computer it shows a code of the main, which it gets with `invite`.
 
 ## What the client cannot see
 
-- The server merges nothing and knows nothing about the documents' contents or formats. Merging is the client's job, using `stale`, `conflict` and the etags.
+- The server merges nothing and knows nothing about the documents' contents or formats. Merging is the client's job, using `stale`, `conflict` and the etags. A divergence of two servers is settled by a device's choice of one copy, whole, not by a merge.
 - Changing the server's UDP port invalidates every pairing, because the device stored `o`. The server's page warns the user, and every device pairs again.
 - Losing the server's `identity.json` invalidates every pairing: the certificate, `icePwd` and `serverId` change.

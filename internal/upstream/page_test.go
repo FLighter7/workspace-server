@@ -10,6 +10,7 @@ import (
 
 	"github.com/FLighter7/workspace-server/internal/apps"
 	"github.com/FLighter7/workspace-server/internal/devices"
+	"github.com/FLighter7/workspace-server/internal/protocol"
 	"github.com/FLighter7/workspace-server/internal/wsclient"
 )
 
@@ -141,7 +142,11 @@ func TestUnlink(t *testing.T) {
 		t.Errorf("a second unlink: %v, want ErrNotLinked", err)
 	}
 
+	// Linking again is a first link: the two sets differ, so they diverged,
+	// and a device of the main keeps the main's.
 	sub.linkTo(main)
+	waitFor(t, "the main to know the divergence", func() bool { return len(main.hub.Divergences("todo")) == 1 })
+	main.device("todo").resolve(t, sub.id.ServerID, protocol.KeepMain)
 	waitFor(t, "the pull after linking again", func() bool { return sub.etag("todo") == v2 })
 }
 

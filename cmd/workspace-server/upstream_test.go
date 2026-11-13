@@ -260,6 +260,77 @@ func TestTwoServersInviteAndUnlink(t *testing.T) {
 	}
 }
 
+// Two whole servers whose todo sets differ at their first link: the
+// subordinate keeps its own, takes the main's quota, and its page lists the
+// app as diverged; a planned switch of the main is refused (409 diverged);
+// the main's welcome asks a device paired with it, whose choice (keep the
+// subordinate's) reaches the subordinate and makes the main's set its own.
+func TestTwoServersDivergeAndADeviceChooses(t *testing.T) {
+	mainDir, subDir := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(mainDir, "apps.json"), `{"apps":[{"id":"todo","name":"Todo","quota":2097152}]}`)
+	for dir, body := range map[string]string{mainDir: `{"main":1}`, subDir: `{"laptop":1}`} {
+		writeFileAll(t, filepath.Join(dir, "WSS-Data", "apps", "todo", "data.json"), body)
+	}
+	writeFileAll(t, filepath.Join(mainDir, "WSS-Data", "apps", "todo", "only-main.md"), "theirs")
+	mu, mp := freePorts(t)
+	su := freeUDPPort(t, mu, mp)
+	sp := freeTCPPort(t, mu, mp, su)
+	main := startServer(t, mainDir, mu, mp)
+	sub := startServer(t, subDir, su, sp)
+
+	c := main.pairingCode(t)
+	c.H = []string{"127.0.0.1"}
+	body, _ := json.Marshal(map[string]string{"code": pairing.EncodeCode(c)})
+	if code, resp := sub.send(t, http.MethodPost, "/api/upstream", string(body)); code != http.StatusOK {
+		t.Fatalf("POST /api/upstream = %d %s\n%s", code, resp, sub.logs)
+	}
+	waitUntil(t, "the divergence", func() bool {
+		st := sub.upstream(t)
+		return len(st.Diverged) == 1 && st.Diverged[0] == "todo"
+	})
+	waitUntil(t, "the main's quota", func() bool {
+		_, list := sub.send(t, http.MethodGet, "/api/apps", "")
+		return strings.Contains(list, `"quota":2097152`)
+	})
+	if code, resp := sub.send(t, http.MethodPost, "/api/upstream/promote", `{}`); code != http.StatusConflict || !strings.Contains(resp, `"diverged"`) {
+		t.Errorf("a planned switch while diverged = %d %s, want 409 diverged", code, resp)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), linkWait)
+	defer cancel()
+	subID := sub.status(t).ServerID
+	var paired wsclient.Paired
+	var target wsclient.Target
+	waitUntil(t, "the main to ask its devices", func() bool {
+		mc := main.pairingCode(t)
+		mc.H = []string{"127.0.0.1"}
+		p, w, err := pairWith(ctx, mc)
+		if err != nil {
+			t.Fatalf("pair with the main: %v", err)
+		}
+		pc, _ := wsclient.ParseCode(pairing.EncodeCode(mc))
+		paired, target = p, pc.Target
+		return len(w.Diverged) == 1 && w.Diverged[0].ServerID == subID
+	})
+	phone, err := wsclient.Dial(ctx, target, "todo", wsclient.DialOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer phone.Close()
+	if _, err := phone.Hello(ctx, paired.Device, paired.Token); err != nil {
+		t.Fatal(err)
+	}
+	if err := phone.Resolve(ctx, subID, wsclient.KeepSubordinate); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	waitUntil(t, "the subordinate's set on the main", func() bool {
+		_, errMain := os.Stat(filepath.Join(mainDir, "WSS-Data", "apps", "todo", "only-main.md"))
+		data, _ := os.ReadFile(filepath.Join(mainDir, "WSS-Data", "apps", "todo", "data.json"))
+		return errors.Is(errMain, os.ErrNotExist) && string(data) == `{"laptop":1}`
+	})
+	waitUntil(t, "the divergence to end", func() bool { return len(sub.upstream(t).Diverged) == 0 })
+}
+
 // pairWith pairs a device of todo with the server whose code c is, and
 // confirms the pairing.
 func pairWith(ctx context.Context, c pairing.Code) (wsclient.Paired, wsclient.Welcome, error) {

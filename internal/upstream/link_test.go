@@ -83,6 +83,9 @@ type node struct {
 	// selfName and selfPort, when set, are what n announces instead of its
 	// own name and port.
 	selfName, selfPort atomic.Value
+	// quota, when set, is every app's quota on n instead of apps.json's:
+	// a quota the main changed, which n has not heard of yet.
+	quota atomic.Int64
 
 	cutMu sync.Mutex
 	cut   map[int]bool // UDP ports n's link cannot reach: a split
@@ -149,6 +152,9 @@ func (n *node) open() {
 		t.Fatal(err)
 	}
 	n.store = store.New(filepath.Join(n.dir, "apps"), time.Now, func(app string) int64 {
+		if q := n.quota.Load(); q != 0 {
+			return q
+		}
 		a, _ := n.apps.Get(app)
 		return a.Quota
 	})
@@ -175,6 +181,8 @@ func (n *node) open() {
 			t, main, err := n.cur.Load().Follow(sender, term, wsclient.Server(si), device, token)
 			return protocol.TermAnswer{Term: t, Main: main}, err
 		},
+		OwnDiverged: func(app string) *protocol.DivergedServer { return n.cur.Load().OwnDiverged(app) },
+		ChooseOwn:   func(app, keep string) bool { return n.cur.Load().ChooseOwn(app, keep) },
 	})
 	n.cfg.Backend = n.hub
 	n.linkDeps = Deps{
@@ -380,13 +388,16 @@ func (n *node) writeBehind(app, body string, ifEtag *string) string {
 }
 
 // device is a device paired with a server over WebRTC, which records the
-// revisions of the changed pushes it hears ("" for an empty set).
+// revisions of the changed pushes it hears ("" for an empty set), and the
+// diverged and resolved pushes.
 type device struct {
-	id      string
-	cl      *wsclient.Client
-	welcome wsclient.Welcome
-	mu      sync.Mutex
-	heard   []string
+	id       string
+	cl       *wsclient.Client
+	welcome  wsclient.Welcome
+	mu       sync.Mutex
+	heard    []string
+	diverged [][]wsclient.DivergedServer
+	resolved []string
 }
 
 // device pairs a device of app and returns it connected to n. A
@@ -473,6 +484,16 @@ func (n *node) dial(ctx context.Context, app string) *device {
 			return
 		}
 		d.heard = append(d.heard, *rev)
+	})
+	cl.OnDiverged(func(list []wsclient.DivergedServer) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		d.diverged = append(d.diverged, list)
+	})
+	cl.OnResolved(func(server string) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		d.resolved = append(d.resolved, server)
 	})
 	return d
 }
@@ -775,6 +796,7 @@ const (
 	logPushed   = "pushed to the main"
 	logPulled   = "pulled from the main"
 	logReplaced = "the main's set replaced this server's"
+	logDiverged = "documents and the main's diverged"
 )
 
 // The row "the same etag on both sides": two servers holding the same bytes
@@ -847,70 +869,11 @@ func TestFirstLinkPushesWhenOnlyTheSubordinateHasADocument(t *testing.T) {
 	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", l1) })
 }
 
-// The row "both moved": while the two could not reach each other, a device
-// wrote on each. When the link comes back, the main's copy wins on the
-// subordinate, replacing the subordinate's, and its devices hear of it; a
-// device's merge written back is pushed.
-func TestBothMovedTheMainWins(t *testing.T) {
-	main := startNode(t, "Desk")
-	sub := startNode(t, "Laptop")
-	v1 := main.write("todo", `{"v":1}`, nil)
-	sub.linkTo(main)
-	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v1) })
-	phone, tab := main.device("todo"), sub.device("todo")
-
-	sub.link.Close()
-	v2 := phone.put(t, &v1, `{"v":2}`)
-	l2 := tab.put(t, &v1, `{"v":1,"laptop":true}`)
-	sub.openLink()
-
-	waitFor(t, "the main's copy to win here", func() bool { return sub.etag("todo") == v2 })
-	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v2) })
-	waitFor(t, "the device here to hear of it", func() bool { return tab.heardEtag(v2) })
-	if l2 == v2 {
-		t.Fatal("the two writes have one etag")
-	}
-	if main.etag("todo") != v2 {
-		t.Error("the main's document changed")
-	}
-	if !sub.logs.has(logReplaced) {
-		t.Error("the replacement was not logged")
-	}
-
-	// The device merges, as an app does, and writes the result back.
-	merged := tab.put(t, &v2, `{"v":2,"laptop":true}`)
-	waitFor(t, "the merge to reach the main", func() bool { return main.etag("todo") == merged })
-	waitFor(t, "the main's device to hear of it", func() bool { return phone.heardEtag(merged) })
-	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", merged) })
-}
-
-// The first link with different documents on both sides is a divergence
-// too: the main's copy wins, and replaces the subordinate's.
-func TestFirstLinkWithDifferentDocuments(t *testing.T) {
-	main := startNode(t, "Desk")
-	sub := startNode(t, "Laptop")
-	u1 := main.write("todo", `{"main":1}`, nil)
-	sub.write("todo", `{"laptop":1}`, nil)
-	tab := sub.device("todo")
-	mainWritten := main.written("todo")
-
-	sub.linkTo(main)
-	waitFor(t, "the main's copy to win here", func() bool { return sub.etag("todo") == u1 })
-	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", u1) })
-	waitFor(t, "the device here to hear of it", func() bool { return tab.heardEtag(u1) })
-	if main.etag("todo") != u1 || !main.written("todo").Equal(mainWritten) {
-		t.Error("the main's document was touched")
-	}
-	if !sub.logs.has("never agreed") {
-		t.Error("the log does not say the two were never agreed on")
-	}
-}
-
 // The main's document changes while the subordinate pushes: the main
 // answers conflict, the subordinate decides again, and both have moved, so
-// the main's copy wins here. To make the race certain, the main's document
-// changes behind the hub while the push's body is on its way, after the
-// subordinate listed the main's set.
+// the two diverged; a device here keeps the main's. To make the race
+// certain, the main's document changes behind the hub while the push's body
+// is on its way, after the subordinate listed the main's set.
 func TestConflictDuringPush(t *testing.T) {
 	main := startNode(t, "Desk")
 	sub := startNode(t, "Laptop")
@@ -927,12 +890,14 @@ func TestConflictDuringPush(t *testing.T) {
 	})
 	tab.put(t, &v1, `{"v":1,"laptop":true}`)
 
+	waitFor(t, "the divergence", func() bool { _, ok := sub.divergenceFile("todo"); return ok })
+	if lk := sub.linkFileOf("todo"); lk.Push != nil {
+		t.Errorf("the push the divergence stopped is still recorded: %+v", lk.Push)
+	}
+	tab.resolve(t, sub.id.ServerID, protocol.KeepMain)
 	waitFor(t, "the main's copy to win here", func() bool { return sub.etag("todo") == v2 })
 	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v2) })
 	waitFor(t, "the device here to hear of it", func() bool { return tab.heardEtag(v2) })
-	if lk := sub.linkFileOf("todo"); lk.Push != nil {
-		t.Errorf("the push the divergence replaced is still recorded: %+v", lk.Push)
-	}
 	if !sub.logs.has("changed before this server's reached it") {
 		t.Error("the conflict was not logged")
 	}
@@ -1228,8 +1193,8 @@ func TestWriteGuardWindow(t *testing.T) {
 	}
 }
 
-// No ping-pong: once a push, a pull and a divergence have settled, both
-// servers stay quiet. A document copied from the main is not pushed back,
+// No ping-pong: once a push, a pull and a divergence (a device kept the
+// main's set) have settled, both servers stay quiet. A document copied from the main is not pushed back,
 // and a push brings nothing back.
 func TestNoWritePingPong(t *testing.T) {
 	main := startNode(t, "Desk")
@@ -1248,6 +1213,8 @@ func TestNoWritePingPong(t *testing.T) {
 	v4 := phone.put(t, &pulled, `{"v":4}`)
 	tab.put(t, &pulled, `{"v":3,"laptop":true}`)
 	sub.openLink()
+	waitFor(t, "the divergence", func() bool { _, ok := sub.divergenceFile("todo"); return ok })
+	tab.resolve(t, sub.id.ServerID, protocol.KeepMain)
 	waitFor(t, "the main's copy to win here", func() bool { return sub.etag("todo") == v4 })
 	merged := tab.put(t, &v4, `{"v":4,"laptop":true}`)
 	waitFor(t, "convergence", func() bool {

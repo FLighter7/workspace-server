@@ -288,13 +288,15 @@ func TestLostBaseRecord(t *testing.T) {
 
 	waitFor(t, "the change to reach the main", func() bool { return main.etag("todo") == v3 })
 	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v3) })
-	if sub.logs.has(logReplaced) || sub.etag("todo") != v3 {
+	if sub.logs.has(logReplaced) || sub.logs.has(logDiverged) || sub.etag("todo") != v3 {
 		t.Error("the lost base record was taken for a divergence")
 	}
 }
 
 // A pull this server's quota refuses does not hold its own changes back:
-// they reach the main all the same.
+// they reach the main all the same. The subordinate takes the main's quota,
+// so this happens only while it has not heard of a change of it; here its
+// store is held to 1 MiB, as though the main had just lowered it.
 func TestPushesGoOnWhenAPullIsRefused(t *testing.T) {
 	main := startNode(t, "Desk")
 	sub := startNode(t, "Laptop")
@@ -305,16 +307,7 @@ func TestPushesGoOnWhenAPullIsRefused(t *testing.T) {
 	sub.link.Close()
 	main.writeKey("todo", "big.bin", bigBody(2<<20), nil)
 	a := tab.putKey(t, "a.md", nil, "mine")
-	raw := `{"apps":[{"id":"todo","name":"Todo","quota":1048576}]}`
-	if err := os.WriteFile(filepath.Join(sub.dir, "apps.json"), []byte(raw), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sub.apps.ReloadIfChanged(); err != nil {
-		t.Fatal(err)
-	}
-	if q, _ := sub.apps.Get("todo"); q.Quota != apps.MinQuota {
-		t.Fatalf("the subordinate's quota is %d", q.Quota)
-	}
+	sub.quota.Store(apps.MinQuota)
 	sub.openLink()
 
 	waitFor(t, "this server's change on the main", func() bool { return main.etagOf("todo", "a.md") == a })

@@ -12,10 +12,10 @@ package upstream
 //
 // Without a base (a first link, or a base agreed with another main) a side
 // whose set is empty takes the other's, and two different sets that are
-// both non-empty have diverged. For now a divergence is settled at once by
-// the old rule: the main's set wins, and replaces this server's whole
-// (diverge). Stage 3 of the files plan makes it wait for a device's choice
-// instead; decide and diverge are its seams.
+// both non-empty have diverged. A divergence waits for a device's choice
+// (diverge.go): the app stops syncing with the main, this server keeps its
+// own set, and the choice, once made, makes one side's set the other's,
+// whole (whole).
 //
 // Writes go both ways as transactions, all of an app's changes on one side
 // in one: here through the hub's LinkTx, on the main through the client's
@@ -46,6 +46,7 @@ import (
 	"strings"
 
 	"github.com/FLighter7/workspace-server/internal/hub"
+	"github.com/FLighter7/workspace-server/internal/protocol"
 	"github.com/FLighter7/workspace-server/internal/store"
 	"github.com/FLighter7/workspace-server/internal/wsclient"
 )
@@ -245,12 +246,15 @@ type change struct {
 // plan is what one sync does: the changes written here and those written on
 // the main, and the documents both sides already agree on. diverged names
 // why the two diverged, empty when they did not; firstLink tells a
-// divergence of a link without a base.
+// divergence of a link without a base. kept, when not empty, is the side a
+// device chose to keep after a divergence (protocol.KeepMain or
+// KeepSubordinate), whose set the plan copies to the other, whole.
 type plan struct {
 	pulls, pushes []change
 	agree         map[string]string
 	diverged      []string
 	firstLink     bool
+	kept          string
 }
 
 // compare plans a sync of the sets here and main (etags by key) from base,
@@ -289,21 +293,27 @@ func compare(base, here, main map[string]string) plan {
 	return p
 }
 
-// diverge settles a divergence: for now the main's set wins here, the whole
-// of it (the files plan's decision 5), replacing this server's: what only
-// this server holds goes, what it changed takes the main's. The devices here
-// merge the main's set with what they hold, as they always have, and write
-// the result back, which the next sync pushes. Stage 3 makes this wait for a
-// device's choice instead.
-func diverge(p plan, here, main map[string]string) plan {
-	out := plan{agree: p.agree, diverged: p.diverged, firstLink: p.firstLink}
+// whole plans carrying out a device's choice after a divergence: the set of
+// the side kept (protocol.KeepMain or KeepSubordinate) becomes the other's,
+// the whole of it (the files plan's decision 5). Keeping the main's pulls
+// every document where the two differ, so what only this server holds goes
+// and what it changed takes the main's; keeping this server's pushes them
+// the other way. Nothing is merged: the devices merge what they hold with
+// the set they then find, as they always do.
+func whole(keep string, here, main map[string]string) plan {
+	p := plan{agree: map[string]string{}, kept: keep}
 	for _, ks := range union(here, main) {
 		h, m := etagIn(here, ks), etagIn(main, ks)
-		if !same(h, m) {
-			out.pulls = append(out.pulls, change{key: ks, from: h, to: m})
+		switch {
+		case same(h, m):
+			p.agree[ks] = *h
+		case keep == protocol.KeepMain:
+			p.pulls = append(p.pulls, change{key: ks, from: h, to: m})
+		default:
+			p.pushes = append(p.pushes, change{key: ks, from: m, to: h})
 		}
 	}
-	return out
+	return p
 }
 
 func etagIn(set map[string]string, ks string) *string {
@@ -336,14 +346,22 @@ var errRedecide = errors.New("the documents changed meanwhile")
 // device on either side; whoever wrote also left a reason to sync again (a
 // changed push, or a local write), so a sync that runs out of attempts is
 // followed by another.
-func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app, mainID string, up *string) (*string, error) {
+//
+// An app that diverged waits for a device's choice: sync returns errPaused
+// at once, and carries a choice out once one was made (whole).
+func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app string, mref mainRef, up *string) (*string, error) {
+	mainID := mref.ServerID
 	for range syncAttempts {
 		lk := l.linkOf(app, mainID)
+		dv := l.divergenceOf(app, mainID)
+		if dv != nil && dv.Keep == "" {
+			return up, errPaused
+		}
 		local, err := l.d.Store.Head(app)
 		if err != nil {
 			return up, err
 		}
-		if lk.Base != nil && lk.Pull == nil && lk.Push == nil {
+		if dv == nil && lk.Base != nil && lk.Pull == nil && lk.Push == nil {
 			if base := store.RevisionOf(lk.Base); same(local, base) && same(l.comparable(app, up), base) {
 				return up, nil // in step: nothing to read on either side
 			}
@@ -369,14 +387,25 @@ func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app, mainID string
 			return up, err
 		}
 		base := effectiveBase(lk, hereSet, mainSet, pushGone, pullGone)
-		p := compare(base, hereSet, mainSet)
-		if len(p.diverged) > 0 {
-			l.logDivergence(app, lk, p, hereSet, mainSet)
-			p = diverge(p, hereSet, mainSet)
+		var p plan
+		if dv != nil {
+			p = whole(dv.Keep, hereSet, mainSet)
+		} else if p = compare(base, hereSet, mainSet); len(p.diverged) > 0 {
+			// Nothing moves either way until a device chooses: the
+			// transactions in flight go, and the base stays as it was.
+			l.abortPending(ctx, cl, app, lk)
+			if err := l.saveLink(app, lk); err != nil {
+				return up, err
+			}
+			if err := l.diverged(app, mref, lk, p, hereSet, mainSet); err != nil {
+				return up, err
+			}
+			return up, errPaused
 		}
 		// A transaction this plan does not write through is superseded (a
-		// divergence dropped the pushes, say): it goes, with its record,
-		// which would otherwise outlive the plan and later pass for a base.
+		// choice after a divergence dropped the pushes, say): it goes, with
+		// its record, which would otherwise outlive the plan and later pass
+		// for a base.
 		if err := l.dropSuperseded(ctx, cl, app, lk, p); err != nil {
 			return up, err
 		}
@@ -385,6 +414,9 @@ func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app, mainID string
 			lk.Base = p.agree
 			if err := l.saveLink(app, lk); err != nil {
 				return up, err
+			}
+			if dv != nil {
+				l.settledDivergence(app, dv) // the two hold the same already
 			}
 			return up, nil
 		}
@@ -406,7 +438,7 @@ func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app, mainID string
 			pullErr = err
 		}
 		if len(p.pushes) > 0 {
-			rev, err := l.push(ctx, cl, app, lk, next, p.pushes)
+			rev, err := l.push(ctx, cl, app, lk, next, p)
 			if errors.Is(err, errRedecide) && pullErr == nil {
 				continue
 			}
@@ -420,6 +452,11 @@ func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app, mainID string
 		}
 		if pullErr != nil {
 			return up, pullErr
+		}
+		if dv != nil {
+			// The choice is carried out: the next round syncs by the table,
+			// from the base the commit settled.
+			l.settledDivergence(app, dv)
 		}
 	}
 	return up, nil
@@ -569,7 +606,7 @@ func settle(base map[string]string, cs []change, written map[string]*string) []s
 	return odd
 }
 
-// logDivergence says why app diverged, and what the old rule does about it.
+// logDivergence says why app diverged, and what happens now.
 func (l *Link) logDivergence(app string, lk *appLink, p plan, here, main map[string]string) {
 	why := "they were never agreed on"
 	switch {
@@ -578,7 +615,7 @@ func (l *Link) logDivergence(app string, lk *appLink, p plan, here, main map[str
 	case lk.Base == nil && lk.ServerID != "" && len(here) > 0 && len(main) > 0:
 		why = "they were never agreed on, and both hold documents"
 	}
-	l.d.Logf("app %q: this server's documents and the main's diverged (%s); the main's set wins here", app, why)
+	l.d.Logf("app %q: this server's documents and the main's diverged (%s); this server keeps its own, and the app stops syncing with the main until a device chooses which set to keep", app, why)
 }
 
 // keyList names a few keys, for the log.
@@ -671,8 +708,8 @@ func (l *Link) pull(ctx context.Context, cl *wsclient.Client, app string, lk *ap
 		return fmt.Errorf("take the main's documents in: %w", err)
 	}
 	how := fmt.Sprintf("pulled from the main: %s", describe(p.pulls))
-	if len(p.diverged) > 0 {
-		how = fmt.Sprintf("the main's set replaced this server's: %s", describe(p.pulls))
+	if p.kept != "" {
+		how = fmt.Sprintf("the main's set replaced this server's, as a device chose: %s", describe(p.pulls))
 	}
 	if resumed > 0 {
 		how += fmt.Sprintf(" (resumed, %d bytes were staged already)", resumed)
@@ -782,7 +819,8 @@ func changeOf(cs []change, ks string) change {
 // are no longer the ones cs expects, is errRedecide. Each push the main
 // commits counts against the write guard, which refuses one past it before
 // it starts.
-func (l *Link) push(ctx context.Context, cl *wsclient.Client, app string, lk *appLink, next map[string]string, cs []change) (*string, error) {
+func (l *Link) push(ctx context.Context, cl *wsclient.Client, app string, lk *appLink, next map[string]string, p plan) (*string, error) {
+	cs := p.pushes
 	if !l.mayPush(app) {
 		return nil, errTooManyWrites
 	}
@@ -831,6 +869,9 @@ func (l *Link) push(ctx context.Context, cl *wsclient.Client, app string, lk *ap
 	}
 	l.countPush(app)
 	how := fmt.Sprintf("pushed to the main: %s", describe(cs))
+	if p.kept != "" {
+		how = fmt.Sprintf("this server's set replaced the main's, as a device chose: %s", describe(cs))
+	}
 	if resumed > 0 {
 		how += fmt.Sprintf(" (resumed, %d bytes were staged already)", resumed)
 	}

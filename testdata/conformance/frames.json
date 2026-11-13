@@ -1,9 +1,9 @@
 {
 	"about": [
-		"Exchanges. A session is new, authenticated as device \"d1\" of app \"todo\", or a link session (authenticated as the server-kind device \"s1\", with no app). With the backend in the state given, a client call sends the client frame (and clientBody, if any); the server answers with the server frames (and serverBody); the call resolves with result or fails with the error code. push is a changed frame the server sends unasked, with that revision; pushDiverged is a diverged frame and pushResolved a resolved frame the server sends unasked; pushApps is an apps frame and pushDevices a devices frame (with pushRemoved as its removed) the server sends unasked; pushTakeOver is a takeOver frame the server sends unasked.",
+		"Exchanges. A session is new, authenticated as device \"d1\" of app \"todo\", or a link session (authenticated as the server-kind device \"s1\", with no app). With the backend in the state given, a client call sends the client frame (and clientBody, if any); the server answers with the server frames (and serverBody); the call resolves with result or fails with the error code. push is a changed frame the server sends unasked, with that revision; pushDiverged is a diverged frame and pushResolved a resolved frame the server sends unasked; pushApps is an apps frame and pushDevices a devices frame (with pushRemoved as its removed) the server sends unasked; pushTakeOver is a takeOver frame the server sends unasked; pushResolve is a resolve frame the server sends unasked to a link session.",
 		"closes: the server closes the channel after its frames. An error frame also carries a message, English text for a developer whose wording is the server's; it is not compared.",
 		"Bodies are UTF-8 text. A body follows the frame that announces it: a put's body is its bytes past its offset, a doc's body the document's bytes past the offset it names. backend keys: welcome, helloError, paired, pairError, head (a revision), list ({revision, docs, removed}: the whole set), listError, doc ({path, id, type, etag, body}: the document the server holds), stale (the revision a stale answer names), getError, began (what a begin returns to), beginError, putError, deleteError, committed ({revision, docs}), conflict ({revision, docs}), commitError, abortError, resolveError, apps, appsError, devices, removed, announceError, invite ({code, expiresAt}), inviteError, term ({term, main}), termError. pageSize, when given, is the most entries the server puts in one list page in that exchange: a server pages by at most 500, and a client counts on no size.",
-		"Results: head and changed resolve with the revision; list with the page ({revision, docs, removed, cursor?}) and get with the document ({path, id, type, etag, bytes, offset, body}), or either with {stale: revision} when the server answers stale; begin with {tx, staged}; put and delete with {path, id, type, received}; commit with {committed: true, revision, docs}, or {committed: false, revision, docs} on a conflict; abort with {tx}; resolve with {server}; diverged with its servers and resolved with its server. A cursor is opaque: a client sends back the one it got, with the revision of the page that named it. A welcome result holds role, term, subordinates and diverged when the frame carries them. A registry result is the list of devices, or {devices, removed} when the frame carries removed.",
+		"Results: head and changed resolve with the revision; list with the page ({revision, docs, removed, cursor?}) and get with the document ({path, id, type, etag, bytes, offset, body}), or either with {stale: revision} when the server answers stale; begin with {tx, staged}; put and delete with {path, id, type, received}; commit with {committed: true, revision, docs}, or {committed: false, revision, docs} on a conflict; abort with {tx}; resolve with {server}; diverged with its servers and resolved with its server. A diverged a subordinate sends on its link session is not answered: the call resolves with null once it is sent, and a resolve pushed to a link session is heard as {app, keep, since}. A cursor is opaque: a client sends back the one it got, with the revision of the page that named it. A welcome result holds role, term, subordinates and diverged when the frame carries them. A registry result is the list of devices, or {devices, removed} when the frame carries removed.",
 		"exchanges are spoken by every client. serverKind holds the exchanges of a server-kind device: a subordinate server linking to its main. The client package does not speak them; the server's Session and its Go client play them.",
 		"tolerated: frames one side accepts although the other side never sends them."
 	],
@@ -2181,11 +2181,13 @@
 				"apps": [
 					{
 						"id": "notes",
-						"name": "Notes"
+						"name": "Notes",
+						"quota": 104857600
 					},
 					{
 						"id": "todo",
-						"name": "Todo"
+						"name": "Todo",
+						"quota": 52428800
 					}
 				]
 			},
@@ -2201,11 +2203,13 @@
 					"apps": [
 						{
 							"id": "notes",
-							"name": "Notes"
+							"name": "Notes",
+							"quota": 104857600
 						},
 						{
 							"id": "todo",
-							"name": "Todo"
+							"name": "Todo",
+							"quota": 52428800
 						}
 					]
 				}
@@ -2213,11 +2217,13 @@
 			"result": [
 				{
 					"id": "notes",
-					"name": "Notes"
+					"name": "Notes",
+					"quota": 104857600
 				},
 				{
 					"id": "todo",
-					"name": "Todo"
+					"name": "Todo",
+					"quota": 52428800
 				}
 			]
 		},
@@ -2248,11 +2254,13 @@
 			"pushApps": [
 				{
 					"id": "notes",
-					"name": "Notes"
+					"name": "Notes",
+					"quota": 104857600
 				},
 				{
 					"id": "todo",
-					"name": "Todo"
+					"name": "Todo",
+					"quota": 52428800
 				}
 			],
 			"server": [
@@ -2261,11 +2269,13 @@
 					"apps": [
 						{
 							"id": "notes",
-							"name": "Notes"
+							"name": "Notes",
+							"quota": 104857600
 						},
 						{
 							"id": "todo",
-							"name": "Todo"
+							"name": "Todo",
+							"quota": 52428800
 						}
 					]
 				}
@@ -2273,11 +2283,13 @@
 			"result": [
 				{
 					"id": "notes",
-					"name": "Notes"
+					"name": "Notes",
+					"quota": 104857600
 				},
 				{
 					"id": "todo",
-					"name": "Todo"
+					"name": "Todo",
+					"quota": 52428800
 				}
 			]
 		},
@@ -3259,6 +3271,152 @@
 				}
 			],
 			"result": "takeOver"
+		},
+		{
+			"name": "diverged told on a link session, which nothing answers",
+			"session": "link",
+			"backend": {},
+			"call": {
+				"method": "diverged",
+				"app": "todo",
+				"since": "2026-11-13T09:30:00Z"
+			},
+			"client": {
+				"t": "diverged",
+				"app": "todo",
+				"since": "2026-11-13T09:30:00Z"
+			},
+			"server": [],
+			"result": null
+		},
+		{
+			"name": "diverged with no divergence waiting, told on a link session",
+			"session": "link",
+			"backend": {},
+			"call": {
+				"method": "diverged",
+				"app": "todo",
+				"since": null
+			},
+			"client": {
+				"t": "diverged",
+				"app": "todo",
+				"since": null
+			},
+			"server": [],
+			"result": null
+		},
+		{
+			"name": "diverged without since",
+			"session": "link",
+			"backend": {},
+			"call": {
+				"method": "diverged",
+				"app": "todo"
+			},
+			"client": {
+				"t": "diverged",
+				"app": "todo"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "protocol"
+				}
+			],
+			"closes": true,
+			"error": "protocol"
+		},
+		{
+			"name": "diverged with a since that is no time",
+			"session": "link",
+			"backend": {},
+			"call": {
+				"method": "diverged",
+				"app": "todo",
+				"since": "yesterday"
+			},
+			"client": {
+				"t": "diverged",
+				"app": "todo",
+				"since": "yesterday"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "protocol"
+				}
+			],
+			"closes": true,
+			"error": "protocol"
+		},
+		{
+			"name": "diverged on an app session",
+			"session": "authenticated",
+			"backend": {},
+			"call": {
+				"method": "diverged",
+				"app": "todo",
+				"since": "2026-11-13T09:30:00Z"
+			},
+			"client": {
+				"t": "diverged",
+				"app": "todo",
+				"since": "2026-11-13T09:30:00Z"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "protocol"
+				}
+			],
+			"closes": true,
+			"error": "protocol"
+		},
+		{
+			"name": "diverged before hello",
+			"session": "new",
+			"backend": {},
+			"call": {
+				"method": "diverged",
+				"app": "todo",
+				"since": "2026-11-13T09:30:00Z"
+			},
+			"client": {
+				"t": "diverged",
+				"app": "todo",
+				"since": "2026-11-13T09:30:00Z"
+			},
+			"server": [
+				{
+					"t": "error",
+					"code": "notAuthenticated"
+				}
+			],
+			"error": "notAuthenticated"
+		},
+		{
+			"name": "resolve pushed to a subordinate, a device of the main having chosen",
+			"session": "link",
+			"backend": {},
+			"pushResolve": {
+				"app": "todo",
+				"keep": "subordinate",
+				"since": "2026-11-13T09:30:00Z"
+			},
+			"server": [
+				{
+					"t": "resolve",
+					"app": "todo",
+					"keep": "subordinate",
+					"since": "2026-11-13T09:30:00Z"
+				}
+			],
+			"result": {
+				"app": "todo",
+				"keep": "subordinate",
+				"since": "2026-11-13T09:30:00Z"
+			}
 		},
 		{
 			"name": "list on a link session, which has no documents",

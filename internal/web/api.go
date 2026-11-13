@@ -43,6 +43,9 @@ const (
 	// codeNotInStep: a planned switch found the documents not yet the same
 	// on this server and its main.
 	codeNotInStep = "notInStep"
+	// codeDiverged: a planned switch of the main found an app whose
+	// documents diverged from the main's.
+	codeDiverged = "diverged"
 	// codeNotConnected: the server to hand the role to is not connected.
 	codeNotConnected = "notConnected"
 	// codeNotStopped: the write guard has not stopped the app to resume.
@@ -526,6 +529,8 @@ func (a *api) promoteUpstream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, codeBusy, err.Error())
 	case errors.Is(err, upstream.ErrNotInStep):
 		writeError(w, http.StatusConflict, codeNotInStep, err.Error())
+	case errors.Is(err, upstream.ErrDiverged):
+		writeError(w, http.StatusConflict, codeDiverged, err.Error())
 	case errors.As(err, &refused):
 		writeJSON(w, http.StatusBadGateway, refusedBody{Error: codeUpstream, Message: err.Error(), Reason: refused.Reason})
 	default:
