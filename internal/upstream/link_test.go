@@ -183,6 +183,7 @@ func (n *node) open() {
 		},
 		OwnDiverged: func(app string) *protocol.DivergedServer { return n.cur.Load().OwnDiverged(app) },
 		ChooseOwn:   func(app, keep string) bool { return n.cur.Load().ChooseOwn(app, keep) },
+		RemovingApp: func(app string) func() { return n.cur.Load().AppRemoving(app) },
 	})
 	n.cfg.Backend = n.hub
 	n.linkDeps = Deps{

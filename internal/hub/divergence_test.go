@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -313,5 +316,35 @@ func TestResolveWithNothingWaiting(t *testing.T) {
 	waitFrames(t, fa, "resolved", 1)
 	if got := settle(t, b, fb); countType(got, "resolved")+countType(got, "diverged") != 0 {
 		t.Errorf("another device heard %v", got)
+	}
+}
+
+// RemoveApp tells Deps.RemovingApp before anything is removed, and calls the
+// function it returns once the app's folder is gone; an app that is not
+// listed is not told.
+func TestRemoveAppTellsTheLinkFirst(t *testing.T) {
+	var calls []string
+	e := newEnv(t, func(e0 *env) {
+		e0.deps = func(d *Deps) {
+			d.RemovingApp = func(app string) func() {
+				_, err := os.Stat(filepath.Join(e0.dir, "apps", app, "data.json"))
+				calls = append(calls, "removing "+app+" with its folder: "+strconv.FormatBool(err == nil))
+				return func() {
+					_, err := os.Stat(filepath.Join(e0.dir, "apps", app))
+					calls = append(calls, "done, folder gone: "+strconv.FormatBool(os.IsNotExist(err)))
+				}
+			}
+		}
+	})
+	e.writeDoc(t, "todo", "data.json", `{}`)
+	if err := e.hub.RemoveApp("todo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.hub.RemoveApp("todo"); err == nil {
+		t.Fatal("a second removal succeeded")
+	}
+	want := []string{"removing todo with its folder: true", "done, folder gone: true"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Errorf("calls %v, want %v", calls, want)
 	}
 }

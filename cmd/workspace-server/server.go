@@ -667,6 +667,8 @@ func newServer(opts serverOptions, logger *log.Logger) (*server, error) {
 		// are asked to settle.
 		OwnDiverged: func(app string) *protocol.DivergedServer { return s.link.OwnDiverged(app) },
 		ChooseOwn:   func(app, keep string) bool { return s.link.ChooseOwn(app, keep) },
+		// An app removed here stops its sync with the main first.
+		RemovingApp: func(app string) func() { return s.link.AppRemoving(app) },
 	})
 	s.link, err = upstream.Open(upstream.Deps{
 		Path:       filepath.Join(dir, upstreamFile),

@@ -443,3 +443,66 @@ func TestPlannedSwitchRefusedWhileDiverged(t *testing.T) {
 		t.Errorf("the new main lists %+v", list)
 	}
 }
+
+// An app removed on the subordinate's page while the main lists it: its
+// sync stops first, and what the link held of it goes with its folder. A
+// change on the main meanwhile moves nothing (the deletion of everything the
+// main holds was once pushed, from the old base); the app comes back with
+// the main's next list as a first link, the empty set here taking the
+// main's.
+func TestRemovedAppOnTheSubordinate(t *testing.T) {
+	main := startNode(t, "Desk")
+	sub := startNode(t, "Laptop")
+	v1 := main.write("todo", `{"v":1}`, nil)
+	other := main.writeKey("todo", "other.json", `{"o":1}`, nil)
+	sub.linkTo(main)
+	want := map[string]string{dataKey: v1, "other.json": other}
+	waitFor(t, "the agreed set", func() bool { return maps.Equal(sub.set("todo"), want) && sub.agreedOn("todo", want) })
+
+	if err := sub.hub.RemoveApp("todo"); err != nil {
+		t.Fatal(err)
+	}
+	want["third.json"] = main.writeKey("todo", "third.json", `{"t":1}`, nil)
+	time.Sleep(500 * time.Millisecond)
+	if !maps.Equal(main.set("todo"), want) {
+		t.Fatalf("the main's set %v after the app was removed on the subordinate, want %v", main.set("todo"), want)
+	}
+	if _, ok := sub.apps.Get("todo"); ok {
+		t.Fatal("the removed app is listed again before the main's next list")
+	}
+
+	main.hub.AppsChanged()
+	waitFor(t, "the app back, with the main's set", func() bool { return maps.Equal(sub.set("todo"), want) && sub.agreedOn("todo", want) })
+	if !maps.Equal(main.set("todo"), want) {
+		t.Errorf("the main's set %v, want %v", main.set("todo"), want)
+	}
+}
+
+// An app removed on the subordinate while it waits for a choice: the
+// divergence goes with it, here and on the main, and when the app comes
+// back nothing is asked; the main's set is taken as at a first link.
+func TestRemovedAppWhileDiverged(t *testing.T) {
+	main := startNode(t, "Desk")
+	sub := startNode(t, "Laptop")
+	phone, _, onMain, _ := diverge(t, main, sub)
+	waitFor(t, "the main to know the divergence", func() bool { return phone.hearsDiverged(sub.id.ServerID) })
+
+	if err := sub.hub.RemoveApp("todo"); err != nil {
+		t.Fatal(err)
+	}
+	if d := sub.link.OwnDiverged("todo"); d != nil {
+		t.Errorf("the subordinate still lists its divergence: %+v", d)
+	}
+	waitFor(t, "the main to forget it", func() bool { return len(main.hub.Divergences("todo")) == 0 })
+	waitFor(t, "the main's devices to hear it settled", func() bool { return phone.hearsNoDivergence() })
+
+	main.hub.AppsChanged()
+	waitFor(t, "the app back", func() bool { _, ok := sub.apps.Get("todo"); return ok })
+	if w := sub.device("todo").welcome; len(w.Diverged) != 0 {
+		t.Errorf("the subordinate asks %+v after the app came back", w.Diverged)
+	}
+	waitFor(t, "the main's set here", func() bool { return sub.etag("todo") == onMain })
+	if main.etag("todo") != onMain || len(main.set("todo")) != 1 {
+		t.Errorf("the main's set %v changed", main.set("todo"))
+	}
+}

@@ -96,6 +96,14 @@ type Deps struct {
 	// whether it was the first: false when none waits for a choice. It must
 	// not call back into the hub.
 	ChooseOwn func(app, keep string) bool
+	// RemovingApp, if set, is told that the app is about to be removed,
+	// before anything is, and returns the function RemoveApp calls once the
+	// app is gone, or its removal failed. A subordinate's link stops the
+	// app's sync there, and forgets what it held of the app after: its base
+	// would otherwise make the empty set here look like the deletion of
+	// everything the main holds. It is called with none of the hub's locks
+	// held.
+	RemovingApp func(app string) (done func())
 }
 
 // Errors of TakeOver.
@@ -882,6 +890,13 @@ func (h *Hub) abortDevice(app, device string) {
 // listed is an error wrapping apps.ErrNotFound, and nothing is touched.
 // Server-kind devices stay: they are admitted to every app.
 func (h *Hub) RemoveApp(id string) error {
+	if _, ok := h.d.Apps.Get(id); !ok {
+		return fmt.Errorf("%w: %q", apps.ErrNotFound, id)
+	}
+	if h.d.RemovingApp != nil {
+		done := h.d.RemovingApp(id)
+		defer done() // after the app's lock is released
+	}
 	_, unlock, ok := h.lockListed(id)
 	if !ok {
 		return fmt.Errorf("%w: %q", apps.ErrNotFound, id)
