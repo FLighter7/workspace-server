@@ -7,7 +7,7 @@ How `workspace-server` works, why it was built this way, what limits it has, and
   - the user guide: [guide.md](guide.md);
   - the wire contract with clients: [protocol.md](protocol.md);
   - open work: [TODO.md](TODO.md).
-- **History:** this file condenses the original design (2026-11-07), the Go rewrite plan, its reviews, the Windows checks, the start/stop/delete plan (2026-11-09) and the local hub plan (2026-11-11/12: a subordinate server on the laptop, handing it out to devices, switching the main). The full texts are in git: the spec and plan up to `ad18bef`; the Windows reports in `c925c5e` (mDNS) and `a99ba9e` (server, lock, autostart); the start/stop/delete plan and its check lists in `af855e0`. The local hub plan was a working file outside git: its decisions are L1–L34 below, its limits under "Limits", and what it left open in [TODO.md](TODO.md); its commits run from `9a8cb7e` to `24e3149`. The "Resume" control for an app the write guard stopped, the user's choice of 2026-11-13, is L35. The client package was renamed from `@flighter7/workspace-client` to `@flighter7/wss-client` and set to 1.0.0 on 2026-11-12, before its first publish; nothing a device stores carries the package's name, so no device pairs again.
+- **History:** this file condenses the original design (2026-11-07), the Go rewrite plan, its reviews, the Windows checks, the start/stop/delete plan (2026-11-09) and the local hub plan (2026-11-11/12: a subordinate server on the laptop, handing it out to devices, switching the main). The full texts are in git: the spec and plan up to `ad18bef`; the Windows reports in `c925c5e` (mDNS) and `a99ba9e` (server, lock, autostart); the start/stop/delete plan and its check lists in `af855e0`. The local hub plan was a working file outside git: its decisions are L1–L34 below, its limits under "Limits", and what it left open in [TODO.md](TODO.md); its commits run from `9a8cb7e` to `24e3149`. The "Resume" control for an app the write guard stopped, the user's choice of 2026-11-13, is L35. The client package was renamed from `@flighter7/workspace-client` to `@flighter7/wss-client` and set to 1.0.0 on 2026-11-12, before its first publish; nothing a device stores carries the package's name, so no device pairs again. On 2026-11-13 the user chose to publish it first as a release candidate, `1.0.0-rc.1` (server tag `v1.0.0-rc.1`), and `1.0.0` only after checking that by hand.
 
 ## What it is and what it is not
 
@@ -710,7 +710,7 @@ Each step runs even if an earlier one failed; failures go to stderr (the log may
 - **`.github/workflows/release.yml`:** on a `v*` tag:
   - runs `ci.yml` first, and builds nothing if it fails;
   - runs `node scripts/build.mjs <tag>` in one job, which stops if the page did not build;
-  - in a job of its own with write access, checks `SHA256SUMS` and publishes `dist/*` as a release, a pre-release when the tag has a `-` (`v1.0.0-rc1`).
+  - in a job of its own with write access, checks `SHA256SUMS` and publishes `dist/*` as a release, a pre-release when the tag has a `-` (`v1.0.0-rc.1`).
 
   Without the ldflag the version is `dev`.
 - **The client package in CI:** `ci.yml`'s `client` job runs on `ubuntu-latest`:
@@ -721,9 +721,11 @@ Each step runs even if an earlier one failed; failures go to stderr (the log may
   `release.yml` runs it with the rest of `ci.yml`, so binaries are built only after the package passes.
 - **The web page in CI:** `ci.yml`'s `page` job does the same for `client-wss/`: `pnpm run check` (lint, Prettier, unit tests, typecheck, build), then the e2e against a server built with the page embedded. The Go job never builds the page: `internal/web`'s tests serve a stand-in from `fstest.MapFS`, and read `client-wss/index.html` itself to check it is the template the server fills.
 - **Publishing the package: by the user, by hand.** No workflow and no agent publishes it.
-  1. Set `client/package.json`'s `version` to the server's tag, `1.0.0` for `v1.0.0`.
+  1. Set `client/package.json`'s `version` to the server's tag, `1.0.0` for `v1.0.0`, `1.0.0-rc.1` for `v1.0.0-rc.1`.
   2. Run `pnpm --dir client publish --access public`; add `--tag next` for a pre-release. `prepublishOnly` runs `check` first.
   3. npm asks for 2FA.
+
+  The first release goes out as the release candidate `1.0.0-rc.1` (`v1.0.0-rc.1`), and `1.0.0` follows once the user has checked it by hand ([TODO.md](TODO.md)).
 
   A manual publish has no provenance attestation; that was accepted. The package ships `dist/` and `src/` (so source maps and declaration maps resolve). `prepack` copies the root `LICENSE` in, and `postpack` removes it again.
 - **Docker:** an image for a NAS is a later step. It needs host networking for UDP and mDNS.
@@ -821,7 +823,7 @@ Each entry gives the decision, the reason, and the cost if it is wrong.
 - **C4, a contract change is one commit:** `protocol.md`, the vectors, the server and `client/` change together, and `proto` goes up for any change an old client cannot handle.
 - **C5, publishing is by hand:** the user publishes to npm; no workflow and no agent does. An app tries a change against `link:../workspace-server/client` before it is published.
   - Cost: no provenance attestation on the published package.
-- **C6, the package version is the server's tag** (`1.0.0` for `v1.0.0`), so a package and the server it was tested against are easy to pair up.
+- **C6, the package version is the server's tag** (`1.0.0` for `v1.0.0`, `1.0.0-rc.1` for `v1.0.0-rc.1`), so a package and the server it was tested against are easy to pair up.
 - **C7, a pnpm package of its own, not a workspace:** the root stays a Go module, and Go ignores the folder. `client/.gitattributes` keeps LF, which Prettier needs, whatever `core.autocrlf` says.
 - **C8, licence:** CC BY-NC-ND 4.0 for the whole repository, `LICENSE` at the root. `prepack` copies it into the package.
   - Cost: Creative Commons does not recommend its licences for software, and ND forbids others to distribute changed copies. The author's own apps are not affected.

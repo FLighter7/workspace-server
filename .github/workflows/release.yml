@@ -54,5 +54,5 @@ jobs:
         with:
           files: dist/*
           fail_on_unmatched_files: true
-          # A tag such as v1.0.0-rc1 is a pre-release, not the latest release.
+          # A tag such as v1.0.0-rc.1 is a pre-release, not the latest release.
           prerelease: ${{ contains(github.ref_name, '-') }}

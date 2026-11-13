@@ -4,8 +4,11 @@ Open work, and what is left to check. Remove an item when it is done; add what y
 
 ## Waiting for the user
 
-- **Publish `@flighter7/wss-client` `1.0.0`,** by hand ([architecture.md](architecture.md#packaging-ci-release), "Publishing the package"). No version is on npm yet; this one carries fallback servers and following the main. Then, in this order:
-  - todo moves from `link:../workspace-server/client` to `^1.0.0` and runs its checks (`pnpm test`, `pnpm run lint`, `pnpm run build`, `pnpm run test:e2e`). Until then todo's CI cannot install the link, so its GitHub Pages deploy fails, and the deployed todo is a build from 2026-10-28, from before server sync;
+- **Publish `@flighter7/wss-client`, a release candidate first,** by hand ([architecture.md](architecture.md#packaging-ci-release), "Publishing the package"; the user's decision, 2026-11-13). No version is on npm yet; the first carries fallback servers and following the main. In this order:
+  - publish `1.0.0-rc.1` with `pnpm --dir client publish --access public --tag next`, and tag the server `v1.0.0-rc.1`, which `release.yml` makes a GitHub pre-release;
+  - todo moves from `link:../workspace-server/client` to exactly `1.0.0-rc.1` (a range such as `^1.0.0` does not match a pre-release) and runs its checks (`pnpm test`, `pnpm run lint`, `pnpm run build`, `pnpm run test:e2e`). Until then todo's CI cannot install the link, so its GitHub Pages deploy fails, and the deployed todo is a build from 2026-10-28, from before server sync;
+  - the user checks the release candidate by hand. A bug found meanwhile is fixed and goes out the same way as `1.0.0-rc.2` (tag `v1.0.0-rc.2`, todo on exactly `1.0.0-rc.2`);
+  - publish `1.0.0` without `--tag next`, tag the server `v1.0.0`, and todo moves to `^1.0.0`;
   - both guides drop the "Not available yet" note under "A laptop as a second server".
 
 ## Checks on real machines
@@ -16,7 +19,7 @@ Everything about the local hub (a subordinate, handing it out, switching the mai
 - **The Mac as the laptop:** a foreign network, sleep and wake, the PC's server restarting.
 - **Linking on two machines:** the laptop linked to the PC by a pasted code and by a real camera; "Pair this computer's browser" in Safari and in Chrome; the camera's `BarcodeDetector` path (Chrome on macOS uses it instead of qr-scanner's worker, untested anywhere).
 - **Switching the main on two machines:** a planned switch from each page; a forced one with the PC off, then the PC back on and stepping down by itself; removing a PC gone for good on the laptop's Devices.
-- **Phones through the laptop:** iPhone and Android on the laptop's server through a hotspot; a phone paired with the PC syncing through the laptop while the PC is off, and following the laptop after a switch. These need a todo with fallback servers on the phone: the deployed one after the publish, or a local build behind an HTTPS tunnel.
+- **Phones through the laptop:** iPhone and Android on the laptop's server through a hotspot; a phone paired with the PC syncing through the laptop while the PC is off, and following the laptop after a switch. These need a todo with fallback servers on the phone: the deployed one once todo is on `1.0.0-rc.1`, or a local build behind an HTTPS tunnel.
 - **Clients never tried at all:** Mac Safari and Android (the hub checks above cover both).
 - **todo's screen reader run** (`pnpm run test:sr`, Windows, the machine left alone), not run since the Sync page gained the "Through {name}…" line, the `notMain` reason, and "Server: {name}" after the device follows a new main. No NVDA scenario covers those lines yet: the run catches regressions, and the new lines need a scenario or a listen by hand.
 - **The diagram** (`docs/images/connections*.svg`) was rendered and checked only on Windows (Chromium and WebKit, with glyphs 7% wider standing in for Mac fonts): look at it on GitHub, light and dark theme, and in Safari on the Mac.
