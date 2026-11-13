@@ -2,6 +2,8 @@ package upstream
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
@@ -49,7 +51,16 @@ func TestPushResumeAfterTheBodiesChanged(t *testing.T) {
 	sub.link.setWrapPush(func(r io.Reader, cl *wsclient.Client) io.Reader {
 		switch calls.Add(1) {
 		case 2: // b.bin in the first push
-			return &cutReader{r: r, after: 1 << 20, cut: func() { sub.cutOff(main, true); cl.Close(); close(cut1) }}
+			return &cutReader{r: r, after: 1 << 20, cut: func() {
+				// Cut only once some of b's bytes are in the main's staging
+				// file, whatever the load: then the main stages b in part.
+				if !stagingHolds(main, sub, "b1") {
+					t.Error("no byte of b reached the main's staging")
+				}
+				sub.cutOff(main, true)
+				cl.Close()
+				close(cut1)
+			}}
 		case 3: // a.bin in the second push
 			return &cutReader{r: r, after: 64 << 10, cut: func() { sub.cutOff(main, true); cl.Close(); close(cut2) }}
 		}
@@ -67,7 +78,7 @@ func TestPushResumeAfterTheBodiesChanged(t *testing.T) {
 	put2(nil, nil, a1, b1)
 	<-cut1
 	device := sub.link.snapshot().Device
-	waitFor(t, "the main to stage a whole and b in part", func() bool {
+	waitLong(t, "the main to stage a whole and b in part", func() bool {
 		lk := sub.linkFileOf("todo")
 		if lk.Push == nil {
 			return false
@@ -86,14 +97,45 @@ func TestPushResumeAfterTheBodiesChanged(t *testing.T) {
 	sub.link.NetworkChanged()
 
 	want := map[string]string{"a.bin": ea2, "b.bin": eb2}
-	waitFor(t, "the device's second bodies on the main", func() bool { return maps.Equal(main.set("todo"), want) })
-	waitFor(t, "the agreed set", func() bool { return sub.agreedOn("todo", want) })
+	waitLong(t, "the device's second bodies on the main", func() bool { return maps.Equal(main.set("todo"), want) })
+	waitLong(t, "the agreed set", func() bool { return sub.agreedOn("todo", want) })
 	if !maps.Equal(sub.set("todo"), want) {
 		t.Errorf("the subordinate holds %v, want %v", sub.set("todo"), want)
 	}
 	if sub.logs.has("otherwise than meant") {
 		t.Error("a commit wrote a body other than the one meant")
 	}
+}
+
+// waitLong polls cond as waitFor does, for a minute: for the steps of a test
+// that wait on transfers and reconnects, which a loaded machine slows down.
+func waitLong(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// stagingHolds waits, for a minute at most, until the body file name of the
+// push sub has in flight holds bytes in main's staging folder, and reports
+// whether it does. Safe off the test's goroutine.
+func stagingHolds(main, sub *node, name string) bool {
+	deadline := time.Now().Add(time.Minute)
+	for time.Now().Before(deadline) {
+		var lk appLink
+		if raw, err := sub.store.ReadSide("todo", linkFile); err == nil && json.Unmarshal(raw, &lk) == nil && lk.Push != nil {
+			path := filepath.Join(main.dir, "apps", "todo", ".wss", "staging", hex.EncodeToString([]byte(lk.Push.Tx)), name)
+			if fi, err := os.Stat(path); err == nil && fi.Size() > 0 {
+				return true
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
 }
 
 // reusable keeps a transaction only when every body it staged is recorded at
