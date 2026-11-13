@@ -264,6 +264,12 @@ func (s *server) UnlinkUpstream(ctx context.Context) (bool, error) {
 	return s.link.Unlink(ctx)
 }
 
+// ResumeUpstream resumes an app the write guard stopped, the page's "Resume"
+// button: it syncs with the main again at once, with a fresh count.
+func (s *server) ResumeUpstream(app string) error {
+	return s.link.Resume(app)
+}
+
 // InviteUpstream asks the main, over the link, for a pairing code of its own
 // for a browser on this computer.
 func (s *server) InviteUpstream(ctx context.Context) (string, time.Time, error) {

@@ -83,6 +83,9 @@ type fakeBackend struct {
 	handOvers   []string
 	handOverErr error
 	handedOver  bool
+
+	resumed   []string // the apps resumed, per call
+	resumeErr error
 }
 
 func (f *fakeBackend) record(call string) {
@@ -124,6 +127,18 @@ func (f *fakeBackend) HandOver(ctx context.Context, serverID string) (bool, erro
 		return false, errors.New("no deadline")
 	}
 	return f.handedOver, f.handOverErr
+}
+
+// ResumeUpstream takes app out of the stopped list and lists it as synced,
+// as the link's status then does.
+func (f *fakeBackend) ResumeUpstream(app string) error {
+	f.resumed = append(f.resumed, app)
+	if f.resumeErr != nil {
+		return f.resumeErr
+	}
+	f.upstream.Stopped = slices.DeleteFunc(f.upstream.Stopped, func(id string) bool { return id == app })
+	f.upstream.Apps = append(f.upstream.Apps, app)
+	return nil
 }
 
 func (f *fakeBackend) InviteUpstream(ctx context.Context) (string, time.Time, error) {
@@ -418,6 +433,7 @@ func TestGuardMutatingNeedsHeader(t *testing.T) {
 		{http.MethodPost, "/api/upstream", `{"code":"wsrv1.x"}`},
 		{http.MethodDelete, "/api/upstream", ""},
 		{http.MethodPost, "/api/upstream/invite", ""},
+		{http.MethodPost, "/api/upstream/resume", `{"app":"todo"}`},
 	} {
 		r := request(tc.method, tc.path, tc.body)
 		r.Header.Del("X-Workspace-Server")
@@ -426,7 +442,7 @@ func TestGuardMutatingNeedsHeader(t *testing.T) {
 			t.Errorf("%s %s without the header: status %d, want 403", tc.method, tc.path, w.Code)
 		}
 	}
-	if len(f.configCalls)+len(f.added)+len(f.deleted)+len(f.removed)+len(f.calls)+len(f.dataDirs)+len(f.linkCodes)+f.unlinks+f.invites != 0 || f.issued != 1 {
+	if len(f.configCalls)+len(f.added)+len(f.deleted)+len(f.removed)+len(f.calls)+len(f.dataDirs)+len(f.linkCodes)+f.unlinks+f.invites+len(f.resumed) != 0 || f.issued != 1 {
 		t.Errorf("refused requests reached the backend: %+v", f)
 	}
 }
@@ -475,6 +491,7 @@ func TestGuardOrigin(t *testing.T) {
 		{http.MethodDelete, "/api/server", ""},
 		{http.MethodPut, "/api/config", `{"dataDir":"/x"}`},
 		{http.MethodPost, "/api/upstream", `{"code":"wsrv1.x"}`},
+		{http.MethodPost, "/api/upstream/resume", `{"app":"todo"}`},
 	} {
 		r := request(tc.method, tc.path, tc.body)
 		r.Header.Set("Origin", "https://evil.example")
@@ -483,8 +500,8 @@ func TestGuardOrigin(t *testing.T) {
 		r.Host = "evil.example:47801"
 		wantError(t, serve(h, r), http.StatusForbidden, "forbidden")
 	}
-	if len(f.calls)+len(f.dataDirs) != 0 {
-		t.Errorf("refused requests reached the backend: %v %v", f.calls, f.dataDirs)
+	if len(f.calls)+len(f.dataDirs)+len(f.resumed) != 0 {
+		t.Errorf("refused requests reached the backend: %v %v %v", f.calls, f.dataDirs, f.resumed)
 	}
 }
 
@@ -1360,6 +1377,59 @@ func TestPromoteAndHandOver(t *testing.T) {
 	} {
 		f.handOverErr = tc.err
 		wantError(t, serve(h, request(http.MethodPost, "/api/upstream/hand-over", `{"serverId":"Lp7tOp0123ab"}`)), tc.status, tc.code)
+	}
+}
+
+// POST /api/upstream/resume resumes an app the write guard stopped and
+// answers with the link's status, the app synced again; its refusals map to
+// codes the page tells apart, and a halted link names why it halted.
+func TestResumeUpstream(t *testing.T) {
+	f := newFake()
+	f.upstream = UpstreamStatus{Status: upstream.Status{
+		Linked: true, ServerID: "MainServer01", Name: "Desk", Connected: true,
+		Apps: []string{"notes"}, Stopped: []string{"todo"},
+	}}
+	h := newTestHandler(f)
+
+	w := serve(h, request(http.MethodPost, "/api/upstream/resume", `{"app":"todo"}`))
+	wantStatus(t, w, http.StatusOK)
+	var st upstream.Status
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil || !slices.Equal(st.Apps, []string{"notes", "todo"}) || len(st.Stopped) != 0 {
+		t.Errorf("POST /api/upstream/resume = %s, %v; want todo synced and nothing stopped", w.Body.String(), err)
+	}
+	if !slices.Equal(f.resumed, []string{"todo"}) {
+		t.Errorf("resumed %v, want todo", f.resumed)
+	}
+
+	for _, tc := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{upstream.ErrNotLinked, http.StatusConflict, "notLinked"},
+		{upstream.ErrNotStopped, http.StatusConflict, "notStopped"},
+		{fmt.Errorf("%w: %q", apps.ErrNotFound, "todo"), http.StatusNotFound, "notFound"},
+		{errors.New("disk"), http.StatusInternalServerError, "internal"},
+	} {
+		f.resumeErr = tc.err
+		wantError(t, serve(h, request(http.MethodPost, "/api/upstream/resume", `{"app":"todo"}`)), tc.status, tc.code)
+	}
+
+	f.resumeErr = &upstream.RefusedError{Reason: "badToken", Err: errors.New("removed")}
+	w = serve(h, request(http.MethodPost, "/api/upstream/resume", `{"app":"todo"}`))
+	wantError(t, w, http.StatusBadGateway, "upstream")
+	var body struct{ Reason string }
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body.Reason != "badToken" {
+		t.Errorf("refusal %s, want reason badToken", w.Body.String())
+	}
+
+	// A body that names no valid app id never reaches the backend.
+	calls := len(f.resumed)
+	for _, body := range []string{``, `{}`, `{"app":""}`, `{"app":"To Do"}`, `{"app":"todo","force":true}`} {
+		wantError(t, serve(h, request(http.MethodPost, "/api/upstream/resume", body)), http.StatusBadRequest, "invalid")
+	}
+	if len(f.resumed) != calls {
+		t.Errorf("invalid bodies reached the backend: %v", f.resumed[calls:])
 	}
 }
 

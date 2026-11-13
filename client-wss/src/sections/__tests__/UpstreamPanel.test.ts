@@ -56,6 +56,10 @@ const linked: UpstreamStatus = {
 
 const text = (): string => document.body.textContent ?? '';
 
+/** The Resume button of a stopped app, found by its accessible name. */
+const resumeButton = (app: string): HTMLButtonElement | null =>
+	document.querySelector(`button[aria-label="Resume ${app}"]`);
+
 const button = (label: string, within: ParentNode = document): HTMLButtonElement =>
 	[...within.querySelectorAll('button')].find(
 		(b) => b.textContent?.trim() === label,
@@ -259,9 +263,78 @@ describe('UpstreamPanel on a subordinate', () => {
 		expect(text()).toContain('The main removed this server.');
 		expect(text()).toContain('Stopped apps');
 		expect(text()).toContain('A restart of this server resumes them.');
+		// A halted link syncs nothing, so it resumes nothing either.
+		expect(resumeButton('todo')).toBeNull();
+		expect(text()).not.toContain('“Resume”');
 		// A halted link reaches no main, which alone issues codes.
 		expect(button("Pair this computer's browser")).toBeUndefined();
 		expect(button('Unlink')).toBeDefined();
+	});
+
+	it('resumes an app the write guard stopped, at once and without a question', async () => {
+		upstream.mockResolvedValue({ ...linked, apps: ['notes'], stopped: ['todo', 'work'] });
+		const resume = vi
+			.spyOn(serverApi, 'resume')
+			.mockResolvedValue({ ...linked, apps: ['notes', 'todo'], stopped: ['work'] });
+		mountPage(Page);
+		await settle();
+		expect(text()).toContain('Stopped apps');
+		expect(text()).toContain(
+			'“Resume” syncs an app with the main again at once; a restart of this server resumes them all.',
+		);
+		expect(resumeButton('todo')?.textContent?.trim()).toBe('Resume');
+		expect(resumeButton('work')).not.toBeNull();
+
+		resumeButton('todo')?.focus();
+		resumeButton('todo')?.click();
+		await settle();
+		expect(resume).toHaveBeenCalledWith('todo');
+		expect(document.querySelector('[role="dialog"]')).toBeNull();
+		expect(text()).toContain('todo syncs with the main again.');
+		expect(resumeButton('todo')).toBeNull();
+		expect(resumeButton('work')).not.toBeNull();
+		// The button went with its row.
+		expect(document.activeElement?.id).toBe('upstream-h');
+	});
+
+	it('says that a resumed app syncs once the main is in reach', async () => {
+		upstream.mockResolvedValue({ ...linked, connected: false, stopped: ['todo'] });
+		vi.spyOn(serverApi, 'resume').mockResolvedValue({ ...linked, connected: false });
+		mountPage(Page);
+		await settle();
+		resumeButton('todo')?.click();
+		await settle();
+		expect(text()).toContain('todo syncs with the main again as soon as the main is in reach.');
+		expect(text()).not.toContain('Stopped apps');
+	});
+
+	it('says why a resume failed, and shows the list as it is now', async () => {
+		upstream.mockResolvedValue({ ...linked, stopped: ['todo'] });
+		vi.spyOn(serverApi, 'resume').mockRejectedValue(
+			new ApiError('notStopped', 'the write guard has not stopped this app'),
+		);
+		mountPage(Page);
+		await settle();
+		upstream.mockResolvedValue(linked); // resumed meanwhile, by a restart
+		resumeButton('todo')?.click();
+		await settle();
+		expect(text()).toContain(
+			'That app is not stopped any more. (the write guard has not stopped this app)',
+		);
+		expect(text()).not.toContain('Stopped apps');
+		expect(document.activeElement?.id).toBe('upstream-h');
+	});
+
+	it('names the halt when the link halted before the press', async () => {
+		upstream.mockResolvedValue({ ...linked, stopped: ['todo'] });
+		vi.spyOn(serverApi, 'resume').mockRejectedValue(
+			new ApiError('upstream', 'removed (badToken)', 'badToken'),
+		);
+		mountPage(Page);
+		await settle();
+		resumeButton('todo')?.click();
+		await settle();
+		expect(text()).toContain('The main removed this server. Unlink it;');
 	});
 
 	it('says that a main out of reach is retried', async () => {

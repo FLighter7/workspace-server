@@ -132,7 +132,7 @@ export interface UpstreamStatus {
 	lastSync?: string;
 	/** The apps synced now. */
 	apps: string[];
-	/** The apps the write guard stopped until the server starts again. */
+	/** The apps the write guard stopped until they are resumed or the server starts again. */
 	stopped?: string[];
 	/** The main's devices this server admits. */
 	devices?: number;

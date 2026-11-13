@@ -12,6 +12,17 @@
 	list-style: none;
 }
 
+// Each stopped app with its Resume button beside it.
+.stopped {
+	gap: 0.5rem 1.25rem;
+
+	> li {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+}
+
 .note {
 	margin-block: 0.75rem 0;
 }
@@ -52,9 +63,19 @@
 					<template v-else>{{ t('none') }}</template>
 				</FactItem>
 				<FactItem v-if="stopped.length" :label="t('stoppedApps')">
-					<ul :class="$style.apps">
+					<ul :class="[$style.apps, $style.stopped]">
 						<li v-for="app in stopped" :key="app">
 							<code>{{ app }}</code>
+							<!-- A halted link syncs nothing until the server starts again. -->
+							<VBtn
+								v-if="!upstream.halted"
+								size="small"
+								:aria-label="t('resumeLabel', { app })"
+								:loading="resuming === app"
+								@click="resume(app)"
+							>
+								{{ t('resumeButton') }}
+							</VBtn>
 						</li>
 					</ul>
 				</FactItem>
@@ -62,7 +83,9 @@
 					{{ format.number(upstream.devices ?? 0) }}
 				</FactItem>
 			</FactList>
-			<p v-if="stopped.length" :class="$style.note">{{ t('stoppedAppsText') }}</p>
+			<p v-if="stopped.length" :class="$style.note">
+				{{ t(upstream.halted ? 'stoppedAppsHaltedText' : 'stoppedAppsText') }}
+			</p>
 			<p v-if="upstream.halted" :class="[$style.note, $style.error]">
 				{{ t(haltedKey(upstream.reason)) }}
 			</p>
@@ -142,7 +165,7 @@ import FactList from '@/components/FactList.vue';
 import StateBadge from '@/components/StateBadge.vue';
 import StatusLine from '@/components/StatusLine.vue';
 import { errorMessage, info, type Message } from '@/composables/messages';
-import { haltedKey, upstreamError } from '@/composables/upstream';
+import { haltedKey, resumeError, upstreamError } from '@/composables/upstream';
 import { ask } from '@/composables/useConfirm';
 import { useFormat } from '@/composables/useFormat';
 import { invitedCode } from '@/composables/usePairingCode';
@@ -156,8 +179,9 @@ import InviteDialog from './InviteDialog.vue';
  * The link to an upstream server: this server's main, when it is a
  * subordinate. On a main, linking it by the main's pairing code, pasted or
  * scanned, and the servers it waits for after it took the role of main
- * over; on a subordinate, the link's state, pairing this computer's browser
- * through the main, making this server the main, and unlinking.
+ * over; on a subordinate, the link's state, resuming an app the write guard
+ * stopped, pairing this computer's browser through the main, making this
+ * server the main, and unlinking.
  */
 const { t } = useI18n();
 const format = useFormat();
@@ -168,6 +192,8 @@ const pasted = ref('');
 const scanning = ref(false);
 const linking = ref(false);
 const promoting = ref(false);
+/** The app whose Resume is in flight. */
+const resuming = ref<string | null>(null);
 const inviteOpen = ref(false);
 const heading = useTemplateRef<HTMLElement>('heading');
 
@@ -213,6 +239,32 @@ async function link(code: string): Promise<void> {
 	pasted.value = '';
 	message.value = { key: 'linked', values: { name: upstream.value.name ?? '' } };
 	// The form went with the link: the focus stays in the section.
+	await rescueFocus(heading.value);
+}
+
+/**
+ * "Resume" beside an app the write guard stopped: it syncs with the main
+ * again at once, or once the main is in reach, with a fresh count. No
+ * question: nothing is lost, and a write loop that goes on stops it again.
+ */
+async function resume(app: string): Promise<void> {
+	if (resuming.value !== null) return;
+	resuming.value = app;
+	try {
+		upstream.value = await serverApi.resume(app);
+		message.value = {
+			key: upstream.value.connected ? 'resumed' : 'resumedLater',
+			values: { app },
+		};
+	} catch (error) {
+		// The list in step: the app may have been resumed meanwhile, by a
+		// restart or on another tab.
+		await load();
+		message.value = resumeError(error);
+	} finally {
+		resuming.value = null;
+	}
+	// The button went with its row: the focus stays in the section.
 	await rescueFocus(heading.value);
 }
 

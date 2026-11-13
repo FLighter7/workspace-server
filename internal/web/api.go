@@ -45,6 +45,8 @@ const (
 	codeNotInStep = "notInStep"
 	// codeNotConnected: the server to hand the role to is not connected.
 	codeNotConnected = "notConnected"
+	// codeNotStopped: the write guard has not stopped the app to resume.
+	codeNotStopped = "notStopped"
 )
 
 const (
@@ -541,6 +543,42 @@ func (a *api) handOver(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "server")
 	case errors.Is(err, ErrNotConnected):
 		writeError(w, http.StatusConflict, codeNotConnected, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+	}
+}
+
+// resumeRequest is the body of POST /api/upstream/resume: an app the write
+// guard stopped.
+type resumeRequest struct {
+	App string `json:"app"`
+}
+
+// resumeUpstream resumes an app the write guard stopped and answers with the
+// link's status, which lists the app as synced again. It answers at once:
+// the app syncs with the main right after, or once the main is reachable.
+func (a *api) resumeUpstream(w http.ResponseWriter, r *http.Request) {
+	var req resumeRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if !apps.ValidID(req.App) {
+		writeError(w, http.StatusBadRequest, codeInvalid, fmt.Sprintf("app %q must match ^[a-z0-9-]{1,64}$", req.App))
+		return
+	}
+	err := a.b.ResumeUpstream(req.App)
+	var refused *upstream.RefusedError
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, a.upstream())
+	case errors.Is(err, upstream.ErrNotLinked):
+		writeError(w, http.StatusConflict, codeNotLinked, err.Error())
+	case errors.Is(err, apps.ErrNotFound):
+		notFound(w, "app")
+	case errors.Is(err, upstream.ErrNotStopped):
+		writeError(w, http.StatusConflict, codeNotStopped, err.Error())
+	case errors.As(err, &refused):
+		writeJSON(w, http.StatusBadGateway, refusedBody{Error: codeUpstream, Message: err.Error(), Reason: refused.Reason})
 	default:
 		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
 	}

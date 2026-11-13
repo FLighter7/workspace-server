@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createSocket } from 'node:dgram';
 import { existsSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -58,6 +58,42 @@ export function buildServer(dir: string): string {
 	}
 
 	return binary;
+}
+
+/** Builds the e2e device (`e2e/device`, Go) into `dir`; returns the binary. */
+export function buildDevice(dir: string): string {
+	const binary = join(dir, process.platform === 'win32' ? 'device.exe' : 'device');
+	const build = spawnSync('go', ['build', '-o', binary, './client-wss/e2e/device'], {
+		cwd: REPO,
+		encoding: 'utf8',
+	});
+	if (build.status !== 0) {
+		throw new Error(
+			`go build of the device failed: ${build.error?.message ?? ''}${build.stderr ?? ''}`,
+		);
+	}
+
+	return binary;
+}
+
+/**
+ * Runs the e2e device: it pairs with the main whose code is `code`, then
+ * writes `pushed` documents of todo on the main's subordinate, each once the
+ * main holds the one before, and `extra` more at once. Resolves to the last
+ * document written.
+ */
+export function runDevice(
+	binary: string,
+	code: string,
+	{ pushed, extra }: { pushed: number; extra: number },
+): Promise<{ device: string; last: string }> {
+	const args = ['-code', code, '-pushed', String(pushed), '-extra', String(extra)];
+	return new Promise((resolveRun, reject) => {
+		execFile(binary, args, { encoding: 'utf8' }, (error, stdout, stderr) => {
+			if (error) reject(new Error(`the device failed: ${stderr || error.message}`));
+			else resolveRun(JSON.parse(stdout));
+		});
+	});
 }
 
 /** One server process on its own folder and ports. */

@@ -59,8 +59,8 @@ const (
 // The write guard, a last line of defence against a write loop, as in the
 // client package's engine: one app's pushes to the main are counted over a
 // sliding minute, and a push past MaxPushesPerMinute stops that app's sync
-// until the link starts again (the server starts, or restarts after a reset
-// or a data-folder move).
+// until it is resumed (Resume, the page's button) or the link starts again
+// (the server starts, or restarts after a reset or a data-folder move).
 const (
 	MaxPushesPerMinute = 10
 	pushWindow         = time.Minute
@@ -90,13 +90,14 @@ const (
 // errTooManyWrites: the write guard refused a push.
 var errTooManyWrites = fmt.Errorf("more than %d pushes to the main within a minute (%s)", MaxPushesPerMinute, ReasonTooManyWrites)
 
-// Errors of Pair, Unlink and Invite that are not the main's.
+// Errors of Pair, Unlink, Invite and Resume that are not the main's.
 var (
-	ErrLinked    = errors.New("this server is already linked to an upstream server")
-	ErrNotLinked = errors.New("this server is not linked to an upstream server")
-	ErrBusy      = errors.New("a link to an upstream server is being made or undone")
-	ErrBadCode   = errors.New("this is not a pairing code of a workspace-server")
-	ErrOwnCode   = errors.New("the pairing code is this server's own")
+	ErrLinked     = errors.New("this server is already linked to an upstream server")
+	ErrNotLinked  = errors.New("this server is not linked to an upstream server")
+	ErrBusy       = errors.New("a link to an upstream server is being made or undone")
+	ErrBadCode    = errors.New("this is not a pairing code of a workspace-server")
+	ErrOwnCode    = errors.New("the pairing code is this server's own")
+	ErrNotStopped = errors.New("the write guard has not stopped this app")
 )
 
 // RefusedError is a pairing the upstream server refused or that could not
@@ -175,7 +176,7 @@ type Status struct {
 	LastSync *time.Time `json:"lastSync,omitempty"`
 	Apps     []string   `json:"apps"` // the apps synced now
 	// Stopped lists the apps the write guard stopped, sorted; they do not
-	// sync until the link starts again.
+	// sync until they are resumed or the link starts again.
 	Stopped []string `json:"stopped,omitempty"`
 	// Devices counts the main's devices of apps this server admits: the
 	// registry the main last sent, without the other servers.
@@ -207,9 +208,10 @@ type Link struct {
 	lastSync  *time.Time
 	connects  int // link sessions opened, for tests
 	syncing   []string
-	pushes    map[string][]time.Time // per app, its pushes within the guard's window
-	stopped   map[string]bool        // the apps the write guard stopped
-	up        map[string]*string     // per app, the main's etag as last heard
+	pushes    map[string][]time.Time   // per app, its pushes within the guard's window
+	stopped   map[string]bool          // the apps the write guard stopped
+	resumes   map[string]chan struct{} // per app, poked by Resume; a stopped app's worker waits on it
+	up        map[string]*string       // per app, the main's etag as last heard
 	cancel    context.CancelFunc
 	closed    bool
 
@@ -261,7 +263,8 @@ func Open(d Deps) (*Link, error) {
 	return &Link{
 		d: d, st: st, fam: fam, kick: make(chan struct{}, 1), watchKick: make(chan struct{}, 1),
 		announce: make(chan struct{}, 1), invites: make(chan inviteReq),
-		pushes: map[string][]time.Time{}, stopped: map[string]bool{}, up: map[string]*string{}, local: map[string]chan struct{}{},
+		pushes: map[string][]time.Time{}, stopped: map[string]bool{}, resumes: map[string]chan struct{}{},
+		up: map[string]*string{}, local: map[string]chan struct{}{},
 	}, nil
 }
 
@@ -625,6 +628,60 @@ func (l *Link) Invite(ctx context.Context) (wsclient.Invitation, error) {
 
 func errUnreachable() error {
 	return &RefusedError{Reason: ReasonUnreachable, Err: errors.New("the main is out of reach now, and only it issues pairing codes")}
+}
+
+// Resume undoes the write guard's stop of app: the guard forgets the app's
+// pushes within its minute, so the app has MaxPushesPerMinute again, and the
+// app syncs with the main at once, by the sync rule, over a new session;
+// while the main is out of reach, it syncs once the link reconnects. The
+// guard itself stays as it is: a write loop that goes on stops the app again.
+// Other apps are left alone.
+//
+// A server that is not linked is ErrNotLinked. An app the guard has not
+// stopped is ErrNotStopped, or an error wrapping apps.ErrNotFound when this
+// server does not serve it. A halted link syncs nothing until the server
+// starts again, so it resumes nothing: a *RefusedError naming why it halted.
+func (l *Link) Resume(app string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	switch {
+	case l.st == nil:
+		return ErrNotLinked
+	case !l.stopped[app]:
+		if l.d.Apps != nil {
+			if _, ok := l.d.Apps.Get(app); !ok {
+				return fmt.Errorf("%w: %q", apps.ErrNotFound, app)
+			}
+		}
+		return ErrNotStopped
+	case l.halted:
+		return &RefusedError{Reason: l.reason, Err: errors.New(l.lastErr)}
+	}
+	delete(l.stopped, app)
+	delete(l.pushes, app)
+	poke(l.resumeSignalLocked(app))
+	when := "now"
+	if !l.connected {
+		when = "once the main is reachable"
+	}
+	l.d.Logf("app %q: resumed after the write guard stopped it; its count of pushes starts again, and it syncs with the main %s", app, when)
+	return nil
+}
+
+// resumeSignal returns the channel Resume pokes for app, creating it.
+func (l *Link) resumeSignal(app string) chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.resumeSignalLocked(app)
+}
+
+func (l *Link) resumeSignalLocked(app string) chan struct{} {
+	ch := l.resumes[app]
+	if ch == nil {
+		ch = make(chan struct{}, 1)
+		l.resumes[app] = ch
+	}
+	return ch
 }
 
 // invite asks the main for a pairing code over its link session cl, and
@@ -1004,29 +1061,49 @@ func (l *Link) adopt(list []wsclient.App) []string {
 
 // worker keeps app's session to the main up and syncs over it until ctx
 // ends. A failure that stops the whole link goes to fatal. An app the write
-// guard stopped does not run until the link starts again.
+// guard stopped has no session to the main: its worker waits until the app
+// is resumed (Resume), and then opens one, whose welcome syncs it at once.
+// A new link clears the guard (startLocked), so a restart resumes it too.
 func (l *Link) worker(ctx context.Context, app string, fatal chan<- error) {
-	if l.isStopped(app) {
-		return
+	resumed := l.resumeSignal(app)
+	for {
+		// Checked again after every signal: one left over from a resume
+		// that found no worker waiting must not end a later stop.
+		for l.isStopped(app) {
+			select {
+			case <-resumed:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if !l.syncApp(ctx, app, fatal) {
+			return
+		}
 	}
+}
+
+// syncApp keeps app's session to the main up, reconnecting after a backoff,
+// and reports true when the write guard stopped app, false when ctx ended
+// or the link failed for good.
+func (l *Link) syncApp(ctx context.Context, app string, fatal chan<- error) bool {
 	delay := l.d.MinBackoff
 	last := ""
 	for {
 		started := time.Now()
 		err := l.appSession(ctx, app)
 		if ctx.Err() != nil {
-			return
+			return false
 		}
 		if errors.Is(err, errTooManyWrites) {
 			l.stop(app)
-			return
+			return true
 		}
 		if halts(err) && !wsclient.HasCode(err, "unknownApp") {
 			select {
 			case fatal <- err:
 			default:
 			}
-			return
+			return false
 		}
 		if msg := err.Error(); msg != last {
 			last = msg
@@ -1040,7 +1117,7 @@ func (l *Link) worker(ctx context.Context, app string, fatal chan<- error) {
 		case <-t.C:
 		case <-ctx.Done():
 			t.Stop()
-			return
+			return false
 		}
 		delay = min(2*delay, l.d.MaxBackoff)
 	}
@@ -1243,7 +1320,7 @@ func (l *Link) stop(app string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.stopped[app] = true
-	l.d.Logf("app %q: stopped syncing with the main until this server starts again: %v. The documents on both sides stay as they are", app, errTooManyWrites)
+	l.d.Logf("app %q: stopped syncing with the main until it is resumed on this server's page or this server starts again: %v. The documents on both sides stay as they are", app, errTooManyWrites)
 }
 
 func (l *Link) isStopped(app string) bool {

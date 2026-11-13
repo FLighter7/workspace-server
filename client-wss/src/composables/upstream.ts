@@ -17,7 +17,7 @@ const REASON_KEYS: Record<string, MessageKey> = {
 	badToken: 'haltedRemoved',
 };
 
-/** The page API's own refusals of linking, unlinking and invite. */
+/** The page API's own refusals of linking, unlinking, invite and resuming. */
 const CODE_KEYS: Record<string, MessageKey> = {
 	invalid: 'linkInvalidCode',
 	exists: 'linkExists',
@@ -26,6 +26,7 @@ const CODE_KEYS: Record<string, MessageKey> = {
 	hasSubordinates: 'linkHasSubordinates',
 	notInStep: 'promoteNotInStep',
 	notConnected: 'handOverNotConnected',
+	notStopped: 'resumeNotStopped',
 };
 
 /**
@@ -46,6 +47,18 @@ export function upstreamError(
 	}
 
 	return errorMessage(error);
+}
+
+/**
+ * An error of resuming an app as a message. The server refuses on a halted
+ * link with the reason it halted, which then says what to do about the link.
+ */
+export function resumeError(error: unknown): Message {
+	if (error instanceof ApiError && error.code === 'upstream') {
+		return { key: haltedKey(error.reason), detail: error.message, error: true };
+	}
+
+	return upstreamError(error);
 }
 
 /** What a halted link's reason means for the user, and what to do. */

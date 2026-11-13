@@ -164,7 +164,7 @@ Devices pair only with the main, the laptop's own browser too. On the laptop's p
 
 ### Keeping an eye on it
 
-- The laptop's **Upstream server** shows the main, whether it is connected, when it was linked, the last sync and the apps synced. If an app writes to the main too often within a minute, it stops syncing with the main, to protect the saved versions on both servers; the section lists it, its devices still sync with the laptop, and a restart of the laptop's server resumes it.
+- The laptop's **Upstream server** shows the main, whether it is connected, when it was linked, the last sync and the apps synced. If an app writes to the main too often within a minute, it stops syncing with the main, to protect the saved versions on both servers; the section lists it, and its devices still sync with the laptop. Press **Resume** beside it to sync it with the main again at once; a restart of the laptop's server resumes it too. If the app keeps writing that often, it stops again.
 - The main's **Devices** lists the laptop's server under **Linked servers**, with its addresses. **Remove** there stops it syncing with the main; its data stays on the laptop.
 - **Unlink** on the laptop's page makes it a main again. Nothing is deleted on either side, and the main's devices no longer sync through the laptop. If the main cannot be reached at that moment, the page says so: remove the laptop on the main's page later.
 

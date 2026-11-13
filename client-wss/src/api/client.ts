@@ -111,4 +111,6 @@ export const serverApi = {
 	/** Asks the subordinate serverId to take the role of main over. */
 	handOver: (serverId: string) =>
 		request<HandedOver>('POST', '/api/upstream/hand-over', { serverId }),
+	/** Resumes an app the write guard stopped; answers with the link, the app synced again. */
+	resume: (app: string) => request<UpstreamStatus>('POST', '/api/upstream/resume', { app }),
 };

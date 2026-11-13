@@ -204,6 +204,12 @@ type Backend interface {
 	// errors wrap ErrNotMain, ErrNoSuchServer or ErrNotConnected, or are
 	// internal.
 	HandOver(ctx context.Context, serverID string) (done bool, err error)
+	// ResumeUpstream resumes an app the write guard stopped: its count of
+	// pushes starts again, and it syncs with the main at once, or once the
+	// main is reachable. It does not wait for the main. Its errors wrap
+	// upstream.ErrNotLinked, ErrNotStopped or apps.ErrNotFound, or are an
+	// *upstream.RefusedError (a halted link), or are internal.
+	ResumeUpstream(app string) error
 }
 
 //go:embed all:ui
@@ -255,6 +261,7 @@ func newHandler(b Backend, port func() int, now func() time.Time, ui fs.FS) http
 	mux.HandleFunc("POST /api/upstream/invite", a.inviteUpstream)
 	mux.HandleFunc("POST /api/upstream/promote", a.promoteUpstream)
 	mux.HandleFunc("POST /api/upstream/hand-over", a.handOver)
+	mux.HandleFunc("POST /api/upstream/resume", a.resumeUpstream)
 	return guard(port, jsonErrors(mux))
 }
 

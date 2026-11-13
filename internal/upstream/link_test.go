@@ -842,14 +842,10 @@ func TestWriteGuardStopsTheApp(t *testing.T) {
 	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v0) })
 	tab := sub.device("todo")
 
-	prev := v0
-	for i := 1; i <= MaxPushesPerMinute; i++ {
-		prev = tab.put(t, &prev, fmt.Sprintf(`{"n":%d}`, i))
-		waitFor(t, fmt.Sprintf("push %d", i), func() bool { return main.etag("todo") == prev })
+	pushed, over := tripGuard(t, main, sub, tab, v0)
+	if st := sub.link.Status(); !slices.Equal(st.Stopped, []string{"todo"}) {
+		t.Errorf("stopped %v, want todo", st.Stopped)
 	}
-	pushed := prev
-	over := tab.put(t, &prev, `{"n":"over"}`)
-	waitFor(t, "the guard to stop todo", func() bool { return slices.Equal(sub.link.Status().Stopped, []string{"todo"}) })
 	waitFor(t, "todo's session to the main to end", func() bool {
 		return !slices.ContainsFunc(main.hub.Sessions(), func(si hub.SessionInfo) bool { return si.App == "todo" })
 	})
@@ -868,6 +864,167 @@ func TestWriteGuardStopsTheApp(t *testing.T) {
 	waitFor(t, "notes to go on syncing", func() bool { return sub.etag("notes") == notes })
 	if sub.etag("todo") != over {
 		t.Error("a stopped app pulled the main's document")
+	}
+}
+
+// tripGuard has tab, a device of todo on sub, write until the write guard
+// stops todo: MaxPushesPerMinute documents, each pushed to main, then one
+// more. It returns the last document pushed and the one the guard held
+// back, which stays on sub.
+func tripGuard(t *testing.T, main, sub *node, tab *device, from string) (pushed, over string) {
+	t.Helper()
+	prev := from
+	for i := 1; i <= MaxPushesPerMinute; i++ {
+		prev = tab.put(t, &prev, fmt.Sprintf(`{"n":%d}`, i))
+		waitFor(t, fmt.Sprintf("push %d", i), func() bool { return main.etag("todo") == prev })
+	}
+	over = tab.put(t, &prev, `{"n":"over"}`)
+	waitFor(t, "the guard to stop todo", func() bool { return slices.Contains(sub.link.Status().Stopped, "todo") })
+	return prev, over
+}
+
+// pushCount is how many pushes of app the guard counts in its minute now.
+func (l *Link) pushCount(app string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.pushes[app])
+}
+
+// Resume: an app the write guard stopped syncs with the main at once, by the
+// sync rule (only the subordinate moved, so its document is pushed), over a
+// new session, with a fresh count: the push at the resume and nine more go
+// through, and the next stops it again, since the guard stays. Another app
+// goes on all along, its count untouched. A restart still resumes too.
+func TestResumeAfterTheWriteGuard(t *testing.T) {
+	main := startNode(t, "Desk")
+	sub := startNode(t, "Laptop")
+	if err := main.apps.Add(apps.App{ID: "notes", Name: "Notes"}); err != nil {
+		t.Fatal(err)
+	}
+	v0 := main.write("todo", `{"n":0}`, nil)
+	n0 := main.write("notes", `{"notes":0}`, nil)
+	sub.linkTo(main)
+	waitFor(t, "the agreed etags", func() bool { return sub.agreed("todo", v0) && sub.agreed("notes", n0) })
+	tab, pad := sub.device("todo"), sub.device("notes")
+
+	// notes pushes three times: a count of its own, which todo's stop and
+	// resume leave alone.
+	notes := n0
+	for i := 1; i <= 3; i++ {
+		notes = pad.put(t, &notes, fmt.Sprintf(`{"notes":%d}`, i))
+		waitFor(t, fmt.Sprintf("notes push %d", i), func() bool { return main.etag("notes") == notes })
+	}
+
+	pushed, over := tripGuard(t, main, sub, tab, v0)
+	if main.etag("todo") != pushed {
+		t.Fatalf("the main's todo is %s, want %s", main.etag("todo"), pushed)
+	}
+
+	if err := sub.link.Resume("todo"); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if st := sub.link.Status(); len(st.Stopped) != 0 || !slices.Equal(st.Apps, []string{"notes", "todo"}) {
+		t.Errorf("status after resume: apps %v, stopped %v; want both synced, none stopped", st.Apps, st.Stopped)
+	}
+	waitFor(t, "the held-back document to reach the main at once", func() bool { return main.etag("todo") == over })
+	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", over) })
+	if !sub.logs.has(`app "todo": resumed after the write guard stopped it`) || !sub.logs.has("syncs with the main now") {
+		t.Error("the resume was not logged")
+	}
+	if n := sub.link.pushCount("notes"); n != 3 {
+		t.Errorf("notes' count is %d after todo's resume, want 3", n)
+	}
+
+	// A fresh count: the push at the resume was the first of ten.
+	prev := over
+	for i := 2; i <= MaxPushesPerMinute; i++ {
+		prev = tab.put(t, &prev, fmt.Sprintf(`{"n":"again %d"}`, i))
+		waitFor(t, fmt.Sprintf("push %d after the resume", i), func() bool { return main.etag("todo") == prev })
+	}
+	if st := sub.link.Status(); len(st.Stopped) != 0 {
+		t.Fatalf("stopped %v after ten pushes since the resume", st.Stopped)
+	}
+	again := tab.put(t, &prev, `{"n":"over again"}`)
+	waitFor(t, "the guard to stop todo again", func() bool { return slices.Equal(sub.link.Status().Stopped, []string{"todo"}) })
+	if main.etag("todo") != prev {
+		t.Errorf("the main's todo is %s, want %s: the push past the limit went through", main.etag("todo"), prev)
+	}
+
+	// notes synced all along.
+	notes = main.write("notes", `{"notes":"main"}`, &notes)
+	waitFor(t, "notes to go on syncing", func() bool { return sub.etag("notes") == notes })
+
+	// A restart resumes, as it always did.
+	sub.restart()
+	waitFor(t, "the restart to resume todo", func() bool { return main.etag("todo") == again })
+	if st := sub.link.Status(); len(st.Stopped) != 0 {
+		t.Errorf("stopped %v after a restart", st.Stopped)
+	}
+}
+
+// A resume while the main is out of reach takes effect at once, and the app
+// syncs as soon as the link is back.
+func TestResumeWhileTheMainIsAway(t *testing.T) {
+	main := startNode(t, "Desk")
+	sub := startNode(t, "Laptop")
+	v0 := main.write("todo", `{"n":0}`, nil)
+	sub.linkTo(main)
+	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v0) })
+	tab := sub.device("todo")
+	pushed, over := tripGuard(t, main, sub, tab, v0)
+
+	if err := main.l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the link to notice", func() bool { return !sub.link.Status().Connected })
+	if err := sub.link.Resume("todo"); err != nil {
+		t.Fatalf("resume with the main away: %v", err)
+	}
+	if st := sub.link.Status(); len(st.Stopped) != 0 {
+		t.Errorf("stopped %v after the resume", st.Stopped)
+	}
+	if !sub.logs.has("syncs with the main once the main is reachable") {
+		t.Error("the log does not say the app syncs once the main is reachable")
+	}
+	if main.etag("todo") != pushed {
+		t.Fatal("the main's document changed while it was away")
+	}
+	main.listen()
+	waitFor(t, "the push once the main is back", func() bool { return main.etag("todo") == over })
+}
+
+// Resume refuses a server that is not linked, an app that is not stopped or
+// not served here, and, changing nothing, a halted link.
+func TestResumeRefusals(t *testing.T) {
+	main := startNode(t, "Desk")
+	sub := startNode(t, "Laptop")
+	if err := sub.link.Resume("todo"); !errors.Is(err, ErrNotLinked) {
+		t.Errorf("resume before linking: %v, want ErrNotLinked", err)
+	}
+	v0 := main.write("todo", `{"n":0}`, nil)
+	sub.linkTo(main)
+	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v0) })
+	if err := sub.link.Resume("todo"); !errors.Is(err, ErrNotStopped) {
+		t.Errorf("resume of an app that syncs: %v, want ErrNotStopped", err)
+	}
+	if err := sub.link.Resume("nope"); !errors.Is(err, apps.ErrNotFound) {
+		t.Errorf("resume of an app not served here: %v, want apps.ErrNotFound", err)
+	}
+
+	tab := sub.device("todo")
+	tripGuard(t, main, sub, tab, v0)
+	for _, d := range main.devices.List() {
+		if d.IsServer() {
+			main.hub.RemoveDevice(d.ID)
+		}
+	}
+	waitFor(t, "the link to halt", func() bool { return sub.link.Status().Halted })
+	var re *RefusedError
+	if err := sub.link.Resume("todo"); !errors.As(err, &re) || re.Reason != "badToken" {
+		t.Errorf("resume on a halted link: %v, want a refusal for badToken", err)
+	}
+	if st := sub.link.Status(); !slices.Equal(st.Stopped, []string{"todo"}) {
+		t.Errorf("stopped %v after a refused resume, want todo still", st.Stopped)
 	}
 }
 
