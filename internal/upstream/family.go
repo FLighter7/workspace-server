@@ -353,6 +353,7 @@ func (l *Link) Promote(ctx context.Context, force bool) (followed bool, err erro
 	l.connected, l.halted, l.reason, l.lastErr, l.lastSync = false, false, "", "", nil
 	l.syncing = nil
 	clear(l.stopped)
+	clear(l.failing)
 	clear(l.pushes)
 	clear(l.up)
 	l.mu.Unlock()

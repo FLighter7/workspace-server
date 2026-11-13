@@ -311,10 +311,20 @@ func TestPushesGoOnWhenAPullIsRefused(t *testing.T) {
 	sub.openLink()
 
 	waitFor(t, "this server's change on the main", func() bool { return main.etagOf("todo", "a.md") == a })
-	waitFor(t, "the refused pull to be logged", func() bool { return sub.logs.has("quota") })
+	waitFor(t, "the status to show the app held by the quota", func() bool { return sub.link.Status().Failing["todo"] == reasonQuota })
 	if sub.etagOf("todo", "big.bin") != "" {
 		t.Error("the pull past the quota went through")
 	}
+	// Said once, with what to do, however often it is tried again.
+	time.Sleep(time.Second)
+	if n := sub.logs.count("past the app's quota"); n != 1 {
+		t.Errorf("the quota was logged %d times, want once", n)
+	}
+
+	// Once the documents fit, the pull goes through and the status clears.
+	sub.quota.Store(0)
+	waitFor(t, "the pull", func() bool { return sub.etagOf("todo", "big.bin") != "" })
+	waitFor(t, "the status to clear", func() bool { return len(sub.link.Status().Failing) == 0 })
 }
 
 // An app the main stops serving forgets its base only once its worker has

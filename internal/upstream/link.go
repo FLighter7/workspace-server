@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -199,6 +200,10 @@ type Status struct {
 	// Stopped lists the apps the write guard stopped, sorted; they do not
 	// sync until they are resumed or the link starts again.
 	Stopped []string `json:"stopped,omitempty"`
+	// Failing names, per app, why its sync with the main keeps failing and
+	// is tried again after each wait, until it succeeds: "quota" when the
+	// documents would take this server or the main past the app's quota.
+	Failing map[string]string `json:"failing,omitempty"`
 	// Devices counts the main's devices of apps this server admits: the
 	// registry the main last sent, without the other servers.
 	Devices int `json:"devices,omitempty"`
@@ -231,6 +236,7 @@ type Link struct {
 	syncing   []string
 	pushes    map[string][]time.Time   // per app, its pushes within the guard's window
 	stopped   map[string]bool          // the apps the write guard stopped
+	failing   map[string]string        // per app, why its sync keeps failing (Status.Failing)
 	resumes   map[string]chan struct{} // per app, poked by Resume; a stopped app's worker waits on it
 	up        map[string]*string       // per app, the main's revision as last heard
 	links     map[string]*appLink      // per app, link.json as last read or written
@@ -313,7 +319,7 @@ func Open(d Deps) (*Link, error) {
 	return &Link{
 		d: d, st: st, fam: fam, kick: make(chan struct{}, 1), watchKick: make(chan struct{}, 1),
 		announce: make(chan struct{}, 1), invites: make(chan inviteReq),
-		pushes: map[string][]time.Time{}, stopped: map[string]bool{}, resumes: map[string]chan struct{}{},
+		pushes: map[string][]time.Time{}, stopped: map[string]bool{}, failing: map[string]string{}, resumes: map[string]chan struct{}{},
 		up: map[string]*string{}, links: map[string]*appLink{}, hidden: map[string][2]*string{}, local: map[string]chan struct{}{},
 		divs: map[string]*divergence{}, divTell: make(chan struct{}, 1),
 		running: map[string]*appWorker{}, removing: map[string]bool{}, relist: make(chan struct{}, 1),
@@ -350,6 +356,7 @@ func (l *Link) startLocked() {
 	l.cancel = cancel
 	l.halted, l.reason = false, ""
 	clear(l.stopped)
+	clear(l.failing)
 	clear(l.pushes)
 	select { // a change before the link ran asks for nothing
 	case <-l.kick:
@@ -455,6 +462,9 @@ func (l *Link) status() Status {
 		st.Stopped = append(st.Stopped, id)
 	}
 	slices.Sort(st.Stopped)
+	if len(l.failing) > 0 {
+		st.Failing = maps.Clone(l.failing)
+	}
 	return st
 }
 
@@ -609,6 +619,7 @@ func (l *Link) Unlink(ctx context.Context) (forgotten bool, err error) {
 	l.connected, l.halted, l.reason, l.lastErr, l.lastSync = false, false, "", "", nil
 	l.syncing = nil
 	clear(l.stopped)
+	clear(l.failing)
 	clear(l.pushes)
 	clear(l.up)
 	l.mu.Unlock()
@@ -1242,6 +1253,7 @@ func (l *Link) AppRemoving(app string) (done func()) {
 		delete(l.up, app)
 		delete(l.hidden, app)
 		delete(l.stopped, app)
+		delete(l.failing, app)
 		delete(l.pushes, app)
 		l.mu.Unlock()
 		l.divMu.Lock()
@@ -1298,11 +1310,16 @@ func (l *Link) syncApp(ctx context.Context, app string, fatal chan<- error) bool
 			return false
 		}
 		if errors.Is(err, errTooManyWrites) {
+			l.setFailing(app, "")
 			l.stop(app)
 			return true
 		}
 		if errors.Is(err, errPaused) {
+			l.setFailing(app, "")
 			return true // the worker waits for a device's choice
+		}
+		if quotaRefused(err) {
+			l.failedOnQuota(app, err)
 		}
 		if halts(err) && !wsclient.HasCode(err, "unknownApp") {
 			select {
@@ -1360,6 +1377,7 @@ func (l *Link) appSession(ctx context.Context, app string) error {
 	main := mainRef{ServerID: st.ServerID, Name: st.Name}
 	up, err := l.sync(ctx, cl, app, main, w.Revision)
 	for err == nil {
+		l.setFailing(app, "")
 		l.setUp(app, up)
 		select {
 		case rev := <-changed:
@@ -1445,6 +1463,49 @@ func (l *Link) comparable(app string, up *string) *string {
 		return h[1]
 	}
 	return up
+}
+
+// reasonQuota is Status.Failing's reason for an app whose documents would
+// take this server or the main past the app's quota.
+const reasonQuota = "quota"
+
+// quotaRefused reports whether err is a write refused by a quota: a pull
+// here (store.ErrQuota) or a push on the main (the code quota).
+func quotaRefused(err error) bool {
+	return errors.Is(err, store.ErrQuota) || wsclient.HasCode(err, "quota")
+}
+
+// setFailing records why app's sync keeps failing; "" when it does not.
+func (l *Link) setFailing(app, reason string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if reason == "" {
+		delete(l.failing, app)
+		return
+	}
+	l.failing[app] = reason
+}
+
+// failedOnQuota records that a quota refused app's sync, and says once what
+// to do about it: the sync is tried again after each wait, and goes through
+// once the documents fit.
+func (l *Link) failedOnQuota(app string, err error) {
+	l.mu.Lock()
+	known := l.failing[app] == reasonQuota
+	l.failing[app] = reasonQuota
+	l.mu.Unlock()
+	if known {
+		return
+	}
+	where := "this server"
+	if !errors.Is(err, store.ErrQuota) {
+		where = "the main"
+	}
+	quota := int64(0)
+	if a, ok := l.d.Apps.Get(app); ok {
+		quota = a.Quota
+	}
+	l.d.Logf("app %q: its documents would take %s past the app's quota of %d bytes, so its sync with the main is held and tried again after each wait; raise the app's quota on the main's page, or remove documents on a device", app, where, quota)
 }
 
 // stop records that the write guard stopped app.
