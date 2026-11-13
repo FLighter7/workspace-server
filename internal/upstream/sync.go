@@ -175,11 +175,14 @@ func (l *Link) saveLink(app string, a *appLink) error {
 	if err != nil {
 		return err
 	}
+	// The file first: whoever reads the state kept in memory finds it on
+	// disk too. Kept even when the save fails, as what the link goes on with.
+	werr := l.d.Store.WriteSide(app, linkFile, append(data, '\n'))
 	l.mu.Lock()
 	l.links[app] = a.clone()
 	l.mu.Unlock()
-	if err := l.d.Store.WriteSide(app, linkFile, append(data, '\n')); err != nil {
-		return fmt.Errorf("save %s of %q: %w", linkFile, app, err)
+	if werr != nil {
+		return fmt.Errorf("save %s of %q: %w", linkFile, app, werr)
 	}
 	return nil
 }
@@ -361,11 +364,21 @@ func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app, mainID string
 		}
 		l.setComparable(app, up, mainSet, len(main.Docs))
 
-		base := effectiveBase(lk, hereSet, mainSet)
+		pushGone, pullGone, err := l.recordsGone(ctx, cl, app, lk)
+		if err != nil {
+			return up, err
+		}
+		base := effectiveBase(lk, hereSet, mainSet, pushGone, pullGone)
 		p := compare(base, hereSet, mainSet)
 		if len(p.diverged) > 0 {
 			l.logDivergence(app, lk, p, hereSet, mainSet)
 			p = diverge(p, hereSet, mainSet)
+		}
+		// A transaction this plan does not write through is superseded (a
+		// divergence dropped the pushes, say): it goes, with its record,
+		// which would otherwise outlive the plan and later pass for a base.
+		if err := l.dropSuperseded(ctx, cl, app, lk, p); err != nil {
+			return up, err
 		}
 		if len(p.pulls) == 0 && len(p.pushes) == 0 {
 			l.abortPending(ctx, cl, app, lk)
@@ -413,16 +426,19 @@ func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app, mainID string
 }
 
 // effectiveBase is lk's base, with what a transaction lk still records shows
-// to have landed on the side it writes: a document that side holds at the
-// etag the transaction puts, or lacks when the transaction deletes it, has
-// that as its base. A commit whose base was not saved after it (a crash, a
-// save that failed) then leaves nothing that looks changed on both sides,
-// which would be a divergence. A record of a transaction that never
-// committed changes nothing this way that the two do not already agree on.
-func effectiveBase(lk *appLink, here, main map[string]string) map[string]string {
+// to have landed on the side it writes, when that transaction is gone there
+// (pushGone, pullGone: it committed, or never staged anything): a document
+// that side holds at the etag the transaction puts, or lacks when the
+// transaction deletes it, has that as its base. A commit whose base was not
+// saved after it (a crash, a save that failed) then leaves nothing that
+// looks changed on both sides, which would be a divergence. A transaction
+// still open there never committed, so its record says nothing of what
+// landed, and is not used: a side that came back to the etag it names would
+// otherwise hide a real divergence.
+func effectiveBase(lk *appLink, here, main map[string]string, pushGone, pullGone bool) map[string]string {
 	base := maps.Clone(lk.Base)
-	apply := func(p *pendingTx, side map[string]string) {
-		if p == nil {
+	apply := func(p *pendingTx, side map[string]string, gone bool) {
+		if p == nil || !gone {
 			return
 		}
 		for ks, etag := range p.Etags {
@@ -439,9 +455,51 @@ func effectiveBase(lk *appLink, here, main map[string]string) map[string]string 
 			}
 		}
 	}
-	apply(lk.Push, main)
-	apply(lk.Pull, here)
+	apply(lk.Push, main, pushGone)
+	apply(lk.Pull, here, pullGone)
 	return base
+}
+
+// recordsGone reports, for each transaction lk records, whether it is gone
+// on the side it writes: a begin of its id there finds nothing staged, as
+// after its commit. A begin of an id the side no longer knows opens it again,
+// empty, which a later push or pull then takes up.
+func (l *Link) recordsGone(ctx context.Context, cl *wsclient.Client, app string, lk *appLink) (pushGone, pullGone bool, err error) {
+	if lk.Push != nil {
+		b, err := cl.Begin(ctx, lk.Push.Tx)
+		if err != nil {
+			return false, false, refused(err)
+		}
+		pushGone = len(b.Staged) == 0
+	}
+	if lk.Pull != nil {
+		_, staged, err := l.d.Writer.BeginLink(app, lk.Pull.Tx)
+		if err != nil {
+			return false, false, err
+		}
+		pullGone = len(staged) == 0
+	}
+	return pushGone, pullGone, nil
+}
+
+// dropSuperseded aborts the transaction lk records on a side p writes
+// nothing to, and forgets its record.
+func (l *Link) dropSuperseded(ctx context.Context, cl *wsclient.Client, app string, lk *appLink, p plan) error {
+	dropped := false
+	if lk.Push != nil && len(p.pushes) == 0 {
+		_ = cl.Abort(ctx, lk.Push.Tx)
+		lk.Push, dropped = nil, true
+	}
+	if lk.Pull != nil && len(p.pulls) == 0 {
+		if tx, _, err := l.d.Writer.BeginLink(app, lk.Pull.Tx); err == nil {
+			_ = tx.Abort()
+		}
+		lk.Pull, dropped = nil, true
+	}
+	if !dropped {
+		return nil
+	}
+	return l.saveLink(app, lk)
 }
 
 // setOf returns a store listing's documents as etags by key.
@@ -649,7 +707,16 @@ func (l *Link) beginPull(app string, lk *appLink, cs []change) (*hub.LinkTx, map
 		if err != nil {
 			return nil, nil, err
 		}
-		if keep := reusable(staged, lk.Pull.Etags, cs, targets); keep != nil {
+		if keep, restage, ok := reusable(staged, lk.Pull.Etags, cs, targets); ok {
+			// A body staged for another etag goes first (a delete in its
+			// place, at once here); only then does the record name the new
+			// etag, which the body is then put under from 0.
+			for _, ks := range restage {
+				k, _ := store.ParseKey(ks)
+				if err := tx.Delete(k, changeOf(cs, ks).from); err != nil {
+					return nil, nil, fmt.Errorf("drop the body staged for %s: %w", ks, err)
+				}
+			}
 			lk.Pull.Etags, lk.Pull.Gone = targets, gone
 			if err := l.saveLink(app, lk); err != nil {
 				return nil, nil, err
@@ -666,33 +733,46 @@ func (l *Link) beginPull(app string, lk *appLink, cs []change) (*hub.LinkTx, map
 	return tx, map[string]store.Staged{}, err
 }
 
-// reusable returns the bodies a transaction staged, by key, when the
-// transaction may go on with cs: every change it staged is one of cs, and
-// every body it staged is recorded (was) at the etag cs puts there now. It
-// returns nil otherwise, and a new transaction starts: a body staged for
-// another etag is never resumed, and never left in a transaction whose
-// record names the new etag, where a cut before it is staged again would
-// resume it as the new body, mixing the two.
-func reusable(staged []store.Staged, was map[string]string, cs []change, targets map[string]string) map[string]store.Staged {
+// reusable reports whether a transaction may go on with cs: every change
+// it staged is one of cs (a change no longer wanted cannot be unstaged, so
+// only a new transaction drops it). It returns the bodies that may be
+// resumed, by key: those recorded (was) at the etag cs puts there now; and
+// the keys whose staged body is for another etag (or none recorded), which
+// must be replaced by a delete before the record names the new etag and the
+// new body is put from 0. So a body staged for one etag is never resumed as
+// another's, and never left under a record that names another, where a cut
+// before it is staged again would resume it as the new body, mixing the two;
+// and the other bodies, a large one included, keep what they staged.
+func reusable(staged []store.Staged, was map[string]string, cs []change, targets map[string]string) (keep map[string]store.Staged, restage []string, ok bool) {
 	want := map[string]bool{}
 	for _, c := range cs {
 		want[c.key] = true
 	}
-	keep := map[string]store.Staged{}
+	keep = map[string]store.Staged{}
 	for _, s := range staged {
 		ks := s.Key.String()
 		if !want[ks] {
-			return nil
+			return nil, nil, false
 		}
-		if s.Delete {
-			continue
+		switch {
+		case s.Delete:
+		case was[ks] == "" || was[ks] != targets[ks]:
+			restage = append(restage, ks)
+		default:
+			keep[ks] = s
 		}
-		if was[ks] == "" || was[ks] != targets[ks] {
-			return nil
-		}
-		keep[ks] = s
 	}
-	return keep
+	return keep, restage, true
+}
+
+// changeOf returns the change of cs for the key ks.
+func changeOf(cs []change, ks string) change {
+	for _, c := range cs {
+		if c.key == ks {
+			return c
+		}
+	}
+	return change{key: ks}
 }
 
 // push writes the changes cs on the main, in one transaction there, with
@@ -782,7 +862,16 @@ func (l *Link) beginPush(ctx context.Context, cl *wsclient.Client, app string, l
 			}
 			staged = append(staged, store.Staged{Key: k, Delete: s.Delete, IfEtag: s.IfEtag, Bytes: s.Bytes, Received: s.Received})
 		}
-		if keep := reusable(staged, lk.Push.Etags, cs, targets); staged != nil && keep != nil {
+		if keep, restage, ok := reusable(staged, lk.Push.Etags, cs, targets); staged != nil && ok {
+			// As in beginPull: the main's staged answer to the delete says
+			// the old body is gone before the record names the new etag.
+			for _, ks := range restage {
+				k, _ := store.ParseKey(ks)
+				wk := wsclient.Key{Path: k.Path, ID: k.ID, Type: k.Type}
+				if _, err := cl.Delete(ctx, lk.Push.Tx, wk, changeOf(cs, ks).from); err != nil {
+					return "", nil, refused(err)
+				}
+			}
 			lk.Push.Etags, lk.Push.Gone = targets, gone
 			if err := l.saveLink(app, lk); err != nil {
 				return "", nil, err

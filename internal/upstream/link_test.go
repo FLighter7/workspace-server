@@ -930,6 +930,9 @@ func TestConflictDuringPush(t *testing.T) {
 	waitFor(t, "the main's copy to win here", func() bool { return sub.etag("todo") == v2 })
 	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v2) })
 	waitFor(t, "the device here to hear of it", func() bool { return tab.heardEtag(v2) })
+	if lk := sub.linkFileOf("todo"); lk.Push != nil {
+		t.Errorf("the push the divergence replaced is still recorded: %+v", lk.Push)
+	}
 	if !sub.logs.has("changed before this server's reached it") {
 		t.Error("the conflict was not logged")
 	}

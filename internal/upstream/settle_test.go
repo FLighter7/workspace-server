@@ -153,20 +153,99 @@ func TestReusable(t *testing.T) {
 	if !slices.Equal(gone, []string{"c.bin"}) {
 		t.Errorf("gone %v", gone)
 	}
-	keep := reusable(staged, map[string]string{"a.bin": "e1", "b.bin": "e2"}, cs, targets)
-	if len(keep) != 2 || keep["a.bin"].Received != 5 || keep["b.bin"].Received != 10 {
-		t.Errorf("keep %v, want a and b", keep)
+	keep, restage, ok := reusable(staged, map[string]string{"a.bin": "e1", "b.bin": "e2"}, cs, targets)
+	if !ok || len(keep) != 2 || keep["a.bin"].Received != 5 || keep["b.bin"].Received != 10 || len(restage) != 0 {
+		t.Errorf("keep %v, restage %v, ok %v; want a and b kept", keep, restage, ok)
 	}
+	// b moved on: the transaction goes on, a is resumed, b is staged again.
 	moved := []change{{key: "a.bin", to: e("e1")}, {key: "b.bin", to: e("e3")}, {key: "c.bin"}}
 	targets, _ = targetsOf(moved)
-	if keep := reusable(staged, map[string]string{"a.bin": "e1", "b.bin": "e2"}, moved, targets); keep != nil {
-		t.Errorf("a body staged for e2 is kept for e3: %v", keep)
+	keep, restage, ok = reusable(staged, map[string]string{"a.bin": "e1", "b.bin": "e2"}, moved, targets)
+	if !ok || len(keep) != 1 || keep["a.bin"].Received != 5 || !slices.Equal(restage, []string{"b.bin"}) {
+		t.Errorf("keep %v, restage %v, ok %v; want a kept and b staged again", keep, restage, ok)
 	}
-	if keep := reusable(staged, map[string]string{"a.bin": "e1"}, cs, targets); keep != nil {
-		t.Errorf("a body with no recorded etag is kept: %v", keep)
+	if keep, restage, ok := reusable(staged, map[string]string{"a.bin": "e1"}, moved, targets); !ok || len(keep) != 1 || !slices.Equal(restage, []string{"b.bin"}) {
+		t.Errorf("a body with no recorded etag: keep %v, restage %v, ok %v; want it staged again", keep, restage, ok)
 	}
-	if keep := reusable(staged, map[string]string{"a.bin": "e1", "b.bin": "e2"}, cs[:1], targets); keep != nil {
-		t.Errorf("a transaction that staged a change no longer wanted is kept: %v", keep)
+	if _, _, ok := reusable(staged, map[string]string{"a.bin": "e1", "b.bin": "e2"}, cs[:1], targets); ok {
+		t.Error("a transaction that staged a change no longer wanted is kept")
+	}
+}
+
+// A record of a transaction still open on its side is no base: the side
+// came back to the etag it names, a device moved on here, and that is a
+// divergence, not a push. A record whose transaction is gone (it committed,
+// and its base was lost) stands in for the base.
+func TestStaleRecordDoesNotMaskADivergence(t *testing.T) {
+	lk := &appLink{ServerID: "Zz0123456789", Base: map[string]string{"x.md": "e3"},
+		Push: &pendingTx{Tx: "0123456789abcdefgh", Etags: map[string]string{"x.md": "e1"}}}
+	here := map[string]string{"x.md": "e4"}
+	main := map[string]string{"x.md": "e1"}
+	if p := compare(effectiveBase(lk, here, main, false, false), here, main); len(p.diverged) != 1 || len(p.pushes) != 0 {
+		t.Errorf("with the transaction open: %+v, want a divergence", p)
+	}
+	if p := compare(effectiveBase(lk, here, main, true, false), here, main); len(p.diverged) != 0 || len(p.pushes) != 1 {
+		t.Errorf("with the transaction gone: %+v, want a push", p)
+	}
+}
+
+// A push cut off in the middle of a big body, after a small document went
+// whole: a device then changes the small one. The transaction goes on: the
+// small one's old body is replaced (a delete first), and the big one resumes
+// where it stopped, rather than from 0.
+func TestBigPushResumesWhenASmallDocumentChanges(t *testing.T) {
+	main := startNode(t, "Desk")
+	sub := startNode(t, "Laptop")
+	sub.linkTo(main)
+	waitFor(t, "an agreed empty set", func() bool { b, ok := sub.link.baseOf("todo"); return ok && len(b) == 0 })
+	tab := sub.device("todo")
+
+	var calls atomic.Int32
+	cut := make(chan struct{})
+	sub.link.setWrapPush(func(r io.Reader, cl *wsclient.Client) io.Reader {
+		if calls.Add(1) != 2 { // z.bin in the first push
+			return r
+		}
+		return &cutReader{r: r, after: 1 << 20, cut: func() {
+			if !stagingHolds(main, sub, "b1") {
+				t.Error("no byte of z reached the main's staging")
+			}
+			sub.cutOff(main, true)
+			cl.Close()
+			close(cut)
+		}}
+	})
+	big := bigBody(6 << 20)
+	tab.commit(t, func(ctx context.Context, tx string) error {
+		if _, err := tab.cl.Put(ctx, tx, wireKey("a.md"), nil, 2, 0, strings.NewReader("a1")); err != nil {
+			return err
+		}
+		_, err := tab.cl.Put(ctx, tx, wireKey("z.bin"), nil, int64(len(big)), 0, strings.NewReader(big))
+		return err
+	})
+	<-cut
+	device := sub.link.snapshot().Device
+	waitLong(t, "the main to stage a whole and z in part", func() bool {
+		lk := sub.linkFileOf("todo")
+		if lk.Push == nil {
+			return false
+		}
+		staged, err := main.store.Begin("todo", device, lk.Push.Tx)
+		return err == nil && len(staged) == 2 && staged[1].Received > 0 && staged[1].Received < int64(len(big))
+	})
+	ea1 := store.Etag([]byte("a1"))
+	a2 := tab.putKey(t, "a.md", &ea1, "a2")
+	sub.cutOff(main, false)
+	sub.link.NetworkChanged()
+
+	want := map[string]string{"a.md": a2, "z.bin": store.Etag([]byte(big))}
+	waitLong(t, "both documents on the main", func() bool { return maps.Equal(main.set("todo"), want) })
+	waitLong(t, "the push to be logged", func() bool { return sub.logs.has(logPushed) })
+	if !sub.logs.has("resumed, ") {
+		t.Error("the big body started over when the small document changed")
+	}
+	if sub.logs.has("otherwise than meant") {
+		t.Error("a commit wrote a body other than the one meant")
 	}
 }
 
