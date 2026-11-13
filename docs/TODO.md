@@ -21,6 +21,7 @@ Everything about the local hub (a subordinate, handing it out, switching the mai
 - **Clients never tried at all:** Mac Safari and Android (the hub checks above cover both).
 - **todo's screen reader run** (`pnpm run test:sr`, Windows, the machine left alone), not run since the Sync page gained the "Through {name}…" line, the `notMain` reason, and "Server: {name}" after the device follows a new main. No NVDA scenario covers those lines yet: the run catches regressions, and the new lines need a scenario or a listen by hand.
 - **The diagram** (`docs/images/connections*.svg`) was rendered and checked only on Windows (Chromium and WebKit, with glyphs 7% wider standing in for Mac fonts): look at it on GitHub, light and dark theme, and in Safari on the Mac.
+- **Replacing a document under a reader where POSIX renames are missing:** on FAT, exFAT, an SMB share or Windows before 10 1809, `fsutil.Rename` falls back to `os.Rename` on `ERROR_INVALID_PARAMETER`, `ERROR_NOT_SUPPORTED` or `ERROR_INVALID_FUNCTION`, the errors the documentation and Go's own fallbacks lead one to expect; none was observed. Check on a FAT or exFAT volume (a VHD will do) that the fallback is taken and that a commit over an open reader then fails as "busy" rather than corrupting anything.
 - **Older, unchecked:** the mDNS responder on a Windows machine with several adapters; whether a device connects right after "Allow" in the Windows Firewall dialog of a first start.
 
 ## Known gaps

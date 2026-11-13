@@ -1,8 +1,10 @@
 // Package fsutil holds file helpers shared by the packages that keep the
-// server's JSON files.
+// server's files: atomic writes, and reads and renames that do not get in
+// each other's way on Windows.
 package fsutil
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -24,7 +26,8 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 
 // WriteFileAtomicStat is WriteFileAtomic that also returns the new file's
 // information, read before the rename, which keeps it: no other writer can
-// slip in between the write and the stat.
+// slip in between the write and the stat. The rename is Rename, so it
+// replaces a file that a reader holds open through OpenShared.
 func WriteFileAtomicStat(path string, data []byte, perm os.FileMode) (os.FileInfo, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -54,11 +57,29 @@ func WriteFileAtomicStat(path string, data []byte, perm os.FileMode) (os.FileInf
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
+	if err := Rename(tmp.Name(), path); err != nil {
 		return nil, err
 	}
 	// The file is in place: a failed directory sync must not make the
 	// caller undo anything.
 	_ = syncDir(dir)
 	return fi, nil
+}
+
+// ReadFileShared is os.ReadFile through OpenShared: the read does not stop a
+// Rename over the file or its removal (see OpenShared).
+func ReadFileShared(name string) ([]byte, error) {
+	f, err := OpenShared(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var buf bytes.Buffer
+	if fi, err := f.Stat(); err == nil && fi.Size() > 0 && int64(int(fi.Size())) == fi.Size() {
+		buf.Grow(int(fi.Size()) + bytes.MinRead)
+	}
+	if _, err := buf.ReadFrom(f); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
