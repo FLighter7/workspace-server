@@ -29,6 +29,19 @@ import (
 // syncFile flushes a body to disk; a test replaces it.
 var syncFile = (*os.File).Sync
 
+// syncBody syncs the body file at path through a handle of its own.
+func syncBody(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	err = syncFile(f)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
 // persistEvery is how many bytes of a body arrive between two saves of
 // tx.json; a restart resumes the body from the last save.
 var persistEvery int64 = 8 << 20
@@ -227,6 +240,9 @@ func (s *Store) txOf(a *appState, device, tx string) (*txState, error) {
 func (s *Store) discard(a *appState, t *txState) error {
 	t.kill()
 	delete(a.txs, t.rec.Tx)
+	// tx.json first: a folder that will not go then is a stray for sweep,
+	// never a transaction loaded again at the next start.
+	_ = removeFile(filepath.Join(t.dir, txName))
 	return retryBusy(func() error { return removeAll(t.dir) })
 }
 
@@ -408,7 +424,15 @@ func (s *Store) Put(app, device, tx string, k Key, ifEtag *string, bytes, offset
 		if old != nil {
 			old.kill()
 			delete(t.sinks, ks)
-			op.Received = received
+			if received > op.Received {
+				// What the ended body received past its last record is not
+				// synced yet (its own sync may still be running): sync it
+				// before tx.json counts it.
+				if err := syncBody(filepath.Join(t.dir, op.File)); err != nil {
+					return err
+				}
+				op.Received = received
+			}
 		}
 		if offset > 0 && offset == bytes {
 			op.IfEtag = next.IfEtag
@@ -666,9 +690,20 @@ func (k *Sink) Close() error {
 	k.f = nil
 	received := k.received
 	k.mu.Unlock()
-	err := k.syncAndRecord(f, received, true)
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	// Synced and closed before the record waits for the app's lock: a
+	// transaction ended meanwhile then removes its folder with no handle of
+	// this Sink left in it.
+	serr := syncFile(f)
+	cerr := f.Close()
+	if serr != nil {
+		received = k.lastSaved()
+	}
+	err := k.record(received, "", true)
+	if serr != nil {
+		return serr
+	}
+	if cerr != nil {
+		return cerr
 	}
 	return err
 }

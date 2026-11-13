@@ -543,3 +543,136 @@ func TestOpenOfAFolderAndStrayTemps(t *testing.T) {
 		t.Error("the open transaction went with the temps")
 	}
 }
+
+// R1: a folder on disk whose name differs only in case from a key's folder
+// is not that folder: a commit into it is refused, rather than leave the
+// document where no key names it.
+func TestCommitRefusesAFolderOfAnotherCase(t *testing.T) {
+	e := newEnv(t)
+	e.writeFile("todo", "Docs/mine.txt", "user's")
+	err := e.commitOne("docs/a.json", nil, "device")
+	if fi, statErr := os.Stat(e.file("todo", "docs")); statErr == nil && fi.IsDir() && err == nil {
+		// A file system that tells case: docs/ is a folder of its own.
+		wantDocs(t, e.docs("todo"), map[string]string{"docs/a.json": "device"})
+	} else if !errors.Is(err, ErrBadPath) {
+		t.Fatalf("Commit into Docs/ = %v, want ErrBadPath where case is ignored", err)
+	} else {
+		if _, err := os.Stat(e.file("todo", "Docs/a.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Error("the document went into the user's Docs/")
+		}
+	}
+	e.healthy()
+	if changed, _, _ := e.s.Reconcile("todo"); changed {
+		t.Error("a reconcile after the commit changed the set")
+	}
+	if b, _ := e.readFile("todo", "Docs/mine.txt"); b != "user's" {
+		t.Errorf("Docs/mine.txt holds %q", b)
+	}
+}
+
+// R2: a put that resumes from what a still running body received syncs
+// that body before tx.json counts it; so does one that only changes ifEtag
+// while the body's own final sync still runs.
+func TestResumeFromALiveBodySyncsFirst(t *testing.T) {
+	e := newEnv(t)
+	var atSync []int64
+	syncFile = func(f *os.File) error {
+		atSync = append(atSync, stagedOnDisk(t, e, txA))
+		return f.Sync()
+	}
+	t.Cleanup(func() { syncFile = (*os.File).Sync })
+	e.begin("todo", "phone", txA)
+	sink, err := e.s.Put("todo", "phone", txA, key(t, "a.bin"), nil, 6, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sink.Write([]byte("abc")); err != nil { // not recorded yet
+		t.Fatal(err)
+	}
+	sink2, err := e.s.Put("todo", "phone", txA, key(t, "a.bin"), nil, 6, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(atSync) != "[0]" || stagedOnDisk(t, e, txA) != 3 {
+		t.Fatalf("tx.json held %v at the syncs and %d after; want [0] and 3", atSync, stagedOnDisk(t, e, txA))
+	}
+	if _, err := sink2.Write([]byte("def")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The ifEtag change while the completing body still syncs.
+	atSync = nil
+	release, syncing := make(chan struct{}), make(chan struct{})
+	first := true
+	syncFile = func(f *os.File) error {
+		atSync = append(atSync, stagedOnDisk(t, e, txB))
+		if first {
+			first = false
+			close(syncing)
+			<-release
+		}
+		return f.Sync()
+	}
+	e.begin("todo", "phone", txB)
+	sink, err = e.s.Put("todo", "phone", txB, key(t, "b.bin"), nil, 3, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrote := make(chan error, 1)
+	go func() { _, err := sink.Write([]byte("xyz")); wrote <- err }()
+	<-syncing
+	if _, err := e.s.Put("todo", "phone", txB, key(t, "b.bin"), ptr("e"), 3, 3); err != nil {
+		t.Fatalf("Put of an ifEtag change: %v", err)
+	}
+	if len(atSync) != 2 || atSync[1] != 0 || stagedOnDisk(t, e, txB) != 3 {
+		t.Errorf("tx.json held %v at the syncs and %d after; want a second sync before it counts 3", atSync, stagedOnDisk(t, e, txB))
+	}
+	close(release)
+	<-wrote
+	// ifEtag "e" cannot match a new document: a conflict, not
+	// ErrIncomplete, shows the body was taken as complete.
+	if _, err := e.s.Commit("todo", "phone", txB); !errors.As(err, new(*ConflictError)) {
+		t.Errorf("Commit = %v, want a conflict", err)
+	}
+}
+
+// R3: a body closed while its transaction ends holds no handle in the
+// folder that the end removes.
+func TestCloseWhileTheTransactionEnds(t *testing.T) {
+	e := newEnv(t)
+	busyRetries = 0
+	t.Cleanup(func() { busyRetries = 10 })
+	e.begin("todo", "phone", txA)
+	sink, err := e.s.Put("todo", "phone", txA, key(t, "a.bin"), nil, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sink.Write([]byte("abc")); err != nil {
+		t.Fatal(err)
+	}
+	a, unlock, err := e.s.lock("todo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	synced := make(chan struct{})
+	syncFile = func(f *os.File) error {
+		defer close(synced)
+		return f.Sync()
+	}
+	t.Cleanup(func() { syncFile = (*os.File).Sync })
+	closed := make(chan error, 1)
+	go func() { closed <- sink.Close() }() // waits for the app's lock to record
+	<-synced
+	time.Sleep(100 * time.Millisecond) // the Close closes its file, then waits
+	derr := e.s.discard(a, a.txs[txA])
+	unlock()
+	if derr != nil {
+		t.Errorf("ending the transaction under a closing body: %v", derr)
+	}
+	if err := <-closed; !errors.Is(err, ErrNoTransaction) {
+		t.Errorf("Close = %v, want ErrNoTransaction", err)
+	}
+	if _, err := os.Stat(filepath.Join(e.root, "todo", ".wss", stagingName, stagingDir(txA))); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the transaction's folder stays: %v", err)
+	}
+}

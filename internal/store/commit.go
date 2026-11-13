@@ -195,7 +195,8 @@ var errObstacle = errors.New("store: a folder on the path is not a plain folder"
 // checkPath checks the folders above the document ks, from the app's folder
 // down, and returns the information of the document's file, nil if it is
 // missing. A folder that is a file, a link, a junction or another reparse
-// point is ErrBadPath; one that is missing ends the check, since nothing
+// point, or whose name on disk differs in case from the key's, is
+// ErrBadPath; one that is missing ends the check, since nothing
 // below it exists.
 func (s *Store) checkPath(app, ks string) (os.FileInfo, error) {
 	dir := s.dir(app)
@@ -209,7 +210,7 @@ func (s *Store) checkPath(app, ks string) (os.FileInfo, error) {
 		if err != nil {
 			return nil, err
 		}
-		if fi.Mode().Type() != fs.ModeDir {
+		if fi.Mode().Type() != fs.ModeDir || !exactName(filepath.Dir(dir), p) {
 			return nil, fmt.Errorf("%w: %w: %s", ErrBadPath, errObstacle, ks)
 		}
 	}
@@ -218,6 +219,23 @@ func (s *Store) checkPath(app, ks string) (os.FileInfo, error) {
 		return nil, nil
 	}
 	return fi, err
+}
+
+// exactName reports whether the folder parent holds an entry spelt exactly
+// name. Where the file system ignores case, Lstat finds "Docs" for "docs":
+// a document put there would sit in a folder no key names, invisible to the
+// next reconcile.
+func exactName(parent, name string) bool {
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.Name() == name {
+			return true
+		}
+	}
+	return false
 }
 
 // commitJournal writes j, the commit point, and applies it. t, if not nil,
