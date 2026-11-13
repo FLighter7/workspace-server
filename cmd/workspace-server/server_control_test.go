@@ -380,6 +380,9 @@ func TestMoveDataFailureKeepsTheOldFolder(t *testing.T) {
 	if readConfig(t, dir).DataDir != "" {
 		t.Error("config.json points at the new folder")
 	}
+	if entries, _ := os.ReadDir(target); len(entries) != 0 {
+		t.Errorf("the target holds %v after a failed move", entries)
+	}
 }
 
 func TestSecondRequestWhileStoppingIsHarmless(t *testing.T) {

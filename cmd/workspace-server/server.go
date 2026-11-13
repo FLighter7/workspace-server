@@ -295,9 +295,11 @@ func retryRestart(ctx context.Context, opts serverOptions, logger *log.Logger, l
 
 // moveDataDir switches the data folder from the current one to act.dataDir:
 // it copies the data there when there is any, saves config.json, and only
-// then deletes the old copy, so a crash leaves either the old folder in use
-// or the new one with a stale copy behind. It returns the apps to add to the
-// list when the new folder's data is adopted.
+// then writes README.txt there and deletes the old copy, so a crash leaves
+// either the old folder in use or the new one with a stale copy behind. A
+// failure before the save adds nothing to the new folder (it creates the
+// folder for a create, and removes it again when it is still empty). It
+// returns the apps to add to the list when the new folder's data is adopted.
 func moveDataDir(serverDir, current string, act action, logger *log.Logger) (adopt []string, err error) {
 	to := act.dataDir
 	logger.Printf("moving the data from %s to %s", current, to)
@@ -311,26 +313,37 @@ func moveDataDir(serverDir, current string, act action, logger *log.Logger) (ado
 	if c.Verdict != act.verdict {
 		return nil, fmt.Errorf("the folders changed after the change was asked (it was %q, it is %q now); nothing was changed", act.verdict, c.Verdict)
 	}
-	if err := ensureDataDir(to); err != nil {
+	// The WSS-Data folders as the check resolved them: what wssDir makes of
+	// a folder depends on what it holds, and the move writes into them.
+	curWSS, tgtWSS := c.curWSS, c.tgtWSS
+	_, statErr := os.Stat(to)
+	madeTo := errors.Is(statErr, os.ErrNotExist)
+	if err := ensureFolder(to); err != nil {
 		return nil, err
 	}
+	undo := func() {
+		if madeTo {
+			_ = os.Remove(to) // only while it is empty
+		}
+	}
 	moved := false
-	if act.verdict == verdictMove || act.verdict == verdictCreate {
-		has, err := hasData(current)
-		if err != nil {
+	if act.verdict == verdictMove || act.verdict == verdictCreate && c.curData {
+		// moveData fails, rather than leaving the data behind, when the
+		// source holds none now.
+		if err := moveDataFn(curWSS, tgtWSS); err != nil {
+			undo()
 			return nil, err
 		}
-		if has {
-			if err := moveDataFn(current, to); err != nil {
-				return nil, err
-			}
-			moved = true
-		}
+		moved = true
 	}
 	cfgPath := filepath.Join(serverDir, configFile)
 	host, _ := os.Hostname()
 	cfg, err := config.Load(cfgPath, defaultName(host))
 	if err != nil {
+		if moved {
+			_ = removeApps(tgtWSS)
+		}
+		undo()
 		return nil, err
 	}
 	cfg.DataDir = to
@@ -339,24 +352,31 @@ func moveDataDir(serverDir, current string, act action, logger *log.Logger) (ado
 	}
 	if err := cfg.Save(cfgPath); err != nil {
 		if moved {
-			_ = removeApps(to)
+			_ = removeApps(tgtWSS)
 		}
+		undo()
 		return nil, fmt.Errorf("save %s: %w", cfgPath, err)
+	}
+	// The start that follows writes it too; a failure here is only logged.
+	if err := ensureWSS(tgtWSS); err != nil {
+		logger.Printf("write %s in %s: %v", readmeFile, tgtWSS, err)
 	}
 	if moved {
 		// The server folder stays whatever happens; another data folder goes
 		// too once nothing is left in it, as the user would expect after a
 		// move.
-		remove := removeData
+		var err error
 		if filepath.Clean(current) == filepath.Clean(serverDir) {
-			remove = removeApps
+			err = removeApps(curWSS)
+		} else {
+			err = removeDataIn(current, curWSS)
 		}
-		if err := remove(current); err != nil {
-			logger.Printf("the data is in %s now, but its old copy in %s stays: %v", to, current, err)
+		if err != nil {
+			logger.Printf("the data is in %s now, but its old copy in %s stays: %v", tgtWSS, curWSS, err)
 		}
 	}
 	if act.verdict == verdictAdopt {
-		adopt = adoptableApps(to)
+		adopt = adoptableApps(tgtWSS)
 	}
 	return adopt, nil
 }
@@ -979,11 +999,23 @@ func effectiveDataDir(serverDir string, cfg config.Config) string {
 }
 
 // ensureDataDir creates the data folder path when it is missing and its
-// parent exists, then its WSS-Data folder, and writes WSS-Data's README.txt
-// when it is missing. A missing parent means an unmounted disk or a vanished
+// parent exists (see ensureFolder), then its WSS-Data folder, and writes
+// WSS-Data's README.txt when it is missing.
+func ensureDataDir(path string) error {
+	if err := ensureFolder(path); err != nil {
+		return err
+	}
+	if err := ensureWSS(wssDir(path)); err != nil {
+		return fmt.Errorf("the data folder %s is not available: %w", path, err)
+	}
+	return nil
+}
+
+// ensureFolder creates the data folder path when it is missing and its
+// parent exists. A missing parent means an unmounted disk or a vanished
 // share: creating the folder there would show the user an empty server where
 // their data used to be, so it is an error instead.
-func ensureDataDir(path string) error {
+func ensureFolder(path string) error {
 	unavailable := func(err error) error {
 		return fmt.Errorf("the data folder %s is not available: %w", path, err)
 	}
@@ -992,17 +1024,14 @@ func ensureDataDir(path string) error {
 	case err == nil && !fi.IsDir():
 		return unavailable(errors.New("not a folder"))
 	case err == nil:
+		return nil
 	case !errors.Is(err, os.ErrNotExist):
 		return unavailable(err)
-	default:
-		if _, err := os.Stat(filepath.Dir(path)); err != nil {
-			return unavailable(err)
-		}
-		if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-			return unavailable(err)
-		}
 	}
-	if err := ensureWSS(wssDir(path)); err != nil {
+	if _, err := os.Stat(filepath.Dir(path)); err != nil {
+		return unavailable(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return unavailable(err)
 	}
 	return nil

@@ -309,7 +309,7 @@ func describeDeletion(d deps, dir, dataDir, exe string, main bool) bool {
 	}
 	fmt.Fprintln(d.stdout, "This deletes:")
 	fmt.Fprintf(d.stdout, "  the server folder: %s\n", dir)
-	apps, _ := listAppData(dataDir)
+	apps, _ := listAppData(wssDir(dataDir))
 	fmt.Fprintf(d.stdout, "  the apps' data: %s, %s in documents and versions",
 		plural(len(apps), "app", "apps"), byteCount(treeSize(appsRoot(dataDir))))
 	if filepath.Clean(dataDir) != filepath.Clean(dir) {
