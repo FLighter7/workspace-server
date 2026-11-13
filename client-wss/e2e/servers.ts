@@ -1,8 +1,8 @@
 import { execFile, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createSocket } from 'node:dgram';
-import { existsSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 /**
  * Real workspace-servers for the e2e tests: built with Go from this
@@ -57,7 +57,30 @@ export function buildServer(dir: string): string {
 		throw new Error(`go build failed: ${build.error?.message ?? ''}${build.stderr ?? ''}`);
 	}
 
-	return binary;
+	return pin(binary);
+}
+
+/**
+ * Copies a binary just built to tmp/bin/ and returns that path, the same on
+ * every run: Windows Firewall asks about a program that listens on the
+ * network once per path, so a new folder for every run would have it ask
+ * every time. When another worker is running the copy there, that copy is used
+ * if it is the same build, and the new binary otherwise.
+ */
+function pin(binary: string): string {
+	const dir = join(SCRATCH, 'bin');
+	mkdirSync(dir, { recursive: true });
+	const fixed = join(dir, basename(binary));
+	const part = `${fixed}.${process.pid}.part`;
+	copyFileSync(binary, part);
+	try {
+		renameSync(part, fixed);
+	} catch {
+		rmSync(part, { force: true });
+		return existsSync(fixed) && readFileSync(fixed).equals(readFileSync(binary)) ? fixed : binary;
+	}
+
+	return fixed;
 }
 
 /** Builds the e2e device (`e2e/device`, Go) into `dir`; returns the binary. */
@@ -73,7 +96,7 @@ export function buildDevice(dir: string): string {
 		);
 	}
 
-	return binary;
+	return pin(binary);
 }
 
 /**
