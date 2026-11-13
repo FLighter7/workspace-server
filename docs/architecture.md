@@ -722,7 +722,7 @@ Each step runs even if an earlier one failed; failures go to stderr (the log may
 - **The web page in CI:** `ci.yml`'s `page` job does the same for `client-wss/`: `pnpm run check` (lint, Prettier, unit tests, typecheck, build), then the e2e against a server built with the page embedded. The Go job never builds the page: `internal/web`'s tests serve a stand-in from `fstest.MapFS`, and read `client-wss/index.html` itself to check it is the template the server fills.
 - **Publishing the package: by the user, by hand.** No workflow and no agent publishes it.
   1. Set `client/package.json`'s `version` to the server's tag, `1.0.0` for `v1.0.0`, `1.0.0-rc.1` for `v1.0.0-rc.1`.
-  2. Run `pnpm --dir client publish --access public`; add `--tag next` for a pre-release. `prepublishOnly` runs `check` first.
+  2. From the package's folder, `cd client`, run `pnpm publish --access public`; add `--tag next` for a pre-release. `prepublishOnly` runs `check` first. Not `pnpm --dir client publish` (nor `-C client`): pnpm 10.33.0 passes `--dir`'s value on to npm 11.8.0 with `publish` again, and npm refuses the extra arguments with `EUSAGE` (checked with `--dry-run`, 2026-11-13).
   3. npm asks for 2FA.
 
   The first release goes out as the release candidate `1.0.0-rc.1` (`v1.0.0-rc.1`), and `1.0.0` follows once the user has checked it by hand ([TODO.md](TODO.md)).
