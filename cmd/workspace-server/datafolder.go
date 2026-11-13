@@ -10,11 +10,9 @@ import (
 	"runtime"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/FLighter7/workspace-server/internal/apps"
 	"github.com/FLighter7/workspace-server/internal/fsutil"
-	"github.com/FLighter7/workspace-server/internal/store"
 )
 
 // verdict is what changing the data folder to a path would do.
@@ -32,9 +30,8 @@ const (
 
 // appData is an app's data in a data folder.
 type appData struct {
-	ID       string
-	Size     int64 // the current document; 0 when there is none
-	Versions int
+	ID   string
+	Size int64 // the bytes of its files, outside its .wss folder
 }
 
 // dataCheck is the result of checkDataDir.
@@ -325,9 +322,9 @@ func probeWritable(dir string) error {
 // The apps folder in WSS-Data may hold more than the server's: someone may
 // have put a folder there by hand, and a folder the user chose that is
 // itself named WSS-Data may have held an apps folder of its own. The
-// server's own app folders are those with a valid app id that hold a
-// document (data.json) or a history folder; everything else under apps is
-// not data, and is never moved or deleted.
+// server's own app folders are those with a valid app id that hold the
+// store's .wss folder; everything else under apps is not data, and is never
+// moved or deleted.
 //
 // The functions below take a WSS-Data folder (wss), resolved by the caller
 // with wssDir.
@@ -348,17 +345,12 @@ func appDirs(wss string) ([]string, error) {
 			continue
 		}
 		dir := filepath.Join(root, e.Name())
-		if isRegular(filepath.Join(dir, "data.json")) || isDir(filepath.Join(dir, "history")) {
+		if isDir(filepath.Join(dir, wssFolder)) {
 			ids = append(ids, e.Name())
 		}
 	}
 	slices.Sort(ids)
 	return ids, nil
-}
-
-func isRegular(path string) bool {
-	fi, err := os.Lstat(path)
-	return err == nil && fi.Mode().IsRegular()
 }
 
 func isDir(path string) bool {
@@ -385,18 +377,44 @@ func hasFiles(dir string) (bool, error) {
 	return found, err
 }
 
-// hasData reports whether wss holds data: a document or a history version
-// in one of the server's app folders. Empty app folders, and anything that
-// is not the server's, are not data.
+// appFiles sums up the regular files below the app folder dir, outside its
+// .wss folder: the app's documents, and whatever else lies among them.
+func appFiles(dir string) (n int, size int64, err error) {
+	wss := filepath.Join(dir, wssFolder)
+	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && path == wss {
+			return fs.SkipDir
+		}
+		if d.Type().IsRegular() {
+			fi, err := d.Info()
+			if err != nil {
+				return err
+			}
+			n, size = n+1, size+fi.Size()
+		}
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, 0, nil
+	}
+	return n, size, err
+}
+
+// hasData reports whether wss holds data: a file outside the .wss folder of
+// one of the server's app folders. Empty app folders, the server's own files
+// in .wss, and anything that is not the server's, are not data.
 func hasData(wss string) (bool, error) {
 	ids, err := appDirs(wss)
 	if err != nil {
 		return false, err
 	}
 	for _, id := range ids {
-		has, err := hasFiles(filepath.Join(wss, storeDir, id))
-		if err != nil || has {
-			return has, err
+		n, _, err := appFiles(filepath.Join(wss, storeDir, id))
+		if err != nil || n > 0 {
+			return n > 0, err
 		}
 	}
 	return false, nil
@@ -447,15 +465,14 @@ func removeApps(wss string) error {
 
 // listAppData describes the apps with a valid id in wss that hold data.
 func listAppData(wss string) ([]appData, error) {
-	st := store.New(filepath.Join(wss, storeDir), time.Now)
 	var out []appData
 	for _, id := range adoptableApps(wss) {
-		s, err := st.Stat(id)
+		n, size, err := appFiles(filepath.Join(wss, storeDir, id))
 		if err != nil {
 			return nil, err
 		}
-		if s.Exists || s.Versions > 0 {
-			out = append(out, appData{ID: id, Size: s.Size, Versions: s.Versions})
+		if n > 0 {
+			out = append(out, appData{ID: id, Size: size})
 		}
 	}
 	return out, nil
@@ -522,10 +539,11 @@ func moveData(from, to string) error {
 		return nil
 	}
 	// An apps folder is there already: put each app into it. An app folder
-	// of the same name is an empty leftover (there is no data in to).
+	// of the same name is an empty leftover (there is no data in to), its
+	// .wss folder included.
 	for _, id := range ids {
 		target := filepath.Join(dst, id)
-		if has, err := hasFiles(target); err != nil || has {
+		if n, _, err := appFiles(target); err != nil || n > 0 {
 			if err == nil {
 				err = fmt.Errorf("%s holds files that are not the server's", target)
 			}
@@ -582,7 +600,8 @@ func copyTree(src, dst string) error {
 }
 
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+	// Shared, as every read of a document: it never holds up a commit.
+	in, err := fsutil.OpenShared(src)
 	if err != nil {
 		return err
 	}

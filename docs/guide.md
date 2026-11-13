@@ -110,7 +110,7 @@ On the first start the server creates its folder and an entry for the `todo` app
   - **Upstream server** (Связь с главным сервером): links this server to a main one, as a laptop's server is linked to the PC's; see "A laptop as a second server";
   - **Manage the server** (Управление сервером): three buttons, each of which asks first:
     - **Stop the server** stops it and stops it starting at login, like `stop`. Your data is kept.
-    - **Delete data** starts the server over as if it were new: every app's documents and versions, the list of apps and the paired devices are deleted, and every device must pair again. The name, the ports and the data folder are kept. The question lists each app's data and lets you download it first.
+    - **Delete data** starts the server over as if it were new: every app's documents, the list of apps and the paired devices are deleted, and every device must pair again. The name, the ports and the data folder are kept. The question lists each app's data and lets you download it first.
     - **Delete the server and all data** stops the server and removes it from the computer, like `delete`: its data, its folders, the program file and the autostart.
 - **Devices** (Устройства):
   - **Pair a device** at the top opens the pairing code; on a server linked to a main, devices pair with the main instead;
@@ -147,7 +147,7 @@ The PC runs the main server, and a laptop can run a second one that keeps a copy
 3. On the laptop's page, open **Server** and find **Upstream server**. Paste the code and press **Link**, or press **Scan with the camera** and hold the QR code up to the laptop's camera.
 4. The laptop's server is now linked to the main: it takes the main's apps, copies their data, and shows the link's state.
 
-Linking deletes nothing. If both servers already hold an app's data, the main's copy wins on the laptop, the laptop's copy is kept among its saved versions, and the devices merge the two. A server that other servers are linked to cannot be linked to another main itself.
+Linking deletes nothing. If both servers already hold an app's data, the main's copy wins on the laptop and replaces the laptop's, and the devices merge the two. A server that other servers are linked to cannot be linked to another main itself.
 
 ### Pairing the laptop's browser
 
@@ -157,12 +157,12 @@ Devices pair only with the main, the laptop's own browser too. On the laptop's p
 
 - **At home** the devices sync with the main, and the laptop's server keeps its copy in step with the main's.
 - **Away**, with the main out of reach, devices paired with the main sync with the laptop's server instead, without pairing again: the main told them about it. The laptop keeps the changes.
-- **Back home**, the laptop sends the main what changed. If both sides changed, the main's copy wins on the laptop, the laptop's goes to its saved versions, and the devices merge the two, as they always do.
+- **Back home**, the laptop sends the main what changed. If both sides changed, the main's copy wins on the laptop and replaces the laptop's, and the devices merge the two, as they always do.
 - A device paired while the laptop could not reach the main syncs with the laptop only after the two have met again.
 
 ### Keeping an eye on it
 
-- The laptop's **Upstream server** shows the main, whether it is connected, when it was linked, the last sync and the apps synced. If an app writes to the main too often within a minute, it stops syncing with the main, to protect the saved versions on both servers; the section lists it, and its devices still sync with the laptop. Press **Resume** beside it to sync it with the main again at once; a restart of the laptop's server resumes it too. If the app keeps writing that often, it stops again.
+- The laptop's **Upstream server** shows the main, whether it is connected, when it was linked, the last sync and the apps synced. If an app writes to the main too often within a minute, it stops syncing with the main, so that a runaway app does not keep rewriting the data on both servers; the section lists it, and its devices still sync with the laptop. Press **Resume** beside it to sync it with the main again at once; a restart of the laptop's server resumes it too. If the app keeps writing that often, it stops again.
 - The main's **Devices** lists the laptop's server under **Linked servers**, with its addresses. **Remove** there stops it syncing with the main; its data stays on the laptop.
 - **Unlink** on the laptop's page makes it a main again. Nothing is deleted on either side, and the main's devices no longer sync through the laptop. If the main cannot be reached at that moment, the page says so: remove the laptop on the main's page later.
 
@@ -225,8 +225,8 @@ The apps' data is in a folder named `WSS-Data` in the **data folder**, which is 
 
 ```
 WSS-Data/README.txt                 what the folder is
-WSS-Data/apps/<id>/data.json        the app's current data
-WSS-Data/apps/<id>/history/         previous versions (10 by default)
+WSS-Data/apps/<id>/                 the app's files
+WSS-Data/apps/<id>/.wss/            the server's own records for the app
 ```
 
 - **Leave `WSS-Data` as it is.** Do not change, move, rename or delete it or anything in it, or the apps' data can be lost; its `README.txt` says the same. To move the data, change the data folder on the page.
@@ -238,9 +238,9 @@ WSS-Data/apps/<id>/history/         previous versions (10 by default)
   - If the new folder's `WSS-Data` already holds a server's data and the current one holds none, the page offers to use that data, and adds its apps to the list.
   - If both hold data, the change is refused.
   - If the folder is on a disk that is not connected when the server starts, the server does not start. `server.log` in the server folder says why.
-- **Each app's data** is stored exactly as the app sent it, as a plain JSON file.
-  - Before a change replaces it, the old version moves to `history/`.
-  - The largest document accepted is 64 MiB by default; you can change it per app.
+- **Each app's data** is stored exactly as the app sent it, as plain files.
+  - A change replaces a file; no previous versions are kept. A `history/` folder left by an earlier version of the server is not used any more, and can be deleted.
+  - Each app's files may take up to 50 MiB together by default; you can choose another limit when you add the app.
 - **Writes are atomic:** a crash or power loss leaves either the old file or the new one, never half of one.
 - **`apps.json`** can be edited by hand while the server runs. The change takes effect within a few seconds.
 - **Backing up and moving:** to back up, copy the folders. To move the server to another computer, copy the server folder (and the data folder, if it is another one) there; every pairing keeps working. A data folder you chose is remembered by its full path: on the new computer, put it at the same path before you start the server. If it is not there, the server either does not start or starts with no data.

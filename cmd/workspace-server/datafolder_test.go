@@ -13,19 +13,18 @@ import (
 	"testing"
 )
 
-// putData writes an app's document and n history versions in the data
-// folder dataDir, in its WSS-Data folder.
-func putData(t *testing.T, dataDir, id, doc string, versions int) {
+// putData makes an app folder in the data folder dataDir, in its WSS-Data
+// folder: the store's .wss folder with an index, data.json holding doc
+// unless it is empty, and n more documents f<i>.json of 7 bytes each.
+func putData(t *testing.T, dataDir, id, doc string, n int) {
 	t.Helper()
 	app := filepath.Join(wssDir(dataDir), "apps", id)
-	if err := os.MkdirAll(filepath.Join(app, "history"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeFileAll(t, filepath.Join(app, ".wss", "index.json"), "{}")
 	if doc != "" {
 		writeFile(t, filepath.Join(app, "data.json"), doc)
 	}
-	for i := range versions {
-		writeFile(t, filepath.Join(app, "history", "2026010"+string(rune('1'+i))+"T000000Z-0000000"+string(rune('0'+i))+".json"), `{"v":1}`)
+	for i := range n {
+		writeFileAll(t, filepath.Join(app, "f", "f"+string(rune('0'+i))+".json"), `{"v":1}`)
 	}
 }
 
@@ -78,8 +77,18 @@ func TestCheckDataDirVerdicts(t *testing.T) {
 		{"a WSS-Data folder with data, chosen itself", func(t *testing.T, _, tgt string) string {
 			wss := filepath.Join(tgt, "WSS-Data")
 			writeFileAll(t, filepath.Join(wss, "apps", "notes", "data.json"), `{"n":1}`)
+			writeFileAll(t, filepath.Join(wss, "apps", "notes", ".wss", "index.json"), "{}")
 			return wss
 		}, verdictAdopt},
+		{"an app folder without .wss is not the server's", func(t *testing.T, _, tgt string) string {
+			writeFileAll(t, filepath.Join(tgt, "WSS-Data", "apps", "notes", "data.json"), `{"n":1}`)
+			return tgt
+		}, verdictSwitch},
+		{"the server's own files alone are not data", func(t *testing.T, _, tgt string) string {
+			putData(t, tgt, "notes", "", 0)
+			writeFileAll(t, filepath.Join(wssDir(tgt), "apps", "notes", ".wss", "staging", "tx-0123456789abcdef", "b0"), "body")
+			return tgt
+		}, verdictSwitch},
 		{"empty target, current data", func(t *testing.T, cur, tgt string) string {
 			putData(t, cur, "todo", `{"a":1}`, 1)
 			return tgt
@@ -94,7 +103,7 @@ func TestCheckDataDirVerdicts(t *testing.T) {
 			putData(t, tgt, "notes", `{"n":1}`, 0)
 			return tgt
 		}, verdictAdopt},
-		{"a history version alone is data", func(t *testing.T, _, tgt string) string {
+		{"another document alone is data", func(t *testing.T, _, tgt string) string {
 			putData(t, tgt, "notes", "", 1)
 			return tgt
 		}, verdictAdopt},
@@ -130,11 +139,11 @@ func TestCheckDataDirListsTheApps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []appData{{ID: "todo", Size: 7, Versions: 2}}
+	want := []appData{{ID: "todo", Size: 7 + 2*7}}
 	if !slices.Equal(c.Current, want) {
 		t.Errorf("current %+v, want %+v", c.Current, want)
 	}
-	if want := []appData{{ID: "notes", Size: 9, Versions: 1}}; !slices.Equal(c.Target, want) {
+	if want := []appData{{ID: "notes", Size: 9 + 7}}; !slices.Equal(c.Target, want) {
 		t.Errorf("target %+v, want %+v", c.Target, want)
 	}
 	if c.Path != tgt {
@@ -151,7 +160,8 @@ func TestMoveDataCopiesEverything(t *testing.T) {
 	}
 	for _, rel := range []string{
 		"WSS-Data/apps/todo/data.json", "WSS-Data/apps/notes/data.json",
-		"WSS-Data/apps/todo/history/20260101T000000Z-00000000.json", "WSS-Data/apps/todo/history/20260102T000000Z-00000001.json",
+		"WSS-Data/apps/todo/f/f0.json", "WSS-Data/apps/todo/f/f1.json",
+		"WSS-Data/apps/todo/.wss/index.json", "WSS-Data/apps/notes/.wss/index.json",
 	} {
 		a, err1 := os.ReadFile(filepath.Join(from, rel))
 		b, err2 := os.ReadFile(filepath.Join(to, rel))
@@ -345,8 +355,8 @@ func TestRemoveDataMissingIsNothing(t *testing.T) {
 }
 
 // A folder named apps that is not ours (a common name) is neither data nor
-// deleted: only app folders with a valid id that hold a document or history
-// are ours.
+// deleted: only app folders with a valid id that hold the store's .wss
+// folder are ours.
 func TestForeignAppsFolderIsNotData(t *testing.T) {
 	dir := t.TempDir()
 	writeFileAll(t, filepath.Join(dir, "WSS-Data", "apps", "MyTool", "notes.txt"), "the user's")

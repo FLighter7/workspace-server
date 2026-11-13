@@ -240,10 +240,25 @@ func (a *api) listApps(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
+// addAppRequest is an app to add. The page still sends the fields of the
+// store before the files plan: maxBytes stands for the quota and history is
+// ignored, until stage 4 reworks the page's form.
+type addAppRequest struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Quota    int64  `json:"quota"`
+	MaxBytes int64  `json:"maxBytes"`
+	History  int    `json:"history"`
+}
+
 func (a *api) addApp(w http.ResponseWriter, r *http.Request) {
-	var app apps.App
-	if !readJSON(w, r, &app) {
+	var req addAppRequest
+	if !readJSON(w, r, &req) {
 		return
+	}
+	app := apps.App{ID: req.ID, Name: req.Name, Quota: req.Quota}
+	if app.Quota == 0 {
+		app.Quota = req.MaxBytes
 	}
 	if !apps.ValidID(app.ID) {
 		writeError(w, http.StatusBadRequest, codeInvalid, fmt.Sprintf("id %q must match ^[a-z0-9-]{1,64}$", app.ID))

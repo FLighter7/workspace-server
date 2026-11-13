@@ -430,7 +430,7 @@ func startServer(t *testing.T, tweak func(*Config)) *testServer {
 		Hosts:    func() []string { return []string{"127.0.0.1"} },
 		Apps:     appList,
 		Devices:  devs,
-		Store:    store.New(filepath.Join(dir, "apps"), time.Now),
+		Store:    store.New(filepath.Join(dir, "apps"), time.Now, nil),
 		Secrets:  secrets,
 		Refusals: pairing.NewRefusals(time.Now),
 		Now:      time.Now,

@@ -197,8 +197,8 @@ func newFake() *fakeBackend {
 			DataDir: "/Users/a/Data", MainServer: true, Role: "main",
 		},
 		apps: []AppInfo{{
-			App:  apps.App{ID: "todo", Name: "Todo", History: 10, MaxBytes: apps.DefaultMaxBytes},
-			Size: 12, Modified: &at, Versions: 3, Devices: 1,
+			App:   apps.App{ID: "todo", Name: "Todo", Quota: apps.DefaultQuota},
+			Files: 1, Size: 12, Modified: &at, Devices: 1,
 		}},
 		devices: []DeviceInfo{{
 			ID: "Q2xhdWRlUm9ja3Mx", App: "todo", Name: "iPhone",
@@ -224,8 +224,8 @@ func (f *fakeBackend) AddApp(a apps.App) error {
 	if !apps.ValidID(a.ID) {
 		return fmt.Errorf("%w: id %q", apps.ErrInvalid, a.ID)
 	}
-	if a.History < 0 || a.History > 100 {
-		return fmt.Errorf("%w: history %d is out of range 1-100", apps.ErrInvalid, a.History)
+	if a.Quota != 0 && (a.Quota < apps.MinQuota || a.Quota > apps.MaxQuota) {
+		return fmt.Errorf("%w: quota %d is out of range", apps.ErrInvalid, a.Quota)
 	}
 	for _, x := range f.apps {
 		if x.ID == a.ID {
@@ -762,7 +762,8 @@ func TestAddAppValidation(t *testing.T) {
 	wantError(t, post(`{"id":"Bad"}`), http.StatusBadRequest, "invalid")
 	wantError(t, post(`{"id":"todo"}`), http.StatusBadRequest, "exists")
 	// A range the backend refuses maps to invalid too.
-	wantError(t, post(`{"id":"notes","history":101}`), http.StatusBadRequest, "invalid")
+	wantError(t, post(`{"id":"notes","quota":1}`), http.StatusBadRequest, "invalid")
+	wantError(t, post(`{"id":"notes","maxBytes":1024}`), http.StatusBadRequest, "invalid")
 	wantError(t, post(`{"id":`), http.StatusBadRequest, "invalid")
 	wantError(t, post(`{"id":"notes","colour":"red"}`), http.StatusBadRequest, "invalid")
 	wantError(t, post(`{"id":"notes"} {"id":"more"}`), http.StatusBadRequest, "invalid")
@@ -771,10 +772,13 @@ func TestAddAppValidation(t *testing.T) {
 		t.Fatalf("refused adds reached the backend: %+v", f.added)
 	}
 
-	wantStatus(t, post(`{"id":"notes","name":"Notes","history":5,"maxBytes":1048576}`), http.StatusCreated)
+	// The page's form still sends maxBytes, which is the quota, and history,
+	// which is ignored (until stage 4 of the files plan).
+	wantStatus(t, post(`{"id":"notes","name":"Notes","history":5,"maxBytes":2097152}`), http.StatusCreated)
+	wantStatus(t, post(`{"id":"files","quota":3145728,"maxBytes":2097152}`), http.StatusCreated)
 	// "Add it?" posts only the id; the registry fills in the defaults.
 	wantStatus(t, post(`{"id":"from-phone"}`), http.StatusCreated)
-	want := []apps.App{{ID: "notes", Name: "Notes", History: 5, MaxBytes: 1048576}, {ID: "from-phone"}}
+	want := []apps.App{{ID: "notes", Name: "Notes", Quota: 2 << 20}, {ID: "files", Quota: 3 << 20}, {ID: "from-phone"}}
 	if !reflect.DeepEqual(f.added, want) {
 		t.Errorf("added = %+v, want %+v", f.added, want)
 	}
@@ -959,7 +963,7 @@ func TestJSONShape(t *testing.T) {
 		}
 	}
 	for path, want := range map[string][]string{
-		"/api/apps":             {"devices", "history", "id", "maxBytes", "modified", "name", "size", "versions"},
+		"/api/apps":             {"devices", "files", "id", "modified", "name", "quota", "size", "versions"},
 		"/api/devices":          {"app", "connected", "id", "lastSeen", "name", "pairedAt"},
 		"/api/pairing/refusals": {"app", "at", "device"},
 	} {
@@ -1093,9 +1097,8 @@ func readBoot(t *testing.T, page string) pageBoot {
 func TestPageBoot(t *testing.T) {
 	page, csp := getPage(t, newTestHandler(newFake()))
 	boot := readBoot(t, page)
-	if boot.History != apps.DefaultHistory || boot.MaxBytes != apps.DefaultMaxBytes {
-		t.Errorf("boot defaults = %d, %d; want %d, %d",
-			boot.History, boot.MaxBytes, apps.DefaultHistory, apps.DefaultMaxBytes)
+	if boot.MaxBytes != apps.DefaultQuota {
+		t.Errorf("boot default quota = %d; want %d", boot.MaxBytes, apps.DefaultQuota)
 	}
 	if len(boot.Nonce) < 16 {
 		t.Fatalf("nonce %q is too short", boot.Nonce)

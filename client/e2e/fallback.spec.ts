@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Browser, type Page } from '@playwright/test';
 import './harness.js';
@@ -122,8 +122,8 @@ test('edits on both sides while the two servers cannot meet converge', async () 
 	await add(b, 'desk-side');
 	await expect.poll(() => notesOn(main), { timeout: 15_000 }).toContain('desk-side');
 
-	// They meet: the main's copy wins on the laptop, whose own goes to its
-	// history, and the devices merge what each holds.
+	// They meet: the main's copy wins on the laptop, replacing its own, and
+	// the devices merge what each holds.
 	await laptop.run();
 	await expect.poll(() => linked(laptop), { timeout: 20_000 }).toBe(true);
 	await reconnect(a);
@@ -132,8 +132,4 @@ test('edits on both sides while the two servers cannot meet converge', async () 
 	await expect.poll(() => notesOn(laptop), { timeout: 30_000 }).toEqual(all);
 	await expect.poll(() => notesOf(a), { timeout: 15_000 }).toEqual(all);
 	await expect.poll(() => notesOf(b), { timeout: 15_000 }).toEqual(all);
-
-	const history = join(laptop.dir, 'WSS-Data', 'apps', 'todo', 'history');
-	const kept = readdirSync(history).map((name) => readFileSync(join(history, name), 'utf8'));
-	expect(kept.some((doc) => doc.includes('laptop-side') && !doc.includes('desk-side'))).toBe(true);
 });

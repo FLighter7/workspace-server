@@ -144,7 +144,7 @@ func (n *node) open() {
 	if n.devices, err = devices.Open(filepath.Join(n.dir, "devices.json"), time.Now); err != nil {
 		t.Fatal(err)
 	}
-	n.store = store.New(filepath.Join(n.dir, "apps"), time.Now)
+	n.store = store.New(filepath.Join(n.dir, "apps"), time.Now, nil)
 	n.secrets = pairing.NewSecrets(time.Now)
 	n.hub = hub.New(hub.Deps{
 		ServerID: n.id.ServerID,
@@ -459,9 +459,6 @@ func TestPullWhenOnlyTheMainMoved(t *testing.T) {
 	waitFor(t, "the second pull", func() bool { return sub.etag("todo") == v2 })
 	waitFor(t, "the local device to hear of it", func() bool { return local.heardEtag(v2) })
 	waitFor(t, "the agreed etag to follow", func() bool { b, _ := sub.link.base("todo"); return same(b, &v2) })
-	if st, err := sub.store.Stat("todo"); err != nil || st.Versions != 1 {
-		t.Errorf("the subordinate's history: %+v, %v; want the replaced version kept", st, err)
-	}
 
 	saved, err := load(sub.linkDeps.Path)
 	if err != nil {
@@ -575,29 +572,15 @@ func TestPairRefusals(t *testing.T) {
 	}
 }
 
-// historyHolds reports whether a version in n's history of app holds body.
-func (n *node) historyHolds(app, body string) bool {
-	dir := filepath.Join(n.dir, "apps", app, "history")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if b, err := os.ReadFile(filepath.Join(dir, e.Name())); err == nil && string(b) == body {
-			return true
-		}
-	}
-	return false
-}
-
-// versions is the number of versions in n's history of app.
-func (n *node) versions(app string) int {
+// written is the time of the last write to n's app, zero if it was never
+// written: a write that changes nothing in the app's files moves it not.
+func (n *node) written(app string) time.Time {
 	n.t.Helper()
-	st, err := n.store.Stat(app)
+	st, err := n.store.Stats(app)
 	if err != nil {
 		n.t.Fatal(err)
 	}
-	return st.Versions
+	return st.Modified
 }
 
 // agreed reports whether n's link has agreed with its main on etag for app.
@@ -641,6 +624,7 @@ func TestSameDocumentsAgree(t *testing.T) {
 		t.Fatalf("the same bytes have etags %s and %s", got, v1)
 	}
 	phone, tab := main.device("todo"), sub.device("todo")
+	mainWritten, subWritten := main.written("todo"), sub.written("todo")
 
 	sub.linkTo(main)
 	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v1) })
@@ -648,7 +632,7 @@ func TestSameDocumentsAgree(t *testing.T) {
 	if phone.heardCount() != 0 || tab.heardCount() != 0 {
 		t.Errorf("devices heard %v on the main and %v here, want nothing written", phone.heard, tab.heard)
 	}
-	if main.versions("todo") != 0 || sub.versions("todo") != 0 {
+	if !main.written("todo").Equal(mainWritten) || !sub.written("todo").Equal(subWritten) {
 		t.Error("a document was rewritten")
 	}
 	if n := sub.logs.count(logPushed) + sub.logs.count(logPulled) + sub.logs.count(logReplaced); n != 0 {
@@ -672,9 +656,6 @@ func TestPushWhenOnlyTheSubordinateMoved(t *testing.T) {
 	waitFor(t, "the push", func() bool { return main.etag("todo") == v2 })
 	waitFor(t, "the agreed etag to follow", func() bool { return sub.agreed("todo", v2) })
 	waitFor(t, "the main's device to hear of it", func() bool { return phone.heardEtag(v2) })
-	if !main.historyHolds("todo", `{"v":1}`) {
-		t.Error("the main's replaced version is not in its history")
-	}
 	if st := sub.link.Status(); st.LastSync == nil {
 		t.Error("no last sync after a push")
 	}
@@ -704,8 +685,8 @@ func TestFirstLinkPushesWhenOnlyTheSubordinateHasADocument(t *testing.T) {
 
 // The row "both moved": while the two could not reach each other, a device
 // wrote on each. When the link comes back, the main's copy wins on the
-// subordinate, the subordinate's goes to its history, and its devices hear
-// of it; a device's merge written back is pushed.
+// subordinate, replacing the subordinate's, and its devices hear of it; a
+// device's merge written back is pushed.
 func TestBothMovedTheMainWins(t *testing.T) {
 	main := startNode(t, "Desk")
 	sub := startNode(t, "Laptop")
@@ -722,8 +703,8 @@ func TestBothMovedTheMainWins(t *testing.T) {
 	waitFor(t, "the main's copy to win here", func() bool { return sub.etag("todo") == v2 })
 	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v2) })
 	waitFor(t, "the device here to hear of it", func() bool { return tab.heardEtag(v2) })
-	if !sub.historyHolds("todo", `{"v":1,"laptop":true}`) {
-		t.Errorf("the subordinate's own version %s is not in its history", l2[:8])
+	if l2 == v2 {
+		t.Fatal("the two writes have one etag")
 	}
 	if main.etag("todo") != v2 {
 		t.Error("the main's document changed")
@@ -740,22 +721,20 @@ func TestBothMovedTheMainWins(t *testing.T) {
 }
 
 // The first link with different documents on both sides is a divergence
-// too: the main's copy wins, and the subordinate's is kept in its history.
+// too: the main's copy wins, and replaces the subordinate's.
 func TestFirstLinkWithDifferentDocuments(t *testing.T) {
 	main := startNode(t, "Desk")
 	sub := startNode(t, "Laptop")
 	u1 := main.write("todo", `{"main":1}`, nil)
 	sub.write("todo", `{"laptop":1}`, nil)
 	tab := sub.device("todo")
+	mainWritten := main.written("todo")
 
 	sub.linkTo(main)
 	waitFor(t, "the main's copy to win here", func() bool { return sub.etag("todo") == u1 })
 	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", u1) })
 	waitFor(t, "the device here to hear of it", func() bool { return tab.heardEtag(u1) })
-	if !sub.historyHolds("todo", `{"laptop":1}`) {
-		t.Error("the subordinate's own document is not in its history")
-	}
-	if main.etag("todo") != u1 || main.versions("todo") != 0 {
+	if main.etag("todo") != u1 || !main.written("todo").Equal(mainWritten) {
 		t.Error("the main's document was touched")
 	}
 	if !sub.logs.has("never agreed") {
@@ -776,8 +755,7 @@ func TestConflictDuringPush(t *testing.T) {
 	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v1) })
 	tab := sub.device("todo")
 
-	a, _ := main.apps.Get("todo")
-	v2, err := main.store.Write("todo", []byte(`{"v":2}`), &v1, a.History)
+	v2, err := main.store.Write("todo", []byte(`{"v":2}`), &v1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -788,9 +766,6 @@ func TestConflictDuringPush(t *testing.T) {
 	waitFor(t, "the device here to hear of it", func() bool { return tab.heardEtag(v2) })
 	if !sub.logs.has("changed before this server's reached it") {
 		t.Error("the conflict was not logged")
-	}
-	if !sub.historyHolds("todo", `{"v":1,"laptop":true}`) {
-		t.Error("the subordinate's own version is not in its history")
 	}
 	if main.etag("todo") != v2 {
 		t.Error("the push overwrote the main's newer document")
@@ -822,9 +797,6 @@ func TestPushAfterReconnect(t *testing.T) {
 	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", l3) })
 	if n := sub.logs.count(logPushed); n != 1 {
 		t.Errorf("%d pushes, want 1: the latest document only", n)
-	}
-	if main.historyHolds("todo", `{"v":"away","n":1}`) {
-		t.Error("the main stored a version the subordinate had already replaced")
 	}
 }
 
@@ -1083,10 +1055,14 @@ func TestNoWritePingPong(t *testing.T) {
 		return main.etag("todo") == merged && sub.etag("todo") == merged && sub.agreed("todo", merged)
 	})
 
-	type counts struct{ phone, tab, mainVersions, subVersions, moves int }
+	type counts struct {
+		phone, tab          int
+		mainWrote, subWrote time.Time
+		moves               int
+	}
 	snap := func() counts {
 		return counts{
-			phone.heardCount(), tab.heardCount(), main.versions("todo"), sub.versions("todo"),
+			phone.heardCount(), tab.heardCount(), main.written("todo"), sub.written("todo"),
 			sub.logs.count(logPushed) + sub.logs.count(logPulled) + sub.logs.count(logReplaced),
 		}
 	}

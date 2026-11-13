@@ -28,7 +28,7 @@ func openFresh(t *testing.T) (*Registry, string) {
 
 func TestOpenWritesDefault(t *testing.T) {
 	r, path := openFresh(t)
-	want := []App{{ID: "todo", Name: "Todo", History: 10, MaxBytes: 67108864}}
+	want := []App{{ID: "todo", Name: "Todo", Quota: 52428800}}
 	if got := r.List(); !reflect.DeepEqual(got, want) {
 		t.Errorf("List() = %+v, want %+v", got, want)
 	}
@@ -63,15 +63,13 @@ func TestAddValidates(t *testing.T) {
 	r, path := openFresh(t)
 
 	invalid := map[string]App{
-		"empty id":       {ID: ""},
-		"uppercase id":   {ID: "Notes"},
-		"traversal id":   {ID: "../x"},
-		"history high":   {ID: "n", History: 101},
-		"history neg":    {ID: "n", History: -1},
-		"maxBytes low":   {ID: "n", MaxBytes: 1023},
-		"maxBytes high":  {ID: "n", MaxBytes: 1073741825},
-		"maxBytes neg":   {ID: "n", MaxBytes: -5},
-		"id and history": {ID: "N", History: 500},
+		"empty id":     {ID: ""},
+		"uppercase id": {ID: "Notes"},
+		"traversal id": {ID: "../x"},
+		"quota low":    {ID: "n", Quota: 1<<20 - 1},
+		"quota high":   {ID: "n", Quota: 1<<40 + 1},
+		"quota neg":    {ID: "n", Quota: -5},
+		"id and quota": {ID: "N", Quota: 1},
 	}
 	for name, a := range invalid {
 		if err := r.Add(a); !errors.Is(err, ErrInvalid) {
@@ -87,15 +85,15 @@ func TestAddValidates(t *testing.T) {
 
 	// Range edges are accepted.
 	for _, a := range []App{
-		{ID: "lo", History: 1, MaxBytes: 1024},
-		{ID: "hi", History: 100, MaxBytes: 1073741824},
+		{ID: "lo", Quota: 1 << 20},
+		{ID: "hi", Quota: 1 << 40},
 	} {
 		if err := r.Add(a); err != nil {
 			t.Errorf("Add(%+v) = %v, want nil", a, err)
 		}
 	}
 
-	if err := r.Add(App{ID: "notes", Name: "Notes", History: 5, MaxBytes: 2048}); err != nil {
+	if err := r.Add(App{ID: "notes", Name: "Notes", Quota: 2 << 20}); err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := Open(path)
@@ -103,7 +101,7 @@ func TestAddValidates(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, ok := reopened.Get("notes")
-	want := App{ID: "notes", Name: "Notes", History: 5, MaxBytes: 2048}
+	want := App{ID: "notes", Name: "Notes", Quota: 2 << 20}
 	if !ok || got != want {
 		t.Errorf("Get(notes) after reopen = %+v, %v; want %+v", got, ok, want)
 	}
@@ -125,9 +123,9 @@ func TestAddAppliesDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []App{
-		{ID: "notes", Name: "notes", History: 10, MaxBytes: 67108864},
-		{ID: "blank", Name: "blank", History: 10, MaxBytes: 67108864},
-		{ID: "padded", Name: "Padded", History: 10, MaxBytes: 67108864},
+		{ID: "notes", Name: "notes", Quota: 52428800},
+		{ID: "blank", Name: "blank", Quota: 52428800},
+		{ID: "padded", Name: "Padded", Quota: 52428800},
 	} {
 		if got, ok := reopened.Get(want.ID); !ok || got != want {
 			t.Errorf("Get(%s) = %+v, %v; want %+v", want.ID, got, ok, want)
@@ -187,7 +185,7 @@ func TestReloadIfChanged(t *testing.T) {
 		t.Fatalf("untouched file: changed=%v err=%v", changed, err)
 	}
 
-	hand := `{"apps":[{"id":"todo","name":"Todo","history":10,"maxBytes":67108864},{"id":"extra","name":"Extra","history":3,"maxBytes":4096}]}`
+	hand := `{"apps":[{"id":"todo","name":"Todo","quota":52428800},{"id":"extra","name":"Extra","quota":3145728}]}`
 	if err := os.WriteFile(path, []byte(hand), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +193,7 @@ func TestReloadIfChanged(t *testing.T) {
 	if !changed || err != nil {
 		t.Fatalf("hand edit: changed=%v err=%v", changed, err)
 	}
-	if got, ok := r.Get("extra"); !ok || got != (App{ID: "extra", Name: "Extra", History: 3, MaxBytes: 4096}) {
+	if got, ok := r.Get("extra"); !ok || got != (App{ID: "extra", Name: "Extra", Quota: 3 << 20}) {
 		t.Errorf("Get(extra) = %+v, %v", got, ok)
 	}
 	if changed, err = r.ReloadIfChanged(); changed || err != nil {
@@ -223,7 +221,7 @@ func TestReloadIfChanged(t *testing.T) {
 	if changed, err = r.ReloadIfChanged(); !changed || err != nil {
 		t.Fatalf("fixed file: changed=%v err=%v", changed, err)
 	}
-	want := []App{{ID: "only", Name: "only", History: 10, MaxBytes: 67108864}}
+	want := []App{{ID: "only", Name: "only", Quota: 52428800}}
 	if got := r.List(); !reflect.DeepEqual(got, want) {
 		t.Errorf("List() = %+v, want %+v (zero means default)", got, want)
 	}
@@ -231,11 +229,11 @@ func TestReloadIfChanged(t *testing.T) {
 
 func TestReloadRejectsInvalidEntries(t *testing.T) {
 	cases := map[string]string{
-		"bad id":        `{"apps":[{"id":"Bad"}]}`,
-		"duplicate":     `{"apps":[{"id":"a"},{"id":"a"}]}`,
-		"history range": `{"apps":[{"id":"a","history":101}]}`,
-		"negative":      `{"apps":[{"id":"a","maxBytes":-1}]}`,
-		"maxBytes low":  `{"apps":[{"id":"a","maxBytes":10}]}`,
+		"bad id":     `{"apps":[{"id":"Bad"}]}`,
+		"duplicate":  `{"apps":[{"id":"a"},{"id":"a"}]}`,
+		"quota high": `{"apps":[{"id":"a","quota":1099511627777}]}`,
+		"negative":   `{"apps":[{"id":"a","quota":-1}]}`,
+		"quota low":  `{"apps":[{"id":"a","quota":10}]}`,
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -391,15 +389,15 @@ func TestUnknownKeysAreLogged(t *testing.T) {
 	var buf strings.Builder
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	handEdit(t, path, `{"apps":[{"id":"todo","Name":"Todo","histroy":3}],"extra":1}`)
+	handEdit(t, path, `{"apps":[{"id":"todo","Name":"Todo","qouta":3}],"extra":1}`)
 	if changed, err := r.ReloadIfChanged(); !changed || err != nil {
 		t.Fatalf("changed %v, %v", changed, err)
 	}
-	if a, _ := r.Get("todo"); a.History != DefaultHistory {
-		t.Errorf("history %d, want the default", a.History)
+	if a, _ := r.Get("todo"); a.Quota != DefaultQuota {
+		t.Errorf("quota %d, want the default", a.Quota)
 	}
 	out := buf.String()
-	for _, want := range []string{path, `apps[0]: unknown key "histroy"`, `unknown key "extra"`} {
+	for _, want := range []string{path, `apps[0]: unknown key "qouta"`, `unknown key "extra"`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log %q lacks %q", out, want)
 		}

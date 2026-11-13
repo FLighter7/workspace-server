@@ -43,7 +43,8 @@ func TestValidFolder(t *testing.T) {
 		{"aux", false},
 		{"com1", false},
 		{"lpt9", false},
-		{"com0", true},
+		{"com0", false},
+		{"lpt0", false},
 		{"com10", true},
 		{"cons", true},
 		{"lpt", true},
@@ -77,6 +78,8 @@ func TestValidID(t *testing.T) {
 		{"nul", false},
 		{"com1", false},
 		{"lpt9", false},
+		{"com0", false},
+		{"LPT0", false},
 		{"conin", true},
 	} {
 		if got := ValidID(tc.id); got != tc.want {

@@ -245,7 +245,7 @@ func TestResetStartsOverWithTheSameSettings(t *testing.T) {
 	}
 	var list []web.AppInfo
 	_, body := ts.send(t, http.MethodGet, "/api/apps", "")
-	if err := json.Unmarshal([]byte(body), &list); err != nil || len(list) != 1 || list[0].ID != "todo" || list[0].Size != 0 || list[0].Versions != 0 {
+	if err := json.Unmarshal([]byte(body), &list); err != nil || len(list) != 1 || list[0].ID != "todo" || list[0].Size != 0 || list[0].Files != 0 {
 		t.Errorf("apps after the reset: %s, want the default todo without data", body)
 	}
 	// The lock stayed taken across the restart.

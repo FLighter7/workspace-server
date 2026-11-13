@@ -1,11 +1,12 @@
 package store
 
 import (
-	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -13,468 +14,575 @@ import (
 	"time"
 )
 
-var t0 = time.Date(2026, 11, 7, 18, 35, 12, 0, time.UTC)
+var t0 = time.Date(2026, 11, 13, 18, 35, 12, 0, time.UTC)
 
-func newStore(t *testing.T) (*Store, string, *time.Time) {
-	t.Helper()
-	root := filepath.Join(t.TempDir(), "apps")
-	clock := t0
-	return New(root, func() time.Time { return clock }), root, &clock
+// clock is a settable time source.
+type clock struct {
+	mu sync.Mutex
+	t  time.Time
 }
 
-func mustWrite(t *testing.T, s *Store, body string, ifEtag *string, history int) string {
+func (c *clock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *clock) add(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+type env struct {
+	t     *testing.T
+	root  string
+	clock *clock
+	quota int64
+	s     *Store
+}
+
+// newEnv returns a store on a fresh root, with app "todo" in mind.
+func newEnv(t *testing.T) *env {
 	t.Helper()
-	etag, err := s.Write("todo", []byte(body), ifEtag, history)
-	if err != nil {
-		t.Fatalf("Write(%q): %v", body, err)
+	e := &env{t: t, root: filepath.Join(t.TempDir(), "apps"), clock: &clock{t: t0}}
+	e.s = e.open()
+	return e
+}
+
+// open returns a new Store on e's root: a restart.
+func (e *env) open() *Store {
+	return New(e.root, e.clock.now, func(string) int64 { return e.quota })
+}
+
+// restart replaces e.s with a new Store on the same root and recovers it.
+func (e *env) restart() {
+	e.t.Helper()
+	e.s = e.open()
+	if err := e.s.Recover(); err != nil {
+		e.t.Fatalf("Recover: %v", err)
 	}
-	return etag
 }
 
-func historyFiles(t *testing.T, root string) []string {
+func key(t *testing.T, s string) Key {
 	t.Helper()
-	entries, err := os.ReadDir(filepath.Join(root, "todo", "history"))
+	k, ok := ParseKey(s)
+	if !ok {
+		t.Fatalf("ParseKey(%q) is not a key", s)
+	}
+	return k
+}
+
+func etagOf(s string) string { return Etag([]byte(s)) }
+
+func ptr(s string) *string { return &s }
+
+// file returns the path of rel ("/"-separated) in app's folder.
+func (e *env) file(app, rel string) string {
+	return filepath.Join(e.root, app, filepath.FromSlash(rel))
+}
+
+// writeFile writes a file by hand into app's folder, as a person would.
+func (e *env) writeFile(app, rel, body string) {
+	e.t.Helper()
+	path := e.file(app, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// readFile reads a document's file back.
+func (e *env) readFile(app, rel string) (string, bool) {
+	e.t.Helper()
+	b, err := os.ReadFile(e.file(app, rel))
 	if errors.Is(err, os.ErrNotExist) {
+		return "", false
+	}
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return string(b), true
+}
+
+// docs returns app's listing as "key=body-etag-prefix" lines, checking that
+// every listed etag is the hash of the file on disk.
+func (e *env) docs(app string) map[string]string {
+	e.t.Helper()
+	l, err := e.s.List(app)
+	if err != nil {
+		e.t.Fatalf("List: %v", err)
+	}
+	out := map[string]string{}
+	for _, d := range l.Docs {
+		body, ok := e.readFile(app, d.Key.String())
+		if !ok {
+			e.t.Fatalf("listed %s has no file", d.Key)
+		}
+		if Etag([]byte(body)) != d.Etag || int64(len(body)) != d.Bytes {
+			e.t.Fatalf("listed %s: etag %s, %d bytes; the file holds %q", d.Key, d.Etag[:8], d.Bytes, body)
+		}
+		out[d.Key.String()] = body
+	}
+	return out
+}
+
+// commitAll stages body for each key (in one transaction of device "dev")
+// and commits it. A body of "-" deletes the key. ifEtags are taken from the
+// current listing.
+func (e *env) commitAll(app string, changes map[string]string) Committed {
+	e.t.Helper()
+	l, err := e.s.List(app)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	cur := map[string]*string{}
+	for _, d := range l.Docs {
+		cur[d.Key.String()] = ptr(d.Etag)
+	}
+	tx := "tx-commitall-0001"
+	if _, err := e.s.Begin(app, "dev", tx); err != nil {
+		e.t.Fatal(err)
+	}
+	keys := make([]string, 0, len(changes))
+	for k := range changes {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, ks := range keys {
+		body := changes[ks]
+		if body == "-" {
+			if err := e.s.Delete(app, "dev", tx, key(e.t, ks), cur[ks]); err != nil {
+				e.t.Fatal(err)
+			}
+			continue
+		}
+		e.put(app, "dev", tx, ks, cur[ks], body)
+	}
+	c, err := e.s.Commit(app, "dev", tx)
+	if err != nil {
+		e.t.Fatalf("Commit: %v", err)
+	}
+	return c
+}
+
+// put stages body whole for ks.
+func (e *env) put(app, device, tx, ks string, ifEtag *string, body string) {
+	e.t.Helper()
+	sink, err := e.s.Put(app, device, tx, key(e.t, ks), ifEtag, int64(len(body)), 0)
+	if err != nil {
+		e.t.Fatalf("Put(%s): %v", ks, err)
+	}
+	if _, err := io.WriteString(sink, body); err != nil {
+		e.t.Fatalf("write %s: %v", ks, err)
+	}
+	if err := sink.Close(); err != nil {
+		e.t.Fatalf("close %s: %v", ks, err)
+	}
+}
+
+func wantDocs(t *testing.T, got map[string]string, want map[string]string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("docs = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("docs = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestEmptyApp(t *testing.T) {
+	e := newEnv(t)
+	rev, err := e.s.Head("todo")
+	if err != nil || rev != nil {
+		t.Fatalf("Head = %v, %v; want nil", rev, err)
+	}
+	l, err := e.s.List("todo")
+	if err != nil || l.Revision != nil || len(l.Docs) != 0 || len(l.Removed) != 0 {
+		t.Fatalf("List = %+v, %v", l, err)
+	}
+	st, err := e.s.Stats("todo")
+	if err != nil || st != (Stats{Quota: 50 << 20}) {
+		t.Fatalf("Stats = %+v, %v", st, err)
+	}
+	// Reading an app that has nothing writes nothing.
+	if _, err := os.Stat(filepath.Join(e.root, "todo")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the app's folder was made for nothing: %v", err)
+	}
+}
+
+func TestBadAppID(t *testing.T) {
+	e := newEnv(t)
+	for _, app := range []string{"", "..", "Todo", "a/b", `a\b`} {
+		if _, err := e.s.Head(app); !errors.Is(err, ErrBadApp) {
+			t.Errorf("Head(%q) = %v, want ErrBadApp", app, err)
+		}
+		if _, err := e.s.Begin(app, "dev", "tx-0123456789abcdef"); !errors.Is(err, ErrBadApp) {
+			t.Errorf("Begin(%q) = %v, want ErrBadApp", app, err)
+		}
+	}
+}
+
+func TestKeysAtTheBoundary(t *testing.T) {
+	e := newEnv(t)
+	tx := "tx-0123456789abcdef"
+	if _, err := e.s.Begin("todo", "dev", tx); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []Key{
+		{Path: "", ID: "", Type: "json"},
+		{Path: "", ID: "con", Type: "json"},
+		{Path: "", ID: "com0", Type: "json"},
+		{Path: "lpt0", ID: "a", Type: "json"},
+		{Path: "", ID: "a", Type: ""},
+		{Path: "", ID: "A", Type: "json"},
+		{Path: "", ID: "a.b", Type: "json"},
+		{Path: "..", ID: "a", Type: "json"},
+		{Path: ".wss", ID: "index", Type: "json"},
+		{Path: "a/", ID: "a", Type: "json"},
+		{Path: levels(11), ID: "a", Type: "json"},
+		{Path: strings.Repeat("a", 200), ID: strings.Repeat("b", 60), Type: "json"},
+	} {
+		if _, err := e.s.Put("todo", "dev", tx, k, nil, 1, 0); !errors.Is(err, ErrBadPath) {
+			t.Errorf("Put(%+v) = %v, want ErrBadPath", k, err)
+		}
+		if err := e.s.Delete("todo", "dev", tx, k, nil); !errors.Is(err, ErrBadPath) {
+			t.Errorf("Delete(%+v) = %v, want ErrBadPath", k, err)
+		}
+		if _, _, err := e.s.Open("todo", k, "x"); !errors.Is(err, ErrBadPath) {
+			t.Errorf("Open(%+v) = %v, want ErrBadPath", k, err)
+		}
+	}
+	for _, id := range []string{"", "short", strings.Repeat("a", 65), "tx-0123456789abcde!", "tx 0123456789abcdef"} {
+		if _, err := e.s.Begin("todo", "dev", id); !errors.Is(err, ErrBadTx) {
+			t.Errorf("Begin(%q) = %v, want ErrBadTx", id, err)
+		}
+	}
+	for _, id := range []string{"0123456789abcdef", strings.Repeat("Z", 64), "A-b_c-0123456789"} {
+		if !ValidTx(id) {
+			t.Errorf("ValidTx(%q) = false", id)
+		}
+	}
+}
+
+func TestRevision(t *testing.T) {
+	if revisionOf(nil) != nil || revisionOf(map[string]docEntry{}) != nil {
+		t.Fatal("the revision of an empty set is not nil")
+	}
+	docs := map[string]docEntry{
+		"b.json":     {Etag: "e2"},
+		"a/z.bin":    {Etag: "e1"},
+		"a.json":     {Etag: "e0"},
+		"a/b/c.json": {Etag: "e3"},
+	}
+	// "a.json" < "a/b/c.json" < "a/z.bin" < "b.json": byte order, "." < "/".
+	sum := sha256.Sum256([]byte("a.json\x00e0\na/b/c.json\x00e3\na/z.bin\x00e1\nb.json\x00e2\n"))
+	want := hex.EncodeToString(sum[:])
+	for range 10 { // map order must not matter
+		if got := revisionOf(docs); got == nil || *got != want {
+			t.Fatalf("revisionOf = %v, want %s", got, want)
+		}
+	}
+	// Two stores with the same files agree; size and mtime play no part.
+	a, b := newEnv(t), newEnv(t)
+	a.writeFile("todo", "x/1.json", "one")
+	a.writeFile("todo", "2.txt", "two")
+	b.writeFile("todo", "2.txt", "two")
+	b.writeFile("todo", "x/1.json", "one")
+	if err := os.Chtimes(b.file("todo", "2.txt"), t0, t0); err != nil {
+		t.Fatal(err)
+	}
+	ra, _ := a.s.Head("todo")
+	rb, _ := b.s.Head("todo")
+	sum = sha256.Sum256([]byte("2.txt\x00" + etagOf("two") + "\nx/1.json\x00" + etagOf("one") + "\n"))
+	if ra == nil || rb == nil || *ra != *rb || *ra != hex.EncodeToString(sum[:]) {
+		t.Fatalf("revisions %v and %v; want both %x", ra, rb, sum)
+	}
+}
+
+func TestReconcileTakesInHandEdits(t *testing.T) {
+	e := newEnv(t)
+	e.writeFile("todo", "data.json", `{"v":1}`)
+	e.writeFile("todo", "photos/2026/a.jpg", "jpeg")
+	e.writeFile("todo", "notes/n.md", "note")
+	// Invisible: names that are not keys, and the server's own folder.
+	for _, rel := range []string{
+		"Upper.json", "noext", "a.b.json", "x.json.tmp-123", ".hidden.json",
+		"notes/.git/config.json", "Bad/a.json", "con.json", "history/20260101T000000.000Z-abcd1234.json",
+		levels(11) + "/deep.json", ".wss/stray.json",
+	} {
+		e.writeFile("todo", rel, "ignored")
+	}
+	changed, rev, err := e.s.Reconcile("todo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Error("the first operation already loaded the files; Reconcile reports a change")
+	}
+	if rev == nil {
+		t.Fatal("no revision")
+	}
+	wantDocs(t, e.docs("todo"), map[string]string{"data.json": `{"v":1}`, "photos/2026/a.jpg": "jpeg", "notes/n.md": "note"})
+
+	// Unchanged files are not hashed again.
+	hashes := 0
+	hashFile = func(path string) (string, int64, int64, error) {
+		hashes++
+		return hashShared(path)
+	}
+	t.Cleanup(func() { hashFile = hashShared })
+	if changed, _, err := e.s.Reconcile("todo"); changed || err != nil || hashes != 0 {
+		t.Fatalf("Reconcile of untouched files = %v, %v; %d hashed", changed, err, hashes)
+	}
+
+	// A change of the same size is seen by its mtime; a new file is added; a
+	// removed one becomes a tombstone.
+	e.writeFile("todo", "data.json", `{"v":2}`)
+	later := t0.Add(time.Hour)
+	if err := os.Chtimes(e.file("todo", "data.json"), later, later); err != nil {
+		t.Fatal(err)
+	}
+	e.writeFile("todo", "new.txt", "new")
+	if err := os.Remove(e.file("todo", "notes/n.md")); err != nil {
+		t.Fatal(err)
+	}
+	e.clock.add(time.Minute)
+	changed, rev2, err := e.s.Reconcile("todo")
+	if err != nil || !changed || *rev2 == *rev {
+		t.Fatalf("Reconcile after edits = %v, %v, %v", changed, rev2, err)
+	}
+	if hashes != 2 {
+		t.Errorf("hashed %d files, want 2 (the changed one and the new one)", hashes)
+	}
+	wantDocs(t, e.docs("todo"), map[string]string{"data.json": `{"v":2}`, "photos/2026/a.jpg": "jpeg", "new.txt": "new"})
+	l, _ := e.s.List("todo")
+	if len(l.Removed) != 1 || l.Removed[0].Key.String() != "notes/n.md" || !l.Removed[0].At.Equal(t0.Add(time.Minute)) {
+		t.Errorf("Removed = %+v", l.Removed)
+	}
+	// The invisible files are still there, untouched.
+	if b, ok := e.readFile("todo", "Upper.json"); !ok || b != "ignored" {
+		t.Error("an invisible file was touched")
+	}
+
+	// A touch that keeps the bytes changes no revision, and the index learns
+	// the new time, so the file is not hashed again.
+	if err := os.Chtimes(e.file("todo", "new.txt"), later, later); err != nil {
+		t.Fatal(err)
+	}
+	hashes = 0
+	if changed, _, _ := e.s.Reconcile("todo"); changed || hashes != 1 {
+		t.Errorf("after a touch: changed %v, hashed %d", changed, hashes)
+	}
+	if _, _, _ = e.s.Reconcile("todo"); hashes != 1 {
+		t.Errorf("hashed the touched file again: %d", hashes)
+	}
+
+	// A restart reads the index back and agrees.
+	e.restart()
+	l2, _ := e.s.List("todo")
+	if *l2.Revision != *rev2 || len(l2.Removed) != 1 {
+		t.Errorf("after a restart: %+v", l2)
+	}
+	if hashes != 1 {
+		t.Errorf("a restart hashed unchanged files again: %d", hashes-1)
+	}
+}
+
+func TestReconcileSkipsLinks(t *testing.T) {
+	e := newEnv(t)
+	e.writeFile("todo", "a.json", "a")
+	outside := filepath.Join(t.TempDir(), "secret.json")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, e.file("todo", "link.json")); err != nil {
+		t.Skipf("no symbolic links here: %v", err)
+	}
+	if err := os.Symlink(filepath.Dir(outside), e.file("todo", "dir")); err != nil {
+		t.Skipf("no symbolic links here: %v", err)
+	}
+	wantDocs(t, e.docs("todo"), map[string]string{"a.json": "a"})
+}
+
+func TestTombstones(t *testing.T) {
+	e := newEnv(t)
+	x := e.s
+	// Fill the index directly: 1000 commits would be slow for nothing.
+	if err := x.do("todo", func(a *appState) error {
+		for i := range MaxTombstones + 5 {
+			ks := "t" + strings.Repeat("0", 4-len(itoa(i))) + itoa(i) + ".json"
+			a.idx.put(ks, docEntry{Etag: "e"})
+			a.idx.remove(ks, t0.Add(time.Duration(i)*time.Second))
+		}
 		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
+	l, _ := x.List("todo")
+	if len(l.Removed) != MaxTombstones {
+		t.Fatalf("%d tombstones, want %d", len(l.Removed), MaxTombstones)
+	}
+	if l.Removed[0].Key.String() != "t0005.json" {
+		t.Errorf("the oldest kept is %s, want t0005.json", l.Removed[0].Key)
+	}
+
+	// Through commits: a delete leaves one, a re-creation drops it, a second
+	// delete leaves one again.
+	e2 := newEnv(t)
+	e2.commitAll("todo", map[string]string{"a.json": "1", "b.json": "2"})
+	e2.clock.add(time.Second)
+	e2.commitAll("todo", map[string]string{"a.json": "-"})
+	l, _ = e2.s.List("todo")
+	if len(l.Removed) != 1 || l.Removed[0].Key.String() != "a.json" || !l.Removed[0].At.Equal(t0.Add(time.Second)) {
+		t.Fatalf("after a delete: %+v", l.Removed)
+	}
+	e2.commitAll("todo", map[string]string{"a.json": "3"})
+	if l, _ = e2.s.List("todo"); len(l.Removed) != 0 {
+		t.Fatalf("the re-created document keeps its tombstone: %+v", l.Removed)
+	}
+	e2.commitAll("todo", map[string]string{"a.json": "-"})
+	e2.commitAll("todo", map[string]string{"a.json": "4"})
+	e2.commitAll("todo", map[string]string{"a.json": "-"})
+	if l, _ = e2.s.List("todo"); len(l.Removed) != 1 {
+		t.Fatalf("one key deleted three times: %+v", l.Removed)
+	}
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var b []byte
+	for ; i > 0; i /= 10 {
+		b = append([]byte{byte('0' + i%10)}, b...)
+	}
+	return string(b)
+}
+
+func TestOpen(t *testing.T) {
+	e := newEnv(t)
+	e.commitAll("todo", map[string]string{"a/b.bin": "0123456789"})
+	k := key(t, "a/b.bin")
+	f, info, err := e.s.Open("todo", k, etagOf("0123456789"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var names []string
-	for _, e := range entries {
-		names = append(names, e.Name())
+	if info != (DocInfo{Key: k, Etag: etagOf("0123456789"), Bytes: 10}) {
+		t.Errorf("info = %+v", info)
 	}
-	return names
+	if _, err := f.Seek(4, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	rest, _ := io.ReadAll(f)
+	f.Close()
+	if string(rest) != "456789" {
+		t.Errorf("read from offset 4: %q", rest)
+	}
+
+	for name, tc := range map[string]struct {
+		key  string
+		etag string
+	}{
+		"another etag": {"a/b.bin", etagOf("x")},
+		"no such doc":  {"a/c.bin", etagOf("0123456789")},
+	} {
+		if _, _, err := e.s.Open("todo", key(t, tc.key), tc.etag); !errors.Is(err, ErrStale) {
+			t.Errorf("%s: Open = %v, want ErrStale", name, err)
+		}
+	}
+
+	// Edited by hand since the index saw it: reconciled, and stale.
+	e.writeFile("todo", "a/b.bin", "abcdefghijk")
+	if _, _, err := e.s.Open("todo", k, etagOf("0123456789")); !errors.Is(err, ErrStale) {
+		t.Fatalf("Open of a hand-edited file = %v, want ErrStale", err)
+	}
+	f, _, err = e.s.Open("todo", k, etagOf("abcdefghijk"))
+	if err != nil {
+		t.Fatalf("Open with the new etag: %v", err)
+	}
+	f.Close()
+	// Removed by hand: stale, and the index learns it.
+	if err := os.Remove(e.file("todo", "a/b.bin")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.s.Open("todo", k, etagOf("abcdefghijk")); !errors.Is(err, ErrStale) {
+		t.Fatalf("Open of a removed file = %v, want ErrStale", err)
+	}
+	if rev, _ := e.s.Head("todo"); rev != nil {
+		t.Errorf("revision %v after the only file went", *rev)
+	}
 }
 
-func TestFirstWrite(t *testing.T) {
-	s, _, _ := newStore(t)
-	body := []byte(`{"a" :1}`)
-	etag, err := s.Write("todo", body, nil, 10)
+func TestStats(t *testing.T) {
+	e := newEnv(t)
+	e.quota = 4 << 20
+	e.clock.add(time.Hour)
+	e.commitAll("todo", map[string]string{"a.json": "12345", "b/c.txt": "678"})
+	st, err := e.s.Stats("todo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if etag != Etag(body) || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(etag) {
-		t.Errorf("etag = %q, want 64 lowercase hex of the body", etag)
+	if st != (Stats{Files: 2, Bytes: 8, Quota: 4 << 20, Modified: t0.Add(time.Hour)}) {
+		t.Errorf("Stats = %+v", st)
 	}
-	got, gotEtag, err := s.Read("todo")
+}
+
+func TestDeleteApp(t *testing.T) {
+	e := newEnv(t)
+	e.commitAll("todo", map[string]string{"a.json": "1"})
+	if _, err := e.s.Begin("todo", "dev", "tx-open-0123456789"); err != nil {
+		t.Fatal(err)
+	}
+	sink, err := e.s.Put("todo", "dev", "tx-open-0123456789", key(t, "b.json"), nil, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got, body) {
-		t.Errorf("Read body = %q, want %q", got, body)
-	}
-	if gotEtag == nil || *gotEtag != etag {
-		t.Errorf("Read etag = %v, want %q", gotEtag, etag)
-	}
-}
-
-func TestReadWithoutDocument(t *testing.T) {
-	s, _, _ := newStore(t)
-	body, etag, err := s.Read("todo")
-	if body != nil || etag != nil || err != nil {
-		t.Errorf("Read = %q, %v, %v; want nil, nil, nil", body, etag, err)
-	}
-}
-
-func TestCreateWhenExistsConflicts(t *testing.T) {
-	s, _, _ := newStore(t)
-	first := mustWrite(t, s, `1`, nil, 10)
-	_, err := s.Write("todo", []byte(`2`), nil, 10)
-	var ce *ConflictError
-	if !errors.As(err, &ce) {
-		t.Fatalf("err = %v, want ConflictError", err)
-	}
-	if ce.Current == nil || *ce.Current != first {
-		t.Errorf("Current = %v, want %q", ce.Current, first)
-	}
-}
-
-func TestEtagForMissingDocumentConflicts(t *testing.T) {
-	s, _, _ := newStore(t)
-	etag := Etag([]byte(`1`))
-	_, err := s.Write("todo", []byte(`1`), &etag, 10)
-	var ce *ConflictError
-	if !errors.As(err, &ce) || ce.Current != nil {
-		t.Errorf("err = %v, want ConflictError with nil Current", err)
-	}
-}
-
-func TestStaleEtagConflicts(t *testing.T) {
-	s, _, _ := newStore(t)
-	first := mustWrite(t, s, `1`, nil, 10)
-	second := mustWrite(t, s, `2`, &first, 10)
-	_, err := s.Write("todo", []byte(`3`), &first, 10)
-	var ce *ConflictError
-	if !errors.As(err, &ce) {
-		t.Fatalf("err = %v, want ConflictError", err)
-	}
-	if ce.Current == nil || *ce.Current != second {
-		t.Errorf("Current = %v, want %q", ce.Current, second)
-	}
-	if body, _, _ := s.Read("todo"); string(body) != `2` {
-		t.Errorf("document = %q, want it untouched", body)
-	}
-}
-
-func TestMatchingEtagWrites(t *testing.T) {
-	s, _, _ := newStore(t)
-	first := mustWrite(t, s, `1`, nil, 10)
-	second := mustWrite(t, s, `2`, &first, 10)
-	if second != Etag([]byte(`2`)) {
-		t.Errorf("etag = %q, want etag of the new body", second)
-	}
-	if body, _, _ := s.Read("todo"); string(body) != `2` {
-		t.Errorf("document = %q, want 2", body)
-	}
-}
-
-func TestHistory(t *testing.T) {
-	s, root, clock := newStore(t)
-	first := mustWrite(t, s, `{"v": 1}`, nil, 2)
-
-	// The old document moves to history, named by the replacement time.
-	etag := mustWrite(t, s, `{"v": 2}`, &first, 2)
-	want := "20261107T183512.000Z-" + first[:8] + ".json"
-	if names := historyFiles(t, root); len(names) != 1 || names[0] != want {
-		t.Fatalf("history = %v, want [%s]", names, want)
-	}
-	got, err := os.ReadFile(filepath.Join(root, "todo", "history", want))
-	if err != nil || string(got) != `{"v": 1}` {
-		t.Errorf("history bytes = %q, %v; want the replaced bytes", got, err)
-	}
-
-	// Three more replacements, a second apart; only the newest 2 stay.
-	var etags []string
-	for i := 3; i <= 5; i++ {
-		*clock = clock.Add(time.Second)
-		etags = append(etags, etag)
-		etag = mustWrite(t, s, `{"v": `+string(rune('0'+i))+`}`, &etag, 2)
-	}
-	names := historyFiles(t, root)
-	wantNames := []string{
-		"20261107T183514.000Z-" + etags[1][:8] + ".json",
-		"20261107T183515.000Z-" + etags[2][:8] + ".json",
-	}
-	if len(names) != 2 || names[0] != wantNames[0] || names[1] != wantNames[1] {
-		t.Errorf("history = %v, want %v", names, wantNames)
-	}
-}
-
-func TestZeroHistoryKeepsNone(t *testing.T) {
-	s, root, _ := newStore(t)
-	first := mustWrite(t, s, `1`, nil, 0)
-	mustWrite(t, s, `2`, &first, 0)
-	if names := historyFiles(t, root); len(names) != 0 {
-		t.Errorf("history = %v, want none", names)
-	}
-}
-
-func TestIdenticalRewriteInSameSecond(t *testing.T) {
-	s, root, _ := newStore(t)
-	first := mustWrite(t, s, `1`, nil, 5)
-	mustWrite(t, s, `1`, &first, 5)
-	mustWrite(t, s, `1`, &first, 5)
-	if names := historyFiles(t, root); len(names) != 1 {
-		t.Errorf("history = %v, want one file", names)
-	}
-}
-
-func TestNotJSON(t *testing.T) {
-	s, root, _ := newStore(t)
-	first := mustWrite(t, s, `{"ok":true}`, nil, 10)
-	_, err := s.Write("todo", []byte("not json"), &first, 10)
-	if !errors.Is(err, ErrNotJSON) {
-		t.Fatalf("err = %v, want ErrNotJSON", err)
-	}
-	body, etag, _ := s.Read("todo")
-	if string(body) != `{"ok":true}` || *etag != first {
-		t.Errorf("document = %q (%v), want it untouched", body, etag)
-	}
-	if names := historyFiles(t, root); len(names) != 0 {
-		t.Errorf("history = %v, want none", names)
-	}
-}
-
-func TestFailedWriteKeepsPreviousDocument(t *testing.T) {
-	s, root, _ := newStore(t)
-	first := mustWrite(t, s, `{"ok":true}`, nil, 10)
-	// A read-only app directory makes the temp file creation fail.
-	dir := filepath.Join(root, "todo")
-	if err := os.Chmod(dir, 0o500); err != nil {
+	if err := e.s.DeleteApp("todo"); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	if f, err := os.CreateTemp(dir, "probe"); err == nil { // running as root
-		f.Close()
-		os.Remove(f.Name())
-		t.Skip("directory permissions are not enforced")
+	if _, err := sink.Write([]byte("x")); !errors.Is(err, ErrNoTransaction) {
+		t.Errorf("a write after the app went = %v, want ErrNoTransaction", err)
 	}
-	if _, err := s.Write("todo", []byte(`{"ok":false}`), &first, 10); err == nil {
-		t.Fatal("Write succeeded in a read-only directory")
+	if _, err := os.Stat(filepath.Join(e.root, "todo")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the app's folder stays: %v", err)
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
+	if rev, err := e.s.Head("todo"); rev != nil || err != nil {
+		t.Errorf("Head after DeleteApp = %v, %v", rev, err)
 	}
-	body, etag, _ := s.Read("todo")
-	if string(body) != `{"ok":true}` || *etag != first {
-		t.Errorf("document = %q, want the previous one", body)
-	}
-	if names := historyFiles(t, root); len(names) != 0 {
-		t.Errorf("history = %v, want the failed write's link removed", names)
+	if err := e.s.DeleteApp("todo"); err != nil {
+		t.Errorf("DeleteApp of a missing app: %v", err)
 	}
 }
 
-// On a file system without hard links (exFAT, FAT, most SMB and CIFS mounts)
-// history holds copies of the replaced bytes, and a failed write removes the
-// copy it made.
-func TestHistoryWithoutHardLinks(t *testing.T) {
-	link = func(oldname, newname string) error {
-		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: errors.ErrUnsupported}
-	}
-	t.Cleanup(func() { link = os.Link })
-
-	s, root, clock := newStore(t)
-	first := mustWrite(t, s, `{"v": 1}`, nil, 10)
-	second := mustWrite(t, s, `{"v": 2}`, &first, 10)
-	want := "20261107T183512.000Z-" + first[:8] + ".json"
-	if names := historyFiles(t, root); len(names) != 1 || names[0] != want {
-		t.Fatalf("history = %v, want [%s]", names, want)
-	}
-	if got, err := os.ReadFile(filepath.Join(root, "todo", "history", want)); err != nil || string(got) != `{"v": 1}` {
-		t.Errorf("history bytes = %q, %v; want the replaced bytes", got, err)
-	}
-
-	// Every replaced version gets its copy, the same bytes at another point
-	// included: v1, v2, v1.
-	third := mustWrite(t, s, `{"v": 1}`, &second, 10)
-	mustWrite(t, s, `{"v": 3}`, &third, 10)
-	if names := historyFiles(t, root); len(names) != 3 {
-		t.Errorf("history = %v, want three files", names)
-	}
-
-	// A write that fails after its copy is made removes the copy.
-	*clock = clock.Add(time.Second)
-	dir := filepath.Join(root, "todo")
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	if f, err := os.CreateTemp(dir, "probe"); err == nil { // running as root
-		f.Close()
-		os.Remove(f.Name())
-		t.Skip("directory permissions are not enforced")
-	}
-	current := Etag([]byte(`{"v": 3}`))
-	if _, err := s.Write("todo", []byte(`{"v": 4}`), &current, 10); err == nil {
-		t.Fatal("Write succeeded in a read-only directory")
-	}
-	if names := historyFiles(t, root); len(names) != 3 {
-		t.Errorf("history = %v, want the failed write's copy removed", names)
-	}
-}
-
-// Several replacements within one second keep their order: the newest
-// versions stay, not the ones whose etag sorts last.
-func TestHistoryKeepsTheNewestWithinOneSecond(t *testing.T) {
-	s, root, _ := newStore(t)
-	etag := mustWrite(t, s, `{"v": 1}`, nil, 2)
-	for i := 2; i <= 6; i++ {
-		etag = mustWrite(t, s, `{"v": `+string(rune('0'+i))+`}`, &etag, 2)
-	}
-	names := historyFiles(t, root)
-	if len(names) != 2 {
-		t.Fatalf("history = %v, want 2 files", names)
-	}
-	for i, want := range []string{`{"v": 4}`, `{"v": 5}`} {
-		got, err := os.ReadFile(filepath.Join(root, "todo", "history", names[i]))
-		if err != nil || string(got) != want {
-			t.Errorf("history[%d] %s = %q, %v; want %s", i, names[i], got, err, want)
-		}
-	}
-	if !strings.HasPrefix(names[0], "20261107T183512.003Z-") || !strings.HasPrefix(names[1], "20261107T183512.004Z-") {
-		t.Errorf("history = %v, want stamps a millisecond apart", names)
-	}
-}
-
-// Names from before milliseconds sort by their time among the new ones, and
-// the oldest go first.
-func TestHistoryWithOldNames(t *testing.T) {
-	s, root, clock := newStore(t)
-	ordered := func() []string { // the store's own order, not the names'
-		t.Helper()
-		names, err := s.historyNames("todo")
-		if err != nil {
-			t.Fatal(err)
-		}
-		return names
-	}
-	first := mustWrite(t, s, `{"v": 1}`, nil, 3)
-	hdir := filepath.Join(root, "todo", "history")
-	if err := os.MkdirAll(hdir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"20261107T183510Z-aaaaaaaa.json", "20261107T183512Z-bbbbbbbb.json"} {
-		if err := os.WriteFile(filepath.Join(hdir, name), []byte(`{"old": true}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Now is the second of the newer old name: the new entry goes after it.
-	second := mustWrite(t, s, `{"v": 2}`, &first, 3)
-	want := []string{
-		"20261107T183510Z-aaaaaaaa.json",
-		"20261107T183512Z-bbbbbbbb.json",
-		"20261107T183512.001Z-" + first[:8] + ".json",
-	}
-	if names := ordered(); !slices.Equal(names, want) {
-		t.Fatalf("history = %v, want %v", names, want)
-	}
-	*clock = clock.Add(time.Second)
-	mustWrite(t, s, `{"v": 3}`, &second, 3)
-	want = append(want[1:], "20261107T183513.000Z-"+second[:8]+".json")
-	if names := ordered(); !slices.Equal(names, want) {
-		t.Errorf("after pruning, history = %v, want %v", names, want)
-	}
-}
-
-// A crash between the history link and the rename leaves the current
-// document in history already; the next write adds no second copy of it.
-func TestCrashLeftoverIsNotDuplicated(t *testing.T) {
-	for _, hardLinks := range []bool{true, false} {
-		t.Run(map[bool]string{true: "hard link", false: "copy"}[hardLinks], func(t *testing.T) {
-			if !hardLinks {
-				link = func(oldname, newname string) error {
-					return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: errors.ErrUnsupported}
-				}
-				t.Cleanup(func() { link = os.Link })
-			}
-			s, root, clock := newStore(t)
-			first := mustWrite(t, s, `{"v": 1}`, nil, 10)
-			hdir := filepath.Join(root, "todo", "history")
-			if err := os.MkdirAll(hdir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			leftover := filepath.Join(hdir, "20261107T183511Z-"+first[:8]+".json")
-			if err := os.WriteFile(leftover, []byte(`{"v": 1}`), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			*clock = clock.Add(time.Second)
-			mustWrite(t, s, `{"v": 2}`, &first, 10)
-			if names := historyFiles(t, root); len(names) != 1 {
-				t.Errorf("history = %v, want only the leftover", names)
-			}
-		})
-	}
-}
-
-func TestHandEditedFileChangesEtag(t *testing.T) {
-	s, root, _ := newStore(t)
-	mustWrite(t, s, `1`, nil, 10)
-	edited := []byte(`{"edited":  true}`)
-	if err := os.WriteFile(filepath.Join(root, "todo", "data.json"), edited, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	body, etag, err := s.Read("todo")
+func TestIndexOnDisk(t *testing.T) {
+	e := newEnv(t)
+	e.commitAll("todo", map[string]string{"a.json": "1"})
+	// A hand edit of the index that points outside the app is dropped.
+	path := filepath.Join(e.root, "todo", ".wss", "index.json")
+	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(body, edited) || etag == nil || *etag != Etag(edited) {
-		t.Errorf("Read = %q, %v; want the edited bytes and their etag", body, etag)
+	if !strings.Contains(string(b), `"a.json"`) || !strings.Contains(string(b), `"revision"`) {
+		t.Fatalf("index.json: %s", b)
 	}
-}
-
-func TestConcurrentWritersOneWins(t *testing.T) {
-	s, _, _ := newStore(t)
-	base := mustWrite(t, s, `0`, nil, 10)
-
-	const n = 8
-	var wg sync.WaitGroup
-	etags := make([]string, n)
-	errs := make([]error, n)
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			etags[i], errs[i] = s.Write("todo", []byte(`{"writer":`+string(rune('1'+i))+`}`), &base, 10)
-		}()
-	}
-	wg.Wait()
-
-	winner := ""
-	for i := range errs {
-		if errs[i] == nil {
-			if winner != "" {
-				t.Fatal("more than one writer succeeded")
-			}
-			winner = etags[i]
-		}
-	}
-	if winner == "" {
-		t.Fatal("no writer succeeded")
-	}
-	conflicts := 0
-	for _, err := range errs {
-		var ce *ConflictError
-		if errors.As(err, &ce) {
-			conflicts++
-			if ce.Current == nil || *ce.Current != winner {
-				t.Errorf("conflict Current = %v, want winner %q", ce.Current, winner)
-			}
-		} else if err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-	}
-	if conflicts != n-1 {
-		t.Errorf("conflicts = %d, want %d", conflicts, n-1)
-	}
-}
-
-func TestStatAndDeleteApp(t *testing.T) {
-	s, root, clock := newStore(t)
-	st, err := s.Stat("todo")
-	if err != nil || st.Exists || st.Versions != 0 {
-		t.Errorf("Stat of empty app = %+v, %v", st, err)
-	}
-	first := mustWrite(t, s, `{"a":1}`, nil, 10)
-	*clock = clock.Add(time.Second)
-	mustWrite(t, s, `{"a":22}`, &first, 10)
-
-	st, err = s.Stat("todo")
-	if err != nil {
+	evil := strings.Replace(string(b), `"a.json"`, `"../../evil.json"`, 1)
+	if err := os.WriteFile(path, []byte(evil), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !st.Exists || st.Size != int64(len(`{"a":22}`)) || st.Versions != 1 || st.Modified.IsZero() {
-		t.Errorf("Stat = %+v", st)
-	}
-
-	if err := s.DeleteApp("todo"); err != nil {
+	e.restart()
+	wantDocs(t, e.docs("todo"), map[string]string{"a.json": "1"})
+	// A corrupt index is an error, not an empty set.
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "todo")); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("apps/todo still exists: %v", err)
-	}
-	if body, etag, err := s.Read("todo"); body != nil || etag != nil || err != nil {
-		t.Errorf("Read after delete = %q, %v, %v", body, etag, err)
-	}
-	if err := s.DeleteApp("todo"); err != nil {
-		t.Errorf("DeleteApp of absent app: %v", err)
-	}
-}
-
-func TestRejectsBadAppID(t *testing.T) {
-	s, _, _ := newStore(t)
-	for _, id := range []string{"../x", "", "A", "a/b"} {
-		if _, _, err := s.Read(id); !errors.Is(err, ErrBadApp) {
-			t.Errorf("Read(%q) err = %v, want ErrBadApp", id, err)
-		}
-		if _, err := s.Write(id, []byte(`1`), nil, 1); !errors.Is(err, ErrBadApp) {
-			t.Errorf("Write(%q) err = %v, want ErrBadApp", id, err)
-		}
-		if _, err := s.Stat(id); !errors.Is(err, ErrBadApp) {
-			t.Errorf("Stat(%q) err = %v, want ErrBadApp", id, err)
-		}
-		if err := s.DeleteApp(id); !errors.Is(err, ErrBadApp) {
-			t.Errorf("DeleteApp(%q) err = %v, want ErrBadApp", id, err)
-		}
+	e.s = e.open()
+	if _, err := e.s.Head("todo"); err == nil {
+		t.Error("a corrupt index.json loads")
 	}
 }

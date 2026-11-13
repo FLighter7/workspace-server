@@ -152,11 +152,11 @@ func (s *server) Apps() []web.AppInfo {
 		info := web.AppInfo{App: a, Devices: counts[a.ID]}
 		// An app whose folder cannot be read shows as empty; the hub
 		// reports the error to its devices.
-		if st, err := s.store.Stat(a.ID); err == nil {
-			info.Versions = st.Versions
-			if st.Exists {
+		if st, err := s.store.Stats(a.ID); err == nil {
+			info.Size, info.Files = st.Bytes, st.Files
+			if !st.Modified.IsZero() {
 				modified := st.Modified
-				info.Size, info.Modified = st.Size, &modified
+				info.Modified = &modified
 			}
 		}
 		out = append(out, info)
@@ -385,7 +385,7 @@ func (s *server) CheckDataDir(path string) (web.DataDirCheck, error) {
 func webAppData(list []appData) []web.AppData {
 	out := make([]web.AppData, 0, len(list))
 	for _, a := range list {
-		out = append(out, web.AppData{ID: a.ID, Size: a.Size, Versions: a.Versions})
+		out = append(out, web.AppData{ID: a.ID, Size: a.Size})
 	}
 	return out
 }

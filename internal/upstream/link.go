@@ -7,7 +7,7 @@
 // What the link does for each app follows the sync rule in
 // docs/architecture.md (see sync): it pulls when only the main's copy moved,
 // pushes when only this server's did, and when both did, the main's copy
-// wins here and this server's goes to history. Neither side ever merges:
+// wins here and replaces this server's. Neither side ever merges:
 // the devices do, as they always have, and write the result back.
 //
 // Over the link session the link also announces how devices reach this
@@ -493,8 +493,8 @@ func (l *Link) pair(ctx context.Context, c wsclient.PairingCode) (*state, error)
 }
 
 // Unlink ends the link: this server becomes a main again. Its data stays:
-// the apps it took from the main stay listed here, with their documents and
-// history, and the main keeps its own. The main's devices are no longer
+// the apps it took from the main stay listed here, with their documents,
+// and the main keeps its own. The main's devices are no longer
 // admitted here (Deps.Admit gets nil), and upstream.json is deleted. When
 // the link is connected, the main is then asked to forget this server, so
 // that it stops handing it out to its devices; forgotten reports whether the
@@ -1191,9 +1191,9 @@ type mainDoc struct {
 //     pull: write the main's document here if this server's copy is still
 //     local, telling this server's sessions;
 //   - both moved, or they never agreed and differ: the main's copy wins:
-//     written here the same way, and this server's goes to history. The
-//     devices here merge it with what they hold, as they always do, and
-//     write the result back, which the next sync pushes.
+//     written here the same way, replacing this server's. The devices here
+//     merge it with what they hold, as they always do, and write the result
+//     back, which the next sync pushes.
 //
 // Every write is conditional, so a stale up costs a decision, never a
 // document: a write here that loses the race with a device decides again,
@@ -1252,7 +1252,7 @@ func (l *Link) sync(ctx context.Context, cl *wsclient.Client, app string, up *st
 				if agreed {
 					was = "both changed since they agreed on " + short(base)
 				}
-				l.moved(app, stored, "the main's document %s replaced this server's %s (%s); this server's is kept in history, and the devices here merge it back", short(&stored), short(local), was)
+				l.moved(app, stored, "the main's document %s replaced this server's %s (%s); the devices here merge it back", short(&stored), short(local), was)
 			}
 			return up, nil
 		}

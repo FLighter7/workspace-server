@@ -73,6 +73,7 @@ func TestPlannedSwitch(t *testing.T) {
 	phone, phoneToken := desk.pair("todo")
 	makeFamily(t, desk, laptop, tablet)
 	waitFor(t, "the laptop to hold the desk's document", func() bool { return laptop.etag("todo") == v1 })
+	deskWritten := desk.written("todo")
 
 	followed, err := laptop.link.Promote(ctx(t), false)
 	if err != nil || !followed {
@@ -87,8 +88,8 @@ func TestPlannedSwitch(t *testing.T) {
 
 	// The documents were the same: the desk agrees at once, nothing moved.
 	waitFor(t, "the desk to agree with the laptop", func() bool { return desk.agreed("todo", v1) })
-	if desk.historyHolds("todo", `{"v":1}`) {
-		t.Error("the desk's document went to history although the two were the same")
+	if !desk.written("todo").Equal(deskWritten) {
+		t.Error("the desk's document was rewritten although the two were the same")
 	}
 	// The desk handed its devices over and admits them on the laptop's word.
 	waitFor(t, "the desk's own devices to be the laptop's", func() bool { return len(desk.devices.List()) == 0 })
@@ -147,8 +148,8 @@ func TestTakeOver(t *testing.T) {
 // syncs through it, and the tablet follows it when the laptop reaches it.
 // The term survives a restart. When the desk comes back, the two mains
 // meet: the higher term wins, the desk steps down by itself and links to
-// the laptop, its own writes made meanwhile kept in its history and merged
-// back by its devices.
+// the laptop, its own writes made meanwhile replaced there and merged back
+// by its devices.
 func TestForcedSwitchThenTheMainsMeet(t *testing.T) {
 	desk := startNode(t, "Desk")
 	laptop := startNode(t, "Laptop")
@@ -195,9 +196,6 @@ func TestForcedSwitchThenTheMainsMeet(t *testing.T) {
 	followsMain(t, desk, laptop, 1)
 	isMain(t, laptop, 1)
 	waitFor(t, "the desk to take the laptop's document", func() bool { return desk.etag("todo") == v2 })
-	if !desk.historyHolds("todo", `{"v":"desk"}`) {
-		t.Error("the desk's own write is not in its history")
-	}
 	desk.restart()
 	if desk.link.Term() != 1 || desk.link.Role() != RoleSubordinate {
 		t.Errorf("after a restart the desk is %s at term %d", desk.link.Role(), desk.link.Term())

@@ -53,6 +53,7 @@ const (
 	familyFile   = "family.json"
 	wssDirName   = "WSS-Data"
 	storeDir     = "apps"
+	wssFolder    = ".wss" // the store's own folder in each app folder
 	readmeFile   = "README.txt"
 	logName      = "server.log"
 	lockFile     = "server.lock"
@@ -61,6 +62,9 @@ const (
 const (
 	appsCheckEvery    = 2 * time.Second
 	addressCheckEvery = 30 * time.Second
+	// stagingSweepEvery is how often the transactions left open longer than
+	// store.StagingTTL are removed.
+	stagingSweepEvery = time.Hour
 	// maxLogBytes is the most server.log ever holds; when a line would take
 	// it past this, its oldest lines are cut until logKeepBytes are left.
 	maxLogBytes  = 1 << 20
@@ -620,7 +624,16 @@ func newServer(opts serverOptions, logger *log.Logger) (*server, error) {
 	if s.devices, err = devices.Open(filepath.Join(dir, devicesFile), time.Now); err != nil {
 		return nil, err
 	}
-	s.store = store.New(filepath.Join(s.dataWSS, storeDir), time.Now)
+	s.store = store.New(filepath.Join(s.dataWSS, storeDir), time.Now, func(app string) int64 {
+		a, _ := s.apps.Get(app)
+		return a.Quota
+	})
+	// A commit cut short is carried through, hand edits taken in, expired
+	// transactions removed. An app that fails is tried again at its next
+	// operation, which reports the error to its devices.
+	if err := s.store.Recover(); err != nil {
+		logger.Printf("the apps' data: %v", err)
+	}
 	s.secrets = pairing.NewSecrets(time.Now)
 	s.refusals = pairing.NewRefusals(time.Now)
 	s.hub = hub.New(hub.Deps{
@@ -722,6 +735,15 @@ func (s *server) start() error {
 func (s *server) watch(ctx context.Context) {
 	s.bg.Go(func() { every(ctx, appsCheckEvery, s.reloadApps) })
 	s.bg.Go(func() { every(ctx, addressCheckEvery, s.checkNetwork) })
+	s.bg.Go(func() { every(ctx, stagingSweepEvery, s.sweepStaging) })
+}
+
+// sweepStaging removes the transactions that devices left open longer than
+// store.StagingTTL.
+func (s *server) sweepStaging() {
+	if err := s.store.Sweep(time.Now()); err != nil {
+		s.logf("remove expired transactions: %v", err)
+	}
 }
 
 // every calls f every d until ctx is cancelled.

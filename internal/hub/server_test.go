@@ -39,7 +39,7 @@ var todoAndNotes = []any{obj{"id": "notes", "name": "Notes"}, obj{"id": "todo", 
 func TestPairAsAServer(t *testing.T) {
 	e := newEnv(t)
 	e.addApp(t, apps.App{ID: "notes", Name: "Notes"})
-	if _, err := e.store.Write("todo", []byte(`{}`), nil, 10); err != nil {
+	if _, err := e.store.Write("todo", []byte(`{}`), nil); err != nil {
 		t.Fatal(err)
 	}
 	secret, _ := e.secrets.Issue()
@@ -178,15 +178,17 @@ func TestServerKindWritesAndReplace(t *testing.T) {
 	if err != nil || etag != store.Etag(body) {
 		t.Fatalf("Replace = %q, %v; want %q", etag, err, store.Etag(body))
 	}
-	for _, f := range []*fakeChannel{fc, otherFc} {
-		if c := waitFrames(t, f, "changed", 1); c[len(c)-1]["etag"] != etag {
+	// The writer heard no changed for its own put; the other session heard
+	// that one already, so the Replace's is its second.
+	for f, n := range map[*fakeChannel]int{fc: 1, otherFc: 2} {
+		if c := waitFrames(t, f, "changed", n); c[len(c)-1]["etag"] != etag {
 			t.Errorf("last changed %v, want %s", c[len(c)-1], etag)
 		}
 	}
 	settle(t, other, otherFc)
 
 	var conflict *store.ConflictError
-	if _, err := e.hub.Replace("todo", body, nil); !errors.As(err, &conflict) || *conflict.Current != etag {
+	if _, err := e.hub.Replace("todo", body, nil); !errors.As(err, &conflict) || *conflict.Current(store.DataKey) != etag {
 		t.Errorf("Replace with a stale etag = %v, want a conflict naming %s", err, etag)
 	}
 	if _, err := e.hub.Replace("chess", body, nil); !errors.Is(err, apps.ErrNotFound) {

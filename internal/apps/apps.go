@@ -20,13 +20,11 @@ import (
 
 // Defaults and limits for an app's settings.
 const (
-	DefaultHistory  = 10
-	DefaultMaxBytes = int64(67108864)
-
-	minHistory  = 1
-	maxHistory  = 100
-	minMaxBytes = int64(1024)
-	maxMaxBytes = int64(1073741824)
+	// DefaultQuota is an app's quota when apps.json gives none: 50 MiB.
+	DefaultQuota = int64(50 << 20)
+	// MinQuota and MaxQuota bound an app's quota: 1 MiB to 1 TiB.
+	MinQuota = int64(1 << 20)
+	MaxQuota = int64(1 << 40)
 
 	maxIDLen = 64
 )
@@ -39,13 +37,12 @@ var (
 	ErrInvalid  = errors.New("invalid app")
 )
 
-// App is one served app. A zero History or MaxBytes reads as the default and
-// a blank Name as the id.
+// App is one served app. A zero Quota reads as the default and a blank Name
+// as the id. Quota is the most bytes the app's files may take together.
 type App struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	History  int    `json:"history"`
-	MaxBytes int64  `json:"maxBytes"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Quota int64  `json:"quota"`
 }
 
 type file struct {
@@ -72,21 +69,15 @@ func normalize(a App) (App, error) {
 	if !ValidID(a.ID) {
 		return App{}, fmt.Errorf("%w: id %q must match ^[a-z0-9-]{1,64}$", ErrInvalid, a.ID)
 	}
-	if a.History == 0 {
-		a.History = DefaultHistory
-	}
-	if a.MaxBytes == 0 {
-		a.MaxBytes = DefaultMaxBytes
+	if a.Quota == 0 {
+		a.Quota = DefaultQuota
 	}
 	a.Name = strings.TrimSpace(a.Name)
 	if a.Name == "" {
 		a.Name = a.ID
 	}
-	if a.History < minHistory || a.History > maxHistory {
-		return App{}, fmt.Errorf("%w: history %d is out of range %d-%d", ErrInvalid, a.History, minHistory, maxHistory)
-	}
-	if a.MaxBytes < minMaxBytes || a.MaxBytes > maxMaxBytes {
-		return App{}, fmt.Errorf("%w: maxBytes %d is out of range %d-%d", ErrInvalid, a.MaxBytes, minMaxBytes, maxMaxBytes)
+	if a.Quota < MinQuota || a.Quota > MaxQuota {
+		return App{}, fmt.Errorf("%w: quota %d is out of range %d-%d", ErrInvalid, a.Quota, MinQuota, MaxQuota)
 	}
 	return a, nil
 }
@@ -119,7 +110,7 @@ func Open(path string) (*Registry, error) {
 	r := &Registry{path: path}
 	list, st, err := r.read()
 	if errors.Is(err, os.ErrNotExist) {
-		def := []App{{ID: "todo", Name: "Todo", History: DefaultHistory, MaxBytes: DefaultMaxBytes}}
+		def := []App{{ID: "todo", Name: "Todo", Quota: DefaultQuota}}
 		r.apps = index(def)
 		if err := r.write(); err != nil {
 			return nil, err
@@ -185,11 +176,11 @@ func (r *Registry) read() ([]App, stamp, error) {
 // logged, not refused: a file written by a later version must still load.
 var knownKeys = map[string][]string{
 	"":    {"apps"},
-	"app": {"id", "name", "history", "maxBytes"},
+	"app": {"id", "name", "quota"},
 }
 
 // logUnknownKeys logs every key of data that the registry does not read,
-// such as a misspelt "histroy", which would otherwise give the default
+// such as a misspelt "qouta", which would otherwise give the default
 // without a word. JSON field names match without regard to case, as
 // encoding/json does.
 func (r *Registry) logUnknownKeys(data []byte) {
@@ -292,7 +283,7 @@ func (r *Registry) Get(id string) (App, bool) {
 	return a, ok
 }
 
-// Add applies the defaults to a (zero History, zero MaxBytes, blank Name),
+// Add applies the defaults to a (zero Quota, blank Name),
 // validates it and stores it, in the file as it is now: a hand edit not yet
 // read is kept. It returns ErrInvalid (an invalid hand edit included) or
 // ErrExists.

@@ -54,7 +54,9 @@ type DataDirCheck struct {
 	Target  []AppData `json:"target"`  // the apps' data already in Path
 }
 
-// AppData is an app's data in a data folder.
+// AppData is an app's data in a data folder: the bytes of its files.
+// Versions is always 0 since the store keeps no history; the page still
+// reads it until stage 4 of the files plan reworks the page.
 type AppData struct {
 	ID       string `json:"id"`
 	Size     int64  `json:"size"`
@@ -87,9 +89,10 @@ var (
 // AppInfo is a served app and the state of its data.
 type AppInfo struct {
 	apps.App
-	Size     int64      `json:"size"`     // bytes of the current document; 0 when there is none
-	Modified *time.Time `json:"modified"` // the last write; nil when there is no document
-	Versions int        `json:"versions"` // previous documents kept in history
+	Files    int        `json:"files"`    // the app's documents
+	Size     int64      `json:"size"`     // bytes of the app's documents, against its quota
+	Modified *time.Time `json:"modified"` // the last change; nil when there was none
+	Versions int        `json:"versions"` // always 0: no history; the page drops it in stage 4
 	Devices  int        `json:"devices"`  // devices paired with the app
 }
 
@@ -327,9 +330,10 @@ type page struct {
 type pageBoot struct {
 	// Nonce lets Vuetify's theme stylesheet past the CSP; a new one on every
 	// request.
-	Nonce    string `json:"nonce"`
-	History  int    `json:"history"`  // the add form's default
-	MaxBytes int64  `json:"maxBytes"` // the add form's default
+	Nonce string `json:"nonce"`
+	// MaxBytes is the add form's default quota, under the page's old name
+	// until stage 4 of the files plan reworks the form.
+	MaxBytes int64 `json:"maxBytes"`
 }
 
 // pageData is what index.html's template reads: {{.Boot}} in a
@@ -383,7 +387,7 @@ func (p *page) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	var buf bytes.Buffer
 	err = p.tmpl.Execute(&buf, pageData{Boot: pageBoot{
-		Nonce: nonce, History: apps.DefaultHistory, MaxBytes: apps.DefaultMaxBytes,
+		Nonce: nonce, MaxBytes: apps.DefaultQuota,
 	}})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, codeInternal, "page: "+err.Error())

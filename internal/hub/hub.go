@@ -352,13 +352,15 @@ func (h *Hub) Get(app string) ([]byte, *string, *protocol.Error) {
 	return doc, etag, nil
 }
 
-// MaxBytes returns app's size limit, 0 when it is not listed.
+// MaxBytes returns app's size limit, 0 when it is not listed: its quota,
+// which the whole set of its files shares (the shim of the files plan: stage
+// 2 replaces this with the quota checks of the transactions).
 func (h *Hub) MaxBytes(app string) int64 {
 	a, ok := h.d.Apps.Get(app)
 	if !ok {
 		return 0
 	}
-	return a.MaxBytes
+	return a.Quota
 }
 
 // Apps returns the app list to a session of a server-kind device. Any other
@@ -743,9 +745,12 @@ func (h *Hub) Put(from *protocol.Session, app, device string, ifEtag *string, bo
 	var conflict *store.ConflictError
 	switch {
 	case errors.As(err, &conflict):
-		return "", true, conflict.Current, nil
+		return "", true, conflict.Current(store.DataKey), nil
 	case errors.Is(err, store.ErrNotJSON):
 		return "", false, nil, &protocol.Error{Code: protocol.CodeNotJSON, Message: "the body is not valid JSON"}
+	case errors.Is(err, store.ErrQuota):
+		// The app's other files leave the document less than its quota.
+		return "", false, nil, &protocol.Error{Code: protocol.CodeTooLarge, Message: "the app's files would exceed its quota"}
 	case err != nil:
 		return "", false, nil, h.errInternal(err)
 	}
@@ -772,7 +777,7 @@ func (h *Hub) Replace(app string, body []byte, ifEtag *string) (string, error) {
 // pushes the new etag to every session of the app but from. The caller holds
 // the app's lock.
 func (h *Hub) writeLocked(a apps.App, body []byte, ifEtag *string, from *protocol.Session) (string, error) {
-	etag, err := h.d.Store.Write(a.ID, body, ifEtag, a.History)
+	etag, err := h.d.Store.Write(a.ID, body, ifEtag)
 	if err != nil {
 		return "", err
 	}

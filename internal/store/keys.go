@@ -17,7 +17,7 @@ import (
 //     files it writes beside a document can never be a key, and "." and ".."
 //     cannot occur; no space or dot at the end, which Windows would strip;
 //     no "~", so no name looks like a Windows 8.3 short name;
-//   - no Windows device name (CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9) as a
+//   - no Windows device name (CON, PRN, AUX, NUL, COM0-COM9, LPT0-LPT9) as a
 //     folder segment or an id, where Windows would open the device instead of
 //     the file (an id is the part before the dot, and "con.json" is the
 //     device on Windows 10). The superscript variants (COM¹ and so on) cannot
@@ -156,13 +156,14 @@ func validName(s string) bool {
 
 // windowsDevice reports whether name is one of Windows' reserved device
 // names, in any case: the charset allows only lowercase, but the comparison
-// does not rely on that.
+// does not rely on that. COM0 and LPT0 are refused too: Windows documents
+// them as reserved, although Windows 10 opens them as ordinary files.
 func windowsDevice(name string) bool {
 	switch strings.ToUpper(name) {
 	case "CON", "PRN", "AUX", "NUL":
 		return true
 	}
-	if len(name) == 4 && '1' <= name[3] && name[3] <= '9' {
+	if len(name) == 4 && '0' <= name[3] && name[3] <= '9' {
 		switch strings.ToUpper(name[:3]) {
 		case "COM", "LPT":
 			return true

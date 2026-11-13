@@ -186,12 +186,15 @@ func newEnv(t *testing.T, tweaks ...func(*env)) *env {
 		t.Fatal(err)
 	}
 	e := &env{
-		dir:      dir,
-		logs:     &logLines{},
-		clock:    clk,
-		apps:     ar,
-		devices:  dr,
-		store:    store.New(filepath.Join(dir, "apps"), clk.Now),
+		dir:     dir,
+		logs:    &logLines{},
+		clock:   clk,
+		apps:    ar,
+		devices: dr,
+		store: store.New(filepath.Join(dir, "apps"), clk.Now, func(app string) int64 {
+			a, _ := ar.Get(app)
+			return a.Quota
+		}),
 		secrets:  pairing.NewSecrets(clk.Now),
 		refusals: pairing.NewRefusals(clk.Now),
 	}
@@ -404,7 +407,7 @@ func TestHelloOutcomes(t *testing.T) {
 		e := newEnv(t)
 		id, token := e.device(t, "todo")
 		doc := []byte(`{"items":[]}`)
-		if _, err := e.store.Write("todo", doc, nil, 10); err != nil {
+		if _, err := e.store.Write("todo", doc, nil); err != nil {
 			t.Fatal(err)
 		}
 		e.clock.Advance(time.Hour)
@@ -649,7 +652,7 @@ func TestHeadAndGet(t *testing.T) {
 	}
 
 	doc := []byte(`{"items":["milk"]}`)
-	etag, err := e.store.Write("todo", doc, nil, 10)
+	etag, err := e.store.Write("todo", doc, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -797,12 +800,12 @@ func TestStoredHook(t *testing.T) {
 
 func TestPutLimits(t *testing.T) {
 	e := newEnv(t)
-	e.addApp(t, apps.App{ID: "tiny", MaxBytes: 1024})
-	if got := e.hub.MaxBytes("tiny"); got != 1024 {
-		t.Errorf("MaxBytes(tiny) = %d, want 1024", got)
+	e.addApp(t, apps.App{ID: "tiny", Quota: apps.MinQuota})
+	if got := e.hub.MaxBytes("tiny"); got != apps.MinQuota {
+		t.Errorf("MaxBytes(tiny) = %d, want %d", got, apps.MinQuota)
 	}
-	if got := e.hub.MaxBytes("todo"); got != apps.DefaultMaxBytes {
-		t.Errorf("MaxBytes(todo) = %d, want %d", got, apps.DefaultMaxBytes)
+	if got := e.hub.MaxBytes("todo"); got != apps.DefaultQuota {
+		t.Errorf("MaxBytes(todo) = %d, want %d", got, apps.DefaultQuota)
 	}
 	if got := e.hub.MaxBytes("nope"); got != 0 {
 		t.Errorf("MaxBytes(nope) = %d, want 0", got)
@@ -810,8 +813,23 @@ func TestPutLimits(t *testing.T) {
 
 	id, token := e.device(t, "tiny")
 	s, fc := e.login(t, "192.168.1.9:5000", "tiny", id, token)
-	put(s, nil, bytes.Repeat([]byte(" "), 2000))
+	put(s, nil, bytes.Repeat([]byte(" "), int(apps.MinQuota)+1))
 	expectError(t, waitFrames(t, fc, "error", 1)[0], protocol.CodeTooLarge)
+
+	// The quota is the app's files together: another file there leaves the
+	// document less room, and a put past that is too large too.
+	other := filepath.Join(e.dir, "apps", "tiny", "other.bin")
+	if err := os.MkdirAll(filepath.Dir(other), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, bytes.Repeat([]byte("o"), int(apps.MinQuota)-10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	put(s, nil, []byte(`{"v":"twenty bytes"}`))
+	expectError(t, waitFrames(t, fc, "error", 2)[1], protocol.CodeTooLarge)
+	if err := os.Remove(other); err != nil {
+		t.Fatal(err)
+	}
 
 	// The app disappears from apps.json; its session is still open. Its limit
 	// is now 0, so any body is too large, and an empty one reaches Put.
@@ -819,9 +837,9 @@ func TestPutLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	put(s, nil, []byte(`{}`))
-	expectError(t, waitFrames(t, fc, "error", 2)[1], protocol.CodeTooLarge)
+	expectError(t, waitFrames(t, fc, "error", 3)[2], protocol.CodeTooLarge)
 	put(s, nil, nil)
-	expectError(t, waitFrames(t, fc, "error", 3)[2], protocol.CodeUnknownApp)
+	expectError(t, waitFrames(t, fc, "error", 4)[3], protocol.CodeUnknownApp)
 }
 
 // Two devices writing at the same instant with the same ifEtag: exactly one is
@@ -957,10 +975,7 @@ func TestPutFromARemovedDevice(t *testing.T) {
 // files on the server's computer; the server's log gets the text.
 func TestInternalErrorKeepsTheDetailsInTheLog(t *testing.T) {
 	e := newEnv(t)
-	// A directory where the document should be: reading it fails.
-	if err := os.MkdirAll(filepath.Join(e.dir, "apps", "todo", "data.json"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	e.breakDocument(t, "todo")
 	_, perr := e.hub.Head("todo")
 	if perr == nil || perr.Code != protocol.CodeInternal {
 		t.Fatalf("Head = %v, want error %q", perr, protocol.CodeInternal)
@@ -968,7 +983,7 @@ func TestInternalErrorKeepsTheDetailsInTheLog(t *testing.T) {
 	if perr.Message == "" || strings.Contains(perr.Message, "data.json") || strings.Contains(perr.Message, e.dir) {
 		t.Errorf("message %q, want one that names no file", perr.Message)
 	}
-	if !strings.Contains(e.logs.String(), filepath.Join("todo", "data.json")) {
+	if !strings.Contains(e.logs.String(), filepath.Join("todo", ".wss", "journal.json")) {
 		t.Errorf("log %q, want the error naming the file", e.logs)
 	}
 }
@@ -1031,11 +1046,13 @@ func TestClosedSessionLeavesTheList(t *testing.T) {
 	expectSessions(t, e.hub, SessionInfo{App: "todo", Device: idB, Remote: "192.168.1.9:5001"})
 }
 
-// breakDocument puts a directory where app's document should be, so that
+// breakDocument puts a directory where a commit leaves app's journal, so that
 // every read and write of it fails, and returns the function that repairs it.
 func (e *env) breakDocument(t *testing.T, app string) func() {
 	t.Helper()
-	path := filepath.Join(e.dir, "apps", app, "data.json")
+	// A folder where a commit's journal goes: the store cannot read it, and
+	// fails every operation on the app until it is gone.
+	path := filepath.Join(e.dir, "apps", app, ".wss", "journal.json")
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		t.Fatal(err)
 	}
