@@ -97,9 +97,10 @@ export function bodySize(body: Body): number {
 /**
  * Text frames and the bodies some of them announce, over one data channel,
  * as the server's `docs/protocol.md` ("Framing") lays them out: a frame
- * carrying `bytes` (and `offset`, 0 when absent) is followed by the body's
- * bytes past the offset, in binary messages of at most 16 KiB. Not a
- * singleton: one per channel.
+ * that announces a body carries `bytes` (and `offset`, 0 when absent), and
+ * the body's bytes past the offset follow in binary messages of at most
+ * 16 KiB. From the server, only `doc` announces one: `bytes` in any other
+ * frame is a field like any other. Not a singleton: one per channel.
  */
 export class ChannelFraming {
 	/** The frame whose body is arriving, where its pieces go, and how much is still to come. */
@@ -186,7 +187,8 @@ export class ChannelFraming {
 		if (!isFrame(frame)) throw protocolError('A frame without t');
 
 		const { bytes, offset } = frame;
-		if (bytes === undefined) {
+		// Only a doc announces a body; any other frame never does.
+		if (frame.t !== 'doc') {
 			this.onIncoming({ frame, body: null });
 			return;
 		}

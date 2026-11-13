@@ -197,6 +197,28 @@ describe('ChannelFraming', () => {
 		expect(failures.map((error) => error.code)).toEqual(['protocol']);
 	});
 
+	it('only a doc announces a body: bytes in any other frame is just a field', () => {
+		const { channel, incoming, failures } = setup();
+
+		channel.receiveFrame({ t: 'began', tx: 'tx', staged: [], bytes: 5, offset: 1 });
+		channel.receiveFrame({ t: 'head', revision: null });
+
+		expect(incoming).toEqual([
+			{ frame: { t: 'began', tx: 'tx', staged: [], bytes: 5, offset: 1 }, body: null },
+			{ frame: { t: 'head', revision: null }, body: null },
+		]);
+		channel.receiveBinary([1]);
+		expect(failures.map((error) => error.code)).toEqual(['protocol']);
+	});
+
+	it('fails on a doc without a size', () => {
+		const { channel, failures } = setup();
+
+		channel.receiveFrame({ t: 'doc', etag: 'e' });
+
+		expect(failures.map((error) => error.code)).toEqual(['protocol']);
+	});
+
 	it('streams a body to the receiver onBody gives, and delivers the frame after it', () => {
 		const channel = new FakeChannel();
 		const incoming: Incoming[] = [];

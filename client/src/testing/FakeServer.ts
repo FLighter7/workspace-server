@@ -50,13 +50,22 @@ interface StoredDocument {
 }
 
 /** A change a fake transaction holds: a body to write, or `null` to delete. */
-interface FakeChange {
+export interface FakeChange {
 	key: DocumentKey;
 	ifEtag: string | null;
 	body: Uint8Array | null;
 }
 
 const SYNC_KEY = keyString(SYNC_DOCUMENT);
+
+/** A transaction id as the server takes it: 16 to 64 of `[A-Za-z0-9_-]`. */
+const TX_ID = /^[A-Za-z0-9_-]{16,64}$/;
+
+/** An open transaction of a `FakeServer`: whose it is, and what it staged, by key. */
+export interface FakeTransaction {
+	device: string;
+	changes: Map<string, FakeChange>;
+}
 
 /**
  * One in-memory workspace-server for tests of an app's sync: pass `connect`
@@ -92,6 +101,15 @@ export class FakeServer {
 	readonly documents = new Map<string, StoredDocument>();
 	/** Paired devices: id to token. */
 	devices = new Map<string, string>([['dev1', 'tok1']]);
+	/**
+	 * The open transactions, by id. As on the real server they belong to a
+	 * device, not to a connection: one per device (and app), which a `begin`
+	 * after a reconnect returns to, and which a `begin` with another id,
+	 * from any connection of the device, discards.
+	 */
+	readonly transactions = new Map<string, FakeTransaction>();
+	/** The cursors list pages have given: any other is refused, as a forged one is. */
+	readonly cursors = new Set<string>();
 	/** The most entries one list page carries; the real server's is 500. */
 	pageSize = 500;
 
@@ -207,12 +225,19 @@ export class FakeServer {
 	}
 }
 
-/** One device's connection to a `FakeServer`. Its open transaction lives with it. */
+/**
+ * One device's connection to a `FakeServer`. Its transactions are the
+ * device's, kept by the server. A frame the real server answers with
+ * `protocol` (a transaction id that breaks the rules, a forged cursor, a
+ * resume that does not fit) rejects with `protocol`, and the connection then
+ * closes, as the real one does.
+ */
 export class FakeClient implements SyncClient {
 	open = true;
+	/** The device this connection authenticated as; `null` before. */
+	device: string | null = null;
 	private readonly changed = new Set<(revision: string | null) => void>();
 	private readonly closed = new Set<(error: WorkspaceError) => void>();
-	private tx: { id: string; changes: Map<string, FakeChange> } | null = null;
 
 	constructor(
 		private readonly server: FakeServer,
@@ -230,6 +255,7 @@ export class FakeClient implements SyncClient {
 		if (this.server.devices.get(device) !== token) {
 			throw new WorkspaceError('Bad token', 'badToken');
 		}
+		this.device = device;
 
 		return this.welcome();
 	}
@@ -245,6 +271,7 @@ export class FakeClient implements SyncClient {
 		const device = `dev${this.server.devices.size + 1}`;
 		const token = `tok${this.server.devices.size + 1}`;
 		this.server.devices.set(device, token);
+		this.device = device;
 
 		return { device, token, welcome: this.welcome() };
 	}
@@ -258,6 +285,10 @@ export class FakeClient implements SyncClient {
 		options: { revision?: string | null; cursor?: string } = {},
 	): Promise<ListPage | Stale> {
 		this.call('list');
+		const { cursor } = options;
+		if (cursor !== undefined && (!('revision' in options) || !this.server.cursors.has(cursor))) {
+			this.refuse('A cursor the server never gave, or one without the revision of its page');
+		}
 		const revision = this.server.revision;
 		if ('revision' in options && options.revision !== revision) return { stale: revision };
 		const keys = [...this.server.documents.keys()].sort();
@@ -271,7 +302,10 @@ export class FakeClient implements SyncClient {
 			}),
 			removed: [],
 		};
-		if (from + pageKeys.length < keys.length) page.cursor = pageKeys[pageKeys.length - 1];
+		if (from + pageKeys.length < keys.length) {
+			page.cursor = pageKeys[pageKeys.length - 1];
+			this.server.cursors.add(page.cursor);
+		}
 
 		return page;
 	}
@@ -299,11 +333,24 @@ export class FakeClient implements SyncClient {
 
 	async begin(tx: string): Promise<Began> {
 		this.call('begin');
-		if (this.tx?.id !== tx) this.tx = { id: tx, changes: new Map() };
+		this.checkTx(tx);
+		const device = this.device ?? '';
+		const transactions = this.server.transactions;
+		let open = transactions.get(tx);
+		if (open && open.device !== device) {
+			throw new WorkspaceError('Another device holds that transaction', 'noTransaction');
+		}
+		if (!open) {
+			for (const [id, other] of transactions) {
+				if (other.device === device) transactions.delete(id);
+			}
+			open = { device, changes: new Map() };
+			transactions.set(tx, open);
+		}
 
 		return {
 			tx,
-			staged: [...this.tx.changes.values()].map((change) => ({
+			staged: [...open.changes.values()].map((change) => ({
 				...keyOf(change.key),
 				...(change.body === null ? { delete: true as const } : {}),
 				ifEtag: change.ifEtag,
@@ -320,17 +367,23 @@ export class FakeClient implements SyncClient {
 		body: Body,
 		offset = 0,
 	): Promise<StagedAck> {
-		void offset;
 		this.call('put');
+		this.checkTx(tx);
 		const bytes = await bytesOfBody(body);
+		const changes = this.changes(tx);
+		const staged = changes.get(keyString(key))?.body;
+		if (offset > 0 && (!staged || staged.byteLength !== bytes.byteLength)) {
+			this.refuse('A resumed body that does not fit what the transaction staged');
+		}
 		this.server.puts.push({ key: keyOf(key), ifEtag, body: bytes.slice() });
-		this.changes(tx).set(keyString(key), { key: keyOf(key), ifEtag, body: bytes });
+		changes.set(keyString(key), { key: keyOf(key), ifEtag, body: bytes });
 
 		return { ...keyOf(key), received: bytes.byteLength };
 	}
 
 	async delete(tx: string, key: DocumentKey, ifEtag: string | null): Promise<StagedAck> {
 		this.call('delete');
+		this.checkTx(tx);
 		this.changes(tx).set(keyString(key), { key: keyOf(key), ifEtag, body: null });
 
 		return { ...keyOf(key), received: 0 };
@@ -338,6 +391,7 @@ export class FakeClient implements SyncClient {
 
 	async commit(tx: string): Promise<CommitResult> {
 		this.call('commit');
+		this.checkTx(tx);
 		const changes = [...this.changes(tx).values()];
 		const server = this.server;
 		if (server.commitError && !server.commitAppliedFirst) {
@@ -368,7 +422,7 @@ export class FakeClient implements SyncClient {
 			if (change.body === null) server.removeDocument(change.key);
 			else server.storeDocument(change.key, change.body);
 		}
-		this.tx = null;
+		server.transactions.delete(tx);
 		if (server.revision !== before) server.pushChanged(this);
 		if (server.commitError) {
 			const code = server.commitError;
@@ -385,7 +439,12 @@ export class FakeClient implements SyncClient {
 
 	async abort(tx: string): Promise<{ tx: string }> {
 		this.call('abort');
-		if (this.tx?.id === tx) this.tx = null;
+		this.checkTx(tx);
+		// Answered even when the transaction is gone, or another device's, as
+		// the real server does; only the device's own is discarded.
+		if (this.server.transactions.get(tx)?.device === (this.device ?? '')) {
+			this.server.transactions.delete(tx);
+		}
 
 		return { tx };
 	}
@@ -424,10 +483,29 @@ export class FakeClient implements SyncClient {
 		}
 	}
 
-	/** The changes of the open transaction `tx`; any other is gone. */
+	/** The changes of this device's open transaction `tx`; any other is gone. */
 	private changes(tx: string): Map<string, FakeChange> {
-		if (this.tx?.id !== tx) throw new WorkspaceError('No such transaction', 'noTransaction');
-		return this.tx.changes;
+		const open = this.server.transactions.get(tx);
+		if (!open || open.device !== (this.device ?? '')) {
+			throw new WorkspaceError('No such transaction', 'noTransaction');
+		}
+		return open.changes;
+	}
+
+	/** Refuses a transaction id the real server would not take. */
+	private checkTx(tx: string): void {
+		if (!TX_ID.test(tx)) this.refuse(`An invalid transaction id ${JSON.stringify(tx)}`);
+	}
+
+	/**
+	 * Answers `protocol` and closes the connection after it, as the real
+	 * server does: the rejection is seen before the close.
+	 */
+	private refuse(message: string): never {
+		setTimeout(() => {
+			if (this.open) this.drop();
+		}, 0);
+		throw new WorkspaceError(message, 'protocol');
 	}
 
 	private current(key: DocumentKey): DocumentEtag {
