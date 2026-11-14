@@ -40,7 +40,7 @@ describe('FakeServer transactions', () => {
 			],
 		});
 		await expect(second.commit(TX)).resolves.toMatchObject({ committed: true });
-		expect(server.text()).toBe('{}');
+		expect(server.text(DATA)).toBe('{}');
 		expect([...server.documents.keys()]).toEqual(['data.json']);
 	});
 
@@ -116,7 +116,7 @@ describe('FakeServer listing', () => {
 	it('pages with the cursors it gave, and refuses a forged one', async () => {
 		const server = new FakeServer();
 		server.pageSize = 1;
-		server.store('{}');
+		server.storeDocument(DATA, '{}');
 		server.storeDocument(NOTE, '# n1');
 		const client = await connect(server);
 
@@ -134,7 +134,7 @@ describe('FakeServer listing', () => {
 	it('a cursor without the revision of its page is protocol', async () => {
 		const server = new FakeServer();
 		server.pageSize = 1;
-		server.store('{}');
+		server.storeDocument(DATA, '{}');
 		server.storeDocument(NOTE, '# n1');
 		const client = await connect(server);
 		const first = (await client.list()) as ListPage;
@@ -142,5 +142,87 @@ describe('FakeServer listing', () => {
 		await expect(client.list({ cursor: first.cursor })).rejects.toMatchObject({
 			code: 'protocol',
 		});
+	});
+});
+
+describe('FakeServer tombstones, cut-offs and divergence', () => {
+	it('lists tombstones after the documents, across pages', async () => {
+		const server = new FakeServer();
+		server.now = () => new Date('2026-11-14T08:00:00.000Z');
+		server.pageSize = 2;
+		server.storeDocument(DATA, '{}');
+		server.storeDocument(NOTE, '# n1');
+		server.storeDocument({ path: 'notes', id: 'n2', type: 'md' }, '# n2');
+		server.removeDocument(NOTE);
+		const client = await connect(server);
+
+		const listing = await listAll(client);
+
+		expect(listing.docs.map((doc) => doc.id)).toEqual(['data', 'n2']);
+		expect(listing.removed).toEqual([{ ...NOTE, at: '2026-11-14T08:00:00.000Z' }]);
+		server.storeDocument(NOTE, '# again');
+		expect((await listAll(client)).removed).toEqual([]);
+	});
+
+	it('a body cut off stays staged with what came, resumes, and is incomplete until then', async () => {
+		const server = new FakeServer();
+		server.cutPutAfter = 3;
+		const first = await connect(server);
+		await first.begin(TX);
+		await expect(first.put(TX, DATA, null, bytes('{"a":1}'))).rejects.toMatchObject({
+			code: 'closed',
+		});
+		expect(first.open).toBe(false);
+
+		const second = await connect(server);
+		const began = await second.begin(TX);
+		expect(began.staged).toEqual([{ ...DATA, ifEtag: null, bytes: 7, received: 3 }]);
+		await expect(second.commit(TX)).rejects.toMatchObject({ code: 'incomplete' });
+		await second.put(TX, DATA, null, bytes('{"a":1}'), 3);
+		await expect(second.commit(TX)).resolves.toMatchObject({ committed: true });
+		expect(server.text(DATA)).toBe('{"a":1}');
+	});
+
+	it('a read cut off hands on what came, and resumes from an offset at the same etag', async () => {
+		const server = new FakeServer();
+		const etag = server.storeDocument(DATA, '0123456789');
+		server.cutGetAfter = 4;
+		const pieces: string[] = [];
+		const first = await connect(server);
+		await expect(
+			first.get(DATA, { etag, onPiece: (piece) => pieces.push(new TextDecoder().decode(piece)) }),
+		).rejects.toMatchObject({ code: 'closed' });
+
+		const second = await connect(server);
+		const rest = await second.get(DATA, { etag, offset: 4 });
+
+		expect(pieces).toEqual(['0123']);
+		expect(new TextDecoder().decode((rest as { body: Uint8Array }).body)).toBe('456789');
+	});
+
+	it('takes the first choice for a divergence, tells the others, and answers every choice', async () => {
+		const server = new FakeServer();
+		server.devices.set('dev2', 'tok2');
+		const laptop = { serverId: 'S2', name: 'Laptop', since: '2026-11-13T10:00:00Z' };
+		server.setDiverged([laptop]);
+		const mine = await connect(server);
+		const theirs = await connect(server, 'dev2', 'tok2');
+		const heard: unknown[] = [];
+		theirs.onResolved((id) => heard.push(['resolved', id]));
+		theirs.onDiverged((list) => heard.push(['diverged', list]));
+		const kept: string[] = [];
+		server.onResolve = (_id, keep) => kept.push(keep);
+
+		await expect(mine.resolve('S2', 'main')).resolves.toEqual({ server: 'S2' });
+		await expect(theirs.resolve('S2', 'subordinate')).resolves.toEqual({ server: 'S2' });
+
+		expect(server.resolutions).toEqual([{ server: 'S2', keep: 'main', device: 'dev1' }]);
+		expect(kept).toEqual(['main']);
+		expect(heard).toEqual([
+			['resolved', 'S2'],
+			['diverged', []],
+			['resolved', 'S2'],
+		]);
+		expect((await theirs.hello('dev2', 'tok2')).diverged).toBeUndefined();
 	});
 });

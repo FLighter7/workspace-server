@@ -1,6 +1,15 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createSocket } from 'node:dgram';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	renameSync,
+	rmSync,
+} from 'node:fs';
 import { createServer } from 'node:net';
 import { basename, join, resolve } from 'node:path';
 
@@ -162,6 +171,40 @@ export class Server {
 	async document(app: string): Promise<string | null> {
 		try {
 			return readFileSync(join(this.dir, 'WSS-Data', 'apps', app, 'data.json'), 'utf8');
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * The revision of the app's set as its files on disk make it: the
+	 * SHA-256 of `<key>\0<etag>\n` lines sorted by key (docs/protocol.md).
+	 */
+	revision(app: string): string | null {
+		const root = join(this.dir, 'WSS-Data', 'apps', app);
+		const lines: string[] = [];
+		const walk = (dir: string, prefix: string): void => {
+			for (const entry of readdirSync(dir, { withFileTypes: true })) {
+				if (entry.name === '.wss') continue;
+				const name = prefix + entry.name;
+				if (entry.isDirectory()) walk(join(dir, entry.name), `${name}/`);
+				else {
+					const etag = createHash('sha256')
+						.update(readFileSync(join(dir, entry.name)))
+						.digest('hex');
+					lines.push(`${name}\0${etag}\n`);
+				}
+			}
+		};
+		walk(root, '');
+		if (lines.length === 0) return null;
+		return createHash('sha256').update(lines.sort().join('')).digest('hex');
+	}
+
+	/** A file of the app's set, `<path>/<id>.<type>`, as bytes; `null` when there is none. */
+	file(app: string, name: string): Buffer | null {
+		try {
+			return readFileSync(join(this.dir, 'WSS-Data', 'apps', app, ...name.split('/')));
 		} catch {
 			return null;
 		}

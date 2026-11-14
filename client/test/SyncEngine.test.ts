@@ -1,153 +1,28 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { Pairing, PairingStore } from '../src/PairingStore.js';
-import {
-	BLOCKED_RETRY_MS,
-	CHANGE_DEBOUNCE_MS,
-	SYNC_DOCUMENT,
-	SyncEngine,
-	type SyncAdapter,
-	type SyncEngineOptions,
-	type SyncState,
-} from '../src/SyncEngine.js';
+import { BLOCKED_RETRY_MS, CHANGE_DEBOUNCE_MS, SyncEngine } from '../src/SyncEngine.js';
 import { DocumentError, WorkspaceError } from '../src/WorkspaceError.js';
-import { FakeClient, FakeServer } from '../src/testing/FakeServer.js';
-import { CODE, makePairing, settle } from './fixtures.js';
+import { FakeClient } from '../src/testing/FakeServer.js';
+import { CODE, makePairing } from './fixtures.js';
+import {
+	DATA,
+	START,
+	decodeNotes,
+	encodeNotes,
+	settle,
+	setup as harness,
+	type SetupOptions,
+} from './engineHarness.js';
 
-const START = new Date('2026-11-07T12:00:00.000Z').getTime();
-
-/*
- * The app under test keeps a set of notes. Its document is
- * {"schema": 1, "notes": [...]}, and merging is a union: what either side
- * holds survives. Schema 2 and up is a newer format it cannot read.
- */
-type DocCode = 'newerSchema' | 'badDocument';
-
-function encodeNotes(notes: string[], schema = 1): Uint8Array {
-	return new TextEncoder().encode(JSON.stringify({ schema, notes: [...notes].sort() }));
+/** The size of the first body put. */
+function put0Bytes(server: { puts: { bytes: number }[] }): number {
+	return server.puts[0].bytes;
 }
 
-function decodeNotes(body: Uint8Array): string[] {
-	if (body.byteLength === 0) return [];
-	let doc: unknown;
-	try {
-		doc = JSON.parse(new TextDecoder().decode(body));
-	} catch {
-		throw new DocumentError<DocCode>('Not JSON', 'badDocument');
-	}
-	const { schema, notes } = (doc ?? {}) as { schema?: unknown; notes?: unknown };
-	if (typeof schema === 'number' && schema > 1) {
-		throw new DocumentError<DocCode>('A newer document', 'newerSchema');
-	}
-	if (!Array.isArray(notes)) throw new DocumentError<DocCode>('No notes', 'badDocument');
-
-	return notes as string[];
-}
-
-function same(a: string[], b: string[]): boolean {
-	return a.length === b.length && [...a].sort().every((note, i) => note === [...b].sort()[i]);
-}
-
-interface Timer {
-	handle: number;
-	callback: () => void;
-	ms: number;
-	cleared: boolean;
-}
-
-function setup(options: { pairing?: Pairing | null; local?: string[] } = {}) {
-	const server = new FakeServer();
-	const state = {
-		pairing: options.pairing === undefined ? makePairing() : options.pairing,
-		local: options.local ?? [],
-		changeCount: 0,
-		now: START,
-	};
-	const timers: Timer[] = [];
-	const states: SyncState<DocCode>[] = [];
-	const replaceLocal = vi.fn(async (notes: string[]) => {
-		state.local = notes;
-	});
-
-	const adapter: SyncAdapter = {
-		changeCount: () => state.changeCount,
-		plan: (doc) => {
-			const remote = decodeNotes(doc.body);
-			const local = state.local;
-			const merged = [...new Set([...remote, ...local])].sort();
-
-			return {
-				apply: same(merged, local) ? undefined : () => replaceLocal(merged),
-				write: same(merged, remote) ? null : encodeNotes(merged),
-			};
-		},
-	};
-	const pairingStore: PairingStore = {
-		load: () => (state.pairing ? { ...state.pairing } : null),
-		save: (pairing) => {
-			state.pairing = { ...pairing };
-		},
-		clear: () => {
-			state.pairing = null;
-		},
-	};
-
-	const engineOptions: SyncEngineOptions<DocCode> = {
-		app: 'notes',
-		pairingStore,
-		adapter,
-		onState: (next) => states.push(next),
-		deviceName: () => 'iPhone Safari',
-		connect: server.connect,
-		now: () => new Date(state.now),
-		timers: {
-			set: (callback, ms) => {
-				const timer = { handle: timers.length + 1, callback, ms, cleared: false };
-				timers.push(timer);
-				return timer.handle;
-			},
-			clear: (handle) => {
-				const timer = timers.find((entry) => entry.handle === handle);
-				if (timer) timer.cleared = true;
-			},
-		},
-	};
-
-	const engine = new SyncEngine(engineOptions);
-	const pending = (): Timer[] => timers.filter((timer) => !timer.cleared);
-	const last = (): SyncState<DocCode> => states[states.length - 1];
-	const written = (): { ifEtag: string | null; notes: string[] }[] =>
-		server.puts.map((put) => ({ ifEtag: put.ifEtag, notes: decodeNotes(put.body) }));
-
-	/** Fires the one pending timer, and lets what it starts run. */
-	async function fire(): Promise<void> {
-		const [timer] = pending();
-		expect(timer).toBeDefined();
-		timer.cleared = true;
-		timer.callback();
-		await settle();
-	}
-
-	/** A local edit, as the app reports it. */
-	function edit(notes: string[]): void {
-		state.local = notes;
-		state.changeCount++;
-		engine.localChanged();
-	}
-
-	return {
-		server,
-		state,
-		states,
-		engine,
-		engineOptions,
-		adapter,
-		replaceLocal,
-		pending,
-		last,
-		written,
-		fire,
-		edit,
-	};
+/** The notes app, holding the notes `local`; `state.local` reads them. */
+function setup(options: SetupOptions & { local?: string[] } = {}) {
+	const h = harness({ ...options, notes: options.local ?? options.notes });
+	Object.defineProperty(h.state, 'local', { get: () => h.local.notes });
+	return h as typeof h & { state: typeof h.state & { readonly local: string[] } };
 }
 
 describe('SyncEngine', () => {
@@ -178,8 +53,8 @@ describe('SyncEngine', () => {
 			'commit#1',
 		]);
 		expect(written()).toEqual([{ ifEtag: null, notes: ['a'] }]);
-		expect(server.puts[0].key).toEqual(SYNC_DOCUMENT);
-		expect(state.pairing?.lastEtag).toBe(server.etag);
+		expect(server.puts[0].key).toEqual(DATA);
+		expect(state.pairing?.lastRevision).toBe(server.revision);
 		expect(state.pairing?.lastRevision).toBe(server.revision);
 		expect(state.pairing?.lastSyncAt).toBe('2026-11-07T12:00:00.000Z');
 		expect(last()).toMatchObject({
@@ -204,7 +79,7 @@ describe('SyncEngine', () => {
 
 	it('what only the server holds is applied without a write', async () => {
 		const { engine, server, state, replaceLocal } = setup({ local: ['a'] });
-		server.store(encodeNotes(['a', 'b']));
+		server.storeDocument(DATA, encodeNotes(['a', 'b']));
 
 		engine.start(true);
 		await settle();
@@ -212,7 +87,7 @@ describe('SyncEngine', () => {
 		expect(replaceLocal).toHaveBeenCalledWith(['a', 'b']);
 		expect(state.local).toEqual(['a', 'b']);
 		expect(server.puts).toEqual([]);
-		expect(state.pairing?.lastEtag).toBe(server.etag);
+		expect(state.pairing?.lastRevision).toBe(server.revision);
 	});
 
 	it('nothing changed means no get', async () => {
@@ -230,7 +105,7 @@ describe('SyncEngine', () => {
 		const { engine, server, state } = setup({ local: ['a'] });
 		engine.start(true);
 		await settle();
-		server.store(encodeNotes(['a', 'b']));
+		server.storeDocument(DATA, encodeNotes(['a', 'b']));
 		server.log.length = 0;
 
 		server.clients[0].emitChanged(server.revision);
@@ -254,10 +129,10 @@ describe('SyncEngine', () => {
 		await fire();
 
 		expect(server.log).toEqual(['head#1', 'list#1', 'get#1', 'begin#1', 'put#1', 'commit#1']);
-		expect(decodeNotes(server.body)).toEqual(['a', 'one', 'two']);
+		expect(decodeNotes(server.document(DATA))).toEqual(['a', 'one', 'two']);
 	});
 
-	it('only other documents moving reads nothing, and records the revision', async () => {
+	it('a moved revision reads what the adapter selects, writes nothing the server holds, and records it', async () => {
 		const { engine, server, state } = setup({ local: ['a'] });
 		engine.start(true);
 		await settle();
@@ -266,9 +141,10 @@ describe('SyncEngine', () => {
 
 		await engine.syncNow();
 
-		expect(server.log).toEqual(['head#1', 'list#1']);
+		// The notes app selects its one document, whatever else moved.
+		expect(server.log).toEqual(['head#1', 'list#1', 'get#1']);
 		expect(state.pairing?.lastRevision).toBe(server.revision);
-		expect(server.text()).toBe(new TextDecoder().decode(encodeNotes(['a'])));
+		expect(server.text(DATA)).toBe(new TextDecoder().decode(encodeNotes(['a'])));
 	});
 
 	it('a write leaves the other documents of the set alone', async () => {
@@ -283,7 +159,7 @@ describe('SyncEngine', () => {
 
 	it('a document that changes between the listing and the read is listed again', async () => {
 		const { engine, server, state, adapter } = setup({ local: ['a'] });
-		server.store(encodeNotes(['b']));
+		server.storeDocument(DATA, encodeNotes(['b']));
 		const plan = vi.spyOn(adapter, 'plan');
 		const original = FakeClient.prototype.get;
 		let raced = false;
@@ -294,7 +170,7 @@ describe('SyncEngine', () => {
 		) {
 			if (!raced) {
 				raced = true;
-				server.store(encodeNotes(['b', 'c']));
+				server.storeDocument(DATA, encodeNotes(['b', 'c']));
 			}
 			return original.call(this, key, options);
 		});
@@ -304,7 +180,7 @@ describe('SyncEngine', () => {
 
 		expect(plan).toHaveBeenCalledTimes(1);
 		expect(state.local).toEqual(['a', 'b', 'c']);
-		expect(decodeNotes(server.body)).toEqual(['a', 'b', 'c']);
+		expect(decodeNotes(server.document(DATA))).toEqual(['a', 'b', 'c']);
 		expect(get).toHaveBeenCalledTimes(2);
 		get.mockRestore();
 	});
@@ -318,20 +194,25 @@ describe('SyncEngine', () => {
 		await settle();
 
 		expect(server.puts).toHaveLength(1);
-		expect(decodeNotes(server.body)).toEqual(['a']);
-		expect(state.pairing?.lastEtag).toBe(server.etag);
+		expect(decodeNotes(server.document(DATA))).toEqual(['a']);
+		expect(state.pairing?.lastRevision).toBe(server.revision);
 		expect(last()).toMatchObject({ status: 'connected', error: null });
 	});
 
-	it('a commit that fails before the commit point is written again', async () => {
+	it('a commit that fails before the commit point commits its transaction after listing again', async () => {
 		const { engine, server, last } = setup({ local: ['a'] });
 		server.commitError = 'internal';
 
 		engine.start(true);
 		await settle();
 
+		// The transaction stayed open with its body: the second put only
+		// confirms the etag, and sends no byte again.
+		expect(server.log.filter((entry) => entry.startsWith('list'))).toHaveLength(2);
+		expect(server.puts.map((put) => put.offset)).toEqual([0, put0Bytes(server)]);
+		expect(server.puts[1].body.byteLength).toBe(0);
 		expect(server.puts).toHaveLength(2);
-		expect(decodeNotes(server.body)).toEqual(['a']);
+		expect(decodeNotes(server.document(DATA))).toEqual(['a']);
 		expect(last()).toMatchObject({ status: 'connected', error: null });
 	});
 
@@ -353,6 +234,10 @@ describe('SyncEngine', () => {
 		once.engine.start(true);
 		await settle();
 		expect(once.server.puts).toHaveLength(2);
+		// The transaction a conflict leaves open is returned to: the body went once.
+		expect(once.server.puts[1]).toMatchObject({ offset: once.server.puts[0].bytes });
+		expect(once.server.log.filter((entry) => entry.startsWith('begin'))).toHaveLength(2);
+		expect(new Set(once.server.transactions.keys()).size).toBe(0);
 		expect(once.last().status).toBe('connected');
 
 		const always = setup({ local: ['a'] });
@@ -437,7 +322,7 @@ describe('SyncEngine', () => {
 		vi.spyOn(server.clients[0], 'get').mockRejectedValueOnce(
 			new WorkspaceError('disk full', 'internal'),
 		);
-		server.store(encodeNotes(['b']));
+		server.storeDocument(DATA, encodeNotes(['b']));
 		await engine.syncNow();
 
 		expect(last()).toMatchObject({ status: 'paused', error: { code: 'internal' } });
@@ -558,8 +443,8 @@ describe('SyncEngine', () => {
 
 		expect(server.puts).toHaveLength(10);
 		expect(last()).toMatchObject({ status: 'error', error: { code: 'tooManyWrites' } });
-		expect(decodeNotes(server.body)).toContain('edit-9');
-		expect(decodeNotes(server.body)).not.toContain('edit-10');
+		expect(decodeNotes(server.document(DATA))).toContain('edit-9');
+		expect(decodeNotes(server.document(DATA))).not.toContain('edit-10');
 	});
 
 	it('writes again once the minute has passed', async () => {
@@ -582,7 +467,7 @@ describe('SyncEngine', () => {
 
 	it('a document the app cannot read halts sync and is not written over', async () => {
 		const { engine, server, last, pending, replaceLocal } = setup({ local: ['a'] });
-		server.store(encodeNotes([], 99));
+		server.storeDocument(DATA, encodeNotes([], 99));
 
 		engine.start(true);
 		await settle();
@@ -600,7 +485,7 @@ describe('SyncEngine', () => {
 
 	it('a damaged document halts with the app code', async () => {
 		const { engine, server, last } = setup({ local: ['a'] });
-		server.store('not json');
+		server.storeDocument(DATA, 'not json');
 
 		engine.start(true);
 		await settle();
@@ -637,7 +522,6 @@ describe('SyncEngine', () => {
 			fingerprint: 'CC:DD',
 			port: 47801,
 			hosts: ['a.local', '192.168.1.5'],
-			lastEtag: server.etag,
 			lastRevision: server.revision,
 			lastSyncAt: '2026-11-07T12:00:00.000Z',
 		});
@@ -655,12 +539,12 @@ describe('SyncEngine', () => {
 
 	it('pairing merges with what the server holds', async () => {
 		const { engine, server, state } = setup({ pairing: null, local: ['a'] });
-		server.store(encodeNotes(['b']));
+		server.storeDocument(DATA, encodeNotes(['b']));
 		engine.start(true);
 
 		await engine.pair(CODE);
 
-		expect(decodeNotes(server.body)).toEqual(['a', 'b']);
+		expect(decodeNotes(server.document(DATA))).toEqual(['a', 'b']);
 		expect(state.local).toEqual(['a', 'b']);
 	});
 
@@ -707,6 +591,8 @@ describe('SyncEngine', () => {
 			via: null,
 			lastSyncAt: null,
 			error: null,
+			transfer: null,
+			diverged: [],
 		});
 	});
 
@@ -742,7 +628,7 @@ describe('SyncEngine', () => {
 		await fire();
 		await fire();
 
-		expect(decodeNotes(server.body)).toEqual(['a', 'before', 'during']);
+		expect(decodeNotes(server.document(DATA))).toEqual(['a', 'before', 'during']);
 	});
 
 	it('two devices on one server settle without writing back and forth', async () => {
@@ -762,7 +648,7 @@ describe('SyncEngine', () => {
 		await settle();
 
 		expect(a.server.puts).toHaveLength(writes);
-		expect(decodeNotes(a.server.body)).toEqual(['a', 'b']);
+		expect(decodeNotes(a.server.document(DATA))).toEqual(['a', 'b']);
 		expect(a.state.local).toEqual(['a', 'b']);
 		expect(b.state.local).toEqual(['a', 'b']);
 	});

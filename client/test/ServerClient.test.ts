@@ -292,6 +292,20 @@ describe('ServerClient', () => {
 		await expect(put).resolves.toEqual({ ...PHOTO, received: 5 });
 	});
 
+	it('put tells its progress as the pieces go out', async () => {
+		const { channel, client } = setup();
+		const positions: number[] = [];
+
+		const put = client.put('tx-0123456789abcdef', DATA, null, new Uint8Array(20_000), 1000, (at) =>
+			positions.push(at),
+		);
+		await flush();
+		expect(positions).toEqual([1000 + 16 * 1024, 20_000]);
+		channel.receiveFrame({ t: 'staged', ...DATA, received: 20_000 });
+
+		await expect(put).resolves.toEqual({ ...DATA, received: 20_000 });
+	});
+
 	it('a put whose offset is past its body sends nothing', async () => {
 		const { channel, client } = setup();
 

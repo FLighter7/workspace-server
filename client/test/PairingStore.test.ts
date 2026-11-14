@@ -14,7 +14,7 @@ function setup() {
 describe('createPairingStore', () => {
 	it('save then load round-trips', () => {
 		const { storage, store } = setup();
-		const pairing = makePairing({ lastEtag: 'e1', lastSyncAt: '2026-11-07T10:00:00.000Z' });
+		const pairing = makePairing({ lastRevision: 'r1', lastSyncAt: '2026-11-07T10:00:00.000Z' });
 
 		store.save(pairing);
 
@@ -22,38 +22,46 @@ describe('createPairingStore', () => {
 		expect(storage.getItem(KEY)).not.toBeNull();
 	});
 
-	it('keeps the revision of the last sync, null included, and leaves out one that does not read', () => {
+	it('keeps the revision of the last sync, null included, and refuses a record without one', () => {
 		const { storage, store } = setup();
 
 		for (const lastRevision of ['r1', null]) {
-			const pairing = makePairing({ lastEtag: 'e1', lastRevision });
+			const pairing = makePairing({ lastRevision });
 			store.save(pairing);
 			expect(store.load()).toEqual(pairing);
 		}
 
+		// A record of the single document (rc.1 and before) has none: the device pairs again.
+		const { lastRevision, ...old } = makePairing();
+		void lastRevision;
+		storage.setItem(KEY, JSON.stringify({ ...old, lastEtag: 'e9' }));
+		expect(store.load()).toBeNull();
 		storage.setItem(KEY, JSON.stringify({ ...makePairing(), lastRevision: 7 }));
-		expect(store.load()).not.toHaveProperty('lastRevision');
+		expect(store.load()).toBeNull();
 	});
 
-	it('reads a record saved before the package existed', () => {
-		// The todo app saved exactly this shape under this key; devices paired
-		// then must not have to pair again.
+	it('keeps an upload to resume, and drops one it cannot read, never the pairing', () => {
 		const { storage, store } = setup();
-		const saved = {
-			serverId: 'Ab3dEf6hIj9k',
-			name: 'Desk',
-			device: 'Dev0123456789ab',
-			token: 'tok',
-			password: 'abcdefghijklmnopqrstuvwx',
-			fingerprint: '0A:1B',
-			port: 47800,
-			hosts: ['0b7c5a52-6a3e-4d2b-9f1e-7d2c3b4a5f60.local', '192.168.1.20'],
-			lastEtag: 'e9',
-			lastSyncAt: '2026-11-09T18:00:00.000Z',
+		const upload = {
+			tx: 'tx-0123456789abcdef',
+			total: 3_000_000,
+			done: 1_000_000,
+			bodies: [{ path: 'photos', id: 'p1', type: 'jpg', bytes: 3_000_000, etag: 'e'.repeat(64) }],
 		};
-		storage.setItem(KEY, JSON.stringify(saved));
+		const pairing = makePairing({ upload });
 
-		expect(store.load()).toEqual(saved);
+		store.save(pairing);
+		expect(store.load()).toEqual(pairing);
+
+		for (const broken of [
+			{ ...upload, tx: 7 },
+			{ ...upload, done: -1 },
+			{ ...upload, bodies: [{ ...upload.bodies[0], etag: null }] },
+			'nope',
+		]) {
+			storage.setItem(KEY, JSON.stringify({ ...makePairing(), upload: broken }));
+			expect(store.load()).toEqual(makePairing());
+		}
 	});
 
 	it('keeps fallback servers, and reads a record without them as having none', () => {

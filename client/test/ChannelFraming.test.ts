@@ -254,6 +254,19 @@ describe('ChannelFraming', () => {
 		expect(chunks[0][0]).toBe(1000 % 251);
 	});
 
+	it('tells the position in the body after every piece it hands on', async () => {
+		const { channel, framing } = setup();
+		const positions: number[] = [];
+		const size = 2 * MAX_MESSAGE_BYTES + 10;
+
+		await framing.sendFrameWithBody({ t: 'put' }, new Uint8Array(size), 5, (at) =>
+			positions.push(at),
+		);
+
+		expect(positions).toEqual([5 + MAX_MESSAGE_BYTES, 5 + 2 * MAX_MESSAGE_BYTES, size]);
+		expect(channel.sent).toHaveLength(4);
+	});
+
 	it('refuses an offset past the body before sending anything', async () => {
 		const { channel, framing } = setup();
 

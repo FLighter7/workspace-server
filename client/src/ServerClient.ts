@@ -559,6 +559,7 @@ export class ServerClient {
 	 * size only changes `ifEtag`). `ifEtag` is the etag `key` must have at
 	 * the commit, `null` if it must not exist. The server answers once the
 	 * whole body has arrived, so a refusal (`quota`, say) comes after it.
+	 * `onProgress` hears the position in the body as its pieces go out.
 	 */
 	put(
 		tx: string,
@@ -566,6 +567,7 @@ export class ServerClient {
 		ifEtag: string | null,
 		body: Body,
 		offset = 0,
+		onProgress?: (position: number) => void,
 	): Promise<StagedAck> {
 		if (!isCount(offset) || offset > bodySize(body)) {
 			return Promise.reject(
@@ -575,7 +577,7 @@ export class ServerClient {
 		return this.request(
 			{ t: 'put', tx, path: key.path, id: key.id, type: key.type, ifEtag },
 			(incoming) => this.readStagedAck(incoming, key),
-			{ body, offset },
+			{ body, offset, onProgress },
 		);
 	}
 
@@ -708,7 +710,7 @@ export class ServerClient {
 	private request<T>(
 		frame: Frame,
 		read: (incoming: Incoming) => Reply<T>,
-		body?: { body: Body; offset: number },
+		body?: { body: Body; offset: number; onProgress?: (position: number) => void },
 		receive: Pending['receive'] = null,
 	): Promise<T> {
 		const run = (): Promise<T> =>
@@ -733,7 +735,7 @@ export class ServerClient {
 				this.pending = pending;
 
 				const sending = body
-					? this.framing.sendFrameWithBody(frame, body.body, body.offset)
+					? this.framing.sendFrameWithBody(frame, body.body, body.offset, body.onProgress)
 					: Promise.resolve().then(() => this.framing.sendFrame(frame));
 				sending.catch((error: unknown) => {
 					if (this.pending !== pending) return;

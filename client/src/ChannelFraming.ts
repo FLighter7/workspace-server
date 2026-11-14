@@ -145,9 +145,15 @@ export class ChannelFraming {
 	 * counted from the offset, pausing while the channel's buffer holds more
 	 * than 1 MiB. A `Blob` is read a slice at a time, never whole. Resolves
 	 * once every piece is handed to the channel; rejects if the channel
-	 * closes first, or if the `Blob` cannot be read.
+	 * closes first, or if the `Blob` cannot be read. `onProgress` hears the
+	 * position in the body after every piece handed to the channel.
 	 */
-	async sendFrameWithBody(frame: Frame, body: Body, offset?: number): Promise<void> {
+	async sendFrameWithBody(
+		frame: Frame,
+		body: Body,
+		offset?: number,
+		onProgress?: (position: number) => void,
+	): Promise<void> {
 		const size = bodySize(body);
 		const from = offset ?? 0;
 		if (!isCount(from) || from > size) {
@@ -170,7 +176,9 @@ export class ChannelFraming {
 				if (this.channel.readyState !== 'open') {
 					throw new WorkspaceError('The channel closed while sending', 'closed');
 				}
-				this.channel.send(slice.subarray(at, at + MAX_MESSAGE_BYTES) as Uint8Array<ArrayBuffer>);
+				const piece = slice.subarray(at, at + MAX_MESSAGE_BYTES) as Uint8Array<ArrayBuffer>;
+				this.channel.send(piece);
+				onProgress?.(start + at + piece.byteLength);
 			}
 			start += slice.byteLength;
 		}

@@ -1,55 +1,37 @@
-// A device for the e2e tests: the built package, driven the way an app
-// drives it. Its document is {"notes": [...]}, merged as a union.
+// Devices for the e2e tests: the built package, driven the way an app
+// drives it.
 import {
 	ServerClient,
 	SyncEngine,
 	WorkspaceError,
+	connectToServer,
 	createPairingStore,
+	documentPath,
 	openServerChannel,
 	parsePairingCode,
 } from '/dist/index.js';
 
+const DATA = { path: '', id: 'data', type: 'json' };
 const encode = (notes) => new TextEncoder().encode(JSON.stringify({ notes }));
 const decode = (body) =>
 	body.byteLength === 0 ? [] : JSON.parse(new TextDecoder().decode(body)).notes;
 const same = (a, b) => a.length === b.length && a.every((note, i) => note === b[i]);
 
-/** A device holding `notes`, with a sync engine for the app `todo`. */
-export function createDevice(notes) {
-	const state = {
-		notes: [...notes].sort(),
-		changeCount: 0,
-		status: 'unpaired',
-		via: null,
-		error: null,
-	};
-	const engine = new SyncEngine({
-		app: 'todo',
-		pairingStore: createPairingStore({ key: 'e2e.server' }),
-		adapter: {
-			changeCount: () => state.changeCount,
-			plan(server) {
-				const remote = [...decode(server.body)].sort();
-				const merged = [...new Set([...remote, ...state.notes])].sort();
+/** What every device shows of its engine's state, for the specs to poll. */
+function track(state, next) {
+	state.status = next.status;
+	state.via = next.via;
+	state.error = next.error?.code ?? null;
+	state.transfer = next.transfer;
+	state.diverged = next.diverged;
+	const last = state.transfers[state.transfers.length - 1];
+	if (JSON.stringify(last ?? null) !== JSON.stringify(next.transfer)) {
+		state.transfers.push(next.transfer);
+	}
+}
 
-				return {
-					apply: same(merged, state.notes)
-						? undefined
-						: async () => {
-								state.notes = merged;
-							},
-					write: same(merged, remote) ? null : encode(merged),
-				};
-			},
-		},
-		onState: (next) => {
-			state.status = next.status;
-			state.via = next.via;
-			state.error = next.error?.code ?? null;
-		},
-	});
-	engine.start(true);
-
+/** The controls every device has over its engine. */
+function controls(engine, state) {
 	return {
 		state,
 		async pair(code) {
@@ -60,42 +42,232 @@ export function createDevice(notes) {
 				return error instanceof WorkspaceError ? error.code : String(error);
 			}
 		},
-		add(note) {
-			state.notes = [...state.notes, note].sort();
-			state.changeCount++;
-			engine.localChanged();
-		},
 		/** The app hidden and shown again: the engine reconnects. */
 		reconnect() {
 			engine.setVisible(false);
 			engine.setVisible(true);
 		},
+		syncNow: () => engine.syncNow(),
+		resumeTransfer: () => engine.resumeTransfer(),
+		restartTransfer: () => engine.restartTransfer(),
+		/** Answers a divergence as a person would; returns `resolved` or the error code. */
+		async resolve(serverId, keep) {
+			try {
+				await engine.resolveDivergence(serverId, keep);
+				return 'resolved';
+			} catch (error) {
+				return error instanceof WorkspaceError ? error.code : String(error);
+			}
+		},
 	};
 }
 
 /**
- * Answers a divergence as a person would on this device: says hello to the
- * server the device is paired with, with its pairing, and keeps `keep`
- * (`main` or `subordinate`) for the first divergence its welcome lists.
- * Returns the server id chosen for, `none` when nothing waits, or the error
- * code. The engine does not ask yet; an app asks through `ServerClient`.
+ * A device of the notes app: its one document, `data.json`, is
+ * {"notes": [...]}, merged as a union.
  */
-export async function chooseDivergence(keep) {
-	const pairing = JSON.parse(localStorage.getItem('e2e.server') ?? 'null');
-	if (!pairing) return 'unpaired';
-	const { channel, close } = await openServerChannel(pairing);
-	try {
-		const client = new ServerClient(channel, { app: 'todo' });
-		const welcome = await client.hello(pairing.device, pairing.token);
-		const waiting = welcome.diverged?.[0];
-		if (!waiting) return 'none';
-		await client.resolve(waiting.serverId, keep);
-		return waiting.serverId;
-	} catch (error) {
-		return error instanceof WorkspaceError ? error.code : String(error);
-	} finally {
-		close();
+export function createDevice(notes) {
+	const state = {
+		notes: [...notes].sort(),
+		changeCount: 0,
+		status: 'unpaired',
+		via: null,
+		error: null,
+		transfer: null,
+		transfers: [],
+		diverged: [],
+	};
+	const engine = new SyncEngine({
+		app: 'todo',
+		pairingStore: createPairingStore({ key: 'e2e.server' }),
+		adapter: {
+			changeCount: () => state.changeCount,
+			select: () => [DATA],
+			plan(_listing, read) {
+				const remote = [...decode(read[0]?.body ?? new Uint8Array(0))].sort();
+				const merged = [...new Set([...remote, ...state.notes])].sort();
+
+				return {
+					apply: same(merged, state.notes)
+						? undefined
+						: async () => {
+								state.notes = merged;
+							},
+					put: same(merged, remote) ? [] : [{ doc: DATA, body: encode(merged) }],
+				};
+			},
+		},
+		onState: (next) => track(state, next),
+	});
+	engine.start(true);
+
+	return {
+		...controls(engine, state),
+		add(note) {
+			state.notes = [...state.notes, note].sort();
+			state.changeCount++;
+			engine.localChanged();
+		},
+	};
+}
+
+/** `size` bytes made from `seed`, the same on every run and after a reload. */
+function generated(size, seed) {
+	return Uint8Array.from({ length: size }, (_, i) => (i * 7 + seed) % 251);
+}
+
+/**
+ * A Blob of `size` generated bytes that is slow to read: each slice waits
+ * `delayMs`, as a large file on a slow disk would, so that a test can cut
+ * the upload off halfway. The engine and the framing read a Blob only
+ * through `size` and `slice(…).arrayBuffer()`.
+ */
+function slowBlob(size, seed, delayMs) {
+	const blob = new Blob([generated(size, seed)]);
+	return {
+		size,
+		slice(start, end) {
+			const part = blob.slice(start, end);
+			return {
+				size: part.size,
+				arrayBuffer: () =>
+					new Promise((resolve) => setTimeout(resolve, delayMs)).then(() => part.arrayBuffer()),
+			};
+		},
+		arrayBuffer: () => blob.arrayBuffer(),
+	};
+}
+
+/**
+ * A device of an app that keeps any number of documents, one per file: it
+ * reads only those whose etag moved since it last saw them, the server's
+ * copy wins, and it writes the files changed here and deletes those removed
+ * here. A file is `{key, text}` or `{key, size, seed, delayMs}` (generated
+ * bytes, read slowly). `files` are written at once, as files the app had
+ * changed before it started.
+ */
+export function createFilesDevice(files = []) {
+	const state = {
+		changeCount: 0,
+		status: 'unpaired',
+		via: null,
+		error: null,
+		transfer: null,
+		transfers: [],
+		diverged: [],
+		/** How many list requests the engine made. */
+		lists: 0,
+	};
+	/** The files by canonical key: `{key, body}` (Uint8Array or a slow Blob). */
+	let local = new Map();
+	let known = new Map();
+	let dirty = new Set();
+	const deleted = new Map();
+	const bodyOf = (file) =>
+		file.text !== undefined
+			? new TextEncoder().encode(file.text)
+			: slowBlob(file.size, file.seed, file.delayMs ?? 0);
+	for (const file of files) {
+		const path = documentPath(file.key);
+		local.set(path, { key: file.key, body: bodyOf(file) });
+		dirty.add(path);
 	}
+
+	const engine = new SyncEngine({
+		app: 'todo',
+		pairingStore: createPairingStore({ key: 'e2e.files' }),
+		connect: async (target) => {
+			const client = await connectToServer('todo')(target);
+			const list = client.list.bind(client);
+			client.list = (options) => {
+				state.lists++;
+				return list(options);
+			};
+			return client;
+		},
+		adapter: {
+			changeCount: () => state.changeCount,
+			select: (listing) => listing.docs.filter((doc) => known.get(documentPath(doc)) !== doc.etag),
+			plan(listing, read) {
+				const listed = new Set(listing.docs.map(documentPath));
+				const nextLocal = new Map(local);
+				const nextKnown = new Map(known);
+				const nextDirty = new Set(dirty);
+				for (const doc of read) {
+					const path = documentPath(doc);
+					const key = { path: doc.path, id: doc.id, type: doc.type };
+					nextLocal.set(path, { key, body: doc.body });
+					nextKnown.set(path, doc.etag);
+					nextDirty.delete(path);
+				}
+				for (const path of known.keys()) {
+					if (listed.has(path) || nextDirty.has(path)) continue;
+					nextLocal.delete(path);
+					nextKnown.delete(path);
+				}
+				return {
+					apply: async () => {
+						local = nextLocal;
+						known = nextKnown;
+						dirty = nextDirty;
+					},
+					put: [...nextDirty].flatMap((path) => {
+						const file = nextLocal.get(path);
+						return file ? [{ doc: file.key, body: file.body }] : [];
+					}),
+					delete: [...deleted.values()],
+				};
+			},
+			committed(docs) {
+				for (const doc of docs) {
+					const path = documentPath(doc);
+					if (doc.etag === null) {
+						known.delete(path);
+						deleted.delete(path);
+					} else {
+						known.set(path, doc.etag);
+						dirty.delete(path);
+					}
+				}
+			},
+		},
+		onState: (next) => track(state, next),
+	});
+	engine.start(true);
+
+	const changed = () => {
+		state.changeCount++;
+		void engine.syncNow();
+	};
+
+	return {
+		...controls(engine, state),
+		write(file) {
+			const path = documentPath(file.key);
+			local.set(path, { key: file.key, body: bodyOf(file) });
+			dirty.add(path);
+			deleted.delete(path);
+			changed();
+		},
+		remove(key) {
+			const path = documentPath(key);
+			local.delete(path);
+			dirty.delete(path);
+			deleted.set(path, key);
+			changed();
+		},
+		/** The files held here: a text file as its text, any other as its size. */
+		files() {
+			return Object.fromEntries(
+				[...local].map(([path, { body }]) => [
+					path,
+					body instanceof Uint8Array && body.byteLength < 1024
+						? new TextDecoder().decode(body)
+						: `${body.byteLength ?? body.size} bytes`,
+				]),
+			);
+		},
+	};
 }
 
 /** Pairs with the protocol client alone, for `app`; returns `paired` or the error code. */

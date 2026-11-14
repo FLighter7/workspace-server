@@ -11,7 +11,7 @@ export function makePairing(overrides: Partial<Pairing> = {}): Pairing {
 		fingerprint: 'AA:BB',
 		port: 47800,
 		hosts: ['a.local', '192.168.1.5'],
-		lastEtag: null,
+		lastRevision: null,
 		lastSyncAt: null,
 		...overrides,
 	};

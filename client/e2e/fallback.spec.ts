@@ -135,9 +135,12 @@ test('edits on both sides while the two servers cannot meet converge', async () 
 	await expect.poll(() => linked(laptop), { timeout: 20_000 }).toBe(true);
 	const laptopId = ((await laptop.api('GET', '/api/status')) as { serverId: string }).serverId;
 	await expect.poll(() => divergedOn(laptop), { timeout: 20_000 }).toEqual(['todo']);
+	// The device on the main is asked, naming both servers, and keeps the main's copy.
 	await expect
-		.poll(() => b.evaluate(() => window.harness.chooseDivergence('main')), { timeout: 20_000 })
-		.toBe(laptopId);
+		.poll(() => b.evaluate(() => window.device.state.diverged), { timeout: 20_000 })
+		.toEqual([{ serverId: laptopId, name: 'Laptop', since: expect.any(String), mainName: 'Desk' }]);
+	expect(await b.evaluate((id) => window.device.resolve(id, 'main'), laptopId)).toBe('resolved');
+	expect(await b.evaluate(() => window.device.state.diverged)).toEqual([]);
 	await reconnect(a);
 	const all = ['a', 'away', 'b', 'desk-side', 'laptop-side'];
 	await expect.poll(() => notesOn(main), { timeout: 30_000 }).toEqual(all);

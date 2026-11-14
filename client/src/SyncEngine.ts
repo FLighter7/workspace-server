@@ -1,19 +1,59 @@
+import { bodySize, type Body } from './ChannelFraming.js';
 import { browserDeviceName } from './deviceName.js';
 import { openServerChannel } from './openServerChannel.js';
 import type { FallbackServer, PairingCode, ServerTarget } from './PairingCode.js';
-import type { Pairing, PairingStore } from './PairingStore.js';
+import type { Pairing, PairingStore, StagedBody } from './PairingStore.js';
 import {
 	ServerClient,
 	isStale,
 	listAll,
 	type CommitResult,
+	type DivergedServer,
+	type DocumentEtag,
+	type DocumentInfo,
 	type DocumentKey,
+	type Keep,
+	type Listing,
+	type StagedChange,
 	type Welcome,
 } from './ServerClient.js';
+import { Sha256, etagOf } from './sha256.js';
 import { DocumentError, WorkspaceError, type WorkspaceErrorCode } from './WorkspaceError.js';
 
 export type SyncStatus =
-	'unpaired' | 'connecting' | 'syncing' | 'connected' | 'unreachable' | 'paused' | 'error';
+	| 'unpaired'
+	| 'connecting'
+	| 'syncing'
+	| 'connected'
+	| 'unreachable'
+	| 'paused'
+	| 'interrupted'
+	| 'error';
+
+/**
+ * A transfer under way, or a large one cut off: which way the bytes go
+ * (`up`: the device writes; `down`: it reads), how many of them have gone,
+ * of how many. `interrupted` is set when a transfer of more than
+ * `SMALL_TRANSFER_BYTES` was cut off: sync then waits for `resumeTransfer()`
+ * or `restartTransfer()`. A smaller one starts over by itself.
+ */
+export interface Transfer {
+	direction: 'up' | 'down';
+	done: number;
+	total: number;
+	interrupted: boolean;
+}
+
+/**
+ * A divergence of the app's servers that waits for a choice: the copy of
+ * the subordinate `serverId` (`name`) and its main's (`mainName`) both
+ * changed apart, `since` then (RFC 3339 UTC, kept as received: it names the
+ * divergence). Ask with both names, as `resolveDivergence` keeps one copy:
+ * `'main'`, `mainName`'s, or `'subordinate'`, `name`'s.
+ */
+export interface Divergence extends DivergedServer {
+	mainName: string;
+}
 
 /** What an app shows about sync. `DocCode` is the app's own `DocumentError` codes. */
 export interface SyncState<DocCode extends string = never> {
@@ -28,6 +68,13 @@ export interface SyncState<DocCode extends string = never> {
 	via: string | null;
 	lastSyncAt: string | null;
 	error: WorkspaceError<WorkspaceErrorCode | DocCode> | null;
+	/** The transfer under way or cut off; `null` when there is none. */
+	transfer: Transfer | null;
+	/**
+	 * The divergences the server last named, `[]` when none waits. Kept while
+	 * the connection is down; the next server reached replaces them.
+	 */
+	diverged: Divergence[];
 }
 
 /** The part of `ServerClient` the engine uses, so tests can stand in a fake server. */
@@ -40,56 +87,70 @@ export type SyncClient = Pick<
 	| 'get'
 	| 'begin'
 	| 'put'
+	| 'delete'
 	| 'commit'
 	| 'abort'
+	| 'resolve'
 	| 'forget'
 	| 'onChanged'
+	| 'onDiverged'
+	| 'onResolved'
 	| 'onClosed'
 	| 'close'
 >;
 
-/**
- * The one document this engine syncs: `data.json` at the app's root. An
- * app's set may hold other documents; this engine leaves them alone.
- */
-export const SYNC_DOCUMENT: Readonly<DocumentKey> = Object.freeze({
-	path: '',
-	id: 'data',
-	type: 'json',
-});
-
-/** The server's document as read: its etag, `null` with an empty body when there is none yet. */
-export interface ServerDocument {
-	etag: string | null;
+/** A document the engine read for the adapter: what the listing named, and its bytes. */
+export interface DocumentBody extends DocumentInfo {
 	body: Uint8Array;
 }
 
-/** What one sync does with the server's document, as the app's adapter decides. */
+/** A document to write: its key and its new bytes, in memory or a `Blob` read as it goes. */
+export interface PlannedPut {
+	doc: DocumentKey;
+	body: Body;
+}
+
+/** What one sync does, as the app's adapter decides. */
 export interface SyncPlan {
 	/** Brings the local state up to the merge; leave it out when the local state already is. */
 	apply?: () => Promise<void>;
-	/** The merged document to write, or `null` when the server already holds all of it. */
-	write: Uint8Array | null;
+	/**
+	 * The documents to write. A body the server already holds (the same
+	 * etag) is left out, so a plan may name every document it has.
+	 */
+	put?: PlannedPut[];
+	/** The documents to delete; one the listing does not hold is left out. */
+	delete?: DocumentKey[];
 }
 
 /**
- * Everything the engine needs to know about an app's document. The engine
- * decides when to sync and talks to the server; the adapter decides what
- * the merged document is.
+ * Everything the engine needs to know about an app's documents. The engine
+ * decides when to sync and talks to the server; the adapter decides what to
+ * read and what the merge is.
+ *
+ * Both methods run synchronously: `select` on a fresh listing, and `plan`
+ * once what it selected has been read, right after the engine reads
+ * `changeCount`. The listing names each document's etag (the SHA-256 of its
+ * bytes) and size, and its tombstones; an app that keeps the etag of each
+ * document it holds selects only those that changed.
  */
 export interface SyncAdapter {
 	/**
-	 * A counter that moves on every local change. A device whose document
-	 * the server already holds, and whose count has not moved since its last
-	 * sync, skips reading the document again.
+	 * A counter that moves on every local change. A device whose set the
+	 * server already holds (the revision of its last sync), and whose count
+	 * has not moved since, skips listing again.
 	 */
 	changeCount(): number;
+	/** The documents of the listing to read for the merge; keys it does not list are left out. */
+	select(listing: Listing): DocumentKey[];
 	/**
-	 * Merges the server's document with the local state.
+	 * Merges what was read with the local state. `read` holds each document
+	 * `select` named, in its order, at the etag of `listing`.
 	 *
-	 * It runs synchronously, right after the engine reads `changeCount`: read
-	 * the local state here, not in `apply`, so an edit made after the merge
-	 * moves the count past what was synced and the next sync picks it up.
+	 * Read the local state here, not in `apply`, so an edit made after the
+	 * merge moves the count past what was synced and the next sync picks it
+	 * up. Every write is conditional on the etag of the listing: if another
+	 * device wrote first, the engine lists, reads and plans again.
 	 *
 	 * Throw a `DocumentError` for a document this app cannot read (a newer
 	 * format, a damaged one): sync halts, and nothing is written over it.
@@ -99,7 +160,14 @@ export interface SyncAdapter {
 	 * local housekeeping alone causes (pruning, garbage collection) lets two
 	 * devices with different settings undo each other's writes forever.
 	 */
-	plan(server: ServerDocument, now: Date): SyncPlan;
+	plan(listing: Listing, read: DocumentBody[], now: Date): SyncPlan;
+	/**
+	 * Told what a commit of the plan wrote: each document put, with its new
+	 * etag, and each deleted, with `null`. An app that keeps the etag of each
+	 * document it holds remembers these, so its next `select` does not read
+	 * back what it wrote itself. Optional.
+	 */
+	committed?(docs: DocumentEtag[]): void;
 }
 
 export interface SyncTimers {
@@ -133,12 +201,12 @@ export const RETRY_DELAYS_MS = [2000, 5000, 15000, 30000, 60000, 300000];
 export const BLOCKED_RETRY_MS = 60_000;
 /** How long after the last local edit a sync starts. */
 export const CHANGE_DEBOUNCE_MS = 3000;
-/** A last line of defence against a write loop: past this, writing stops until the app reopens. */
+/** A last line of defence against a write loop: past this many commits, writing stops until the app reopens. */
 export const MAX_WRITES_PER_MINUTE = 10;
 /**
- * How many times one sync re-reads and re-merges after another device wrote
- * first, the document changed between the listing and the read, or a write
- * failed in a way a fresh read settles.
+ * How many times one sync lists, reads and plans again after another device
+ * wrote first, a document changed between the listing and the read, or a
+ * write failed in a way a fresh listing settles.
  */
 export const MAX_CONFLICT_RETRIES = 3;
 /**
@@ -148,8 +216,40 @@ export const MAX_CONFLICT_RETRIES = 3;
  * out, which is why no attempt waits for another.
  */
 export const MAIN_GRACE_MS = 2000;
+/**
+ * The largest transfer that starts over by itself when it is cut off; a
+ * larger one waits for `resumeTransfer()` or `restartTransfer()`. A
+ * transfer is one sync's reads, or one transaction's bodies, together.
+ */
+export const SMALL_TRANSFER_BYTES = 1024 * 1024;
+/** How often, at most, a large upload's progress is saved to the pairing record while it runs. */
+export const UPLOAD_SAVE_MS = 5000;
 
 const WRITE_WINDOW_MS = 60_000;
+
+/** A key's canonical form: `path/id.type`, or `id.type` at the app's root, as the server keeps it. */
+export function documentPath(key: DocumentKey): string {
+	return key.path === '' ? `${key.id}.${key.type}` : `${key.path}/${key.id}.${key.type}`;
+}
+
+function keyOf(key: DocumentKey): DocumentKey {
+	return { path: key.path, id: key.id, type: key.type };
+}
+
+/**
+ * The revision of a set holding these documents (canonical key to etag), as
+ * the server names it: the SHA-256 of `<key>\0<etag>\n` lines sorted by
+ * key, `null` for an empty set.
+ */
+function revisionOf(etags: Map<string, string>): string | null {
+	if (etags.size === 0) return null;
+	const hash = new Sha256();
+	const encoder = new TextEncoder();
+	for (const path of [...etags.keys()].sort()) {
+		hash.update(encoder.encode(`${path}\0${etags.get(path)}\n`));
+	}
+	return hash.hex();
+}
 
 /** A new transaction id: 22 characters of base64url, from 16 random bytes. */
 function newTransactionId(): string {
@@ -160,21 +260,40 @@ function newTransactionId(): string {
 	return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-function isSyncDocument(key: DocumentKey): boolean {
-	return (
-		key.path === SYNC_DOCUMENT.path &&
-		key.id === SYNC_DOCUMENT.id &&
-		key.type === SYNC_DOCUMENT.type
-	);
+/** The pieces of a body as one array of `bytes` bytes. */
+function joined(chunks: Uint8Array[], bytes: number): Uint8Array {
+	if (chunks.length === 1 && chunks[0].byteLength === bytes) return chunks[0];
+	const body = new Uint8Array(bytes);
+	let at = 0;
+	for (const chunk of chunks) {
+		body.set(chunk, at);
+		at += chunk.byteLength;
+	}
+	return body;
 }
 
 /**
- * The failures of a write after which the sync reads and merges again: the
- * transaction went (another session of this device began one), or the
- * server failed on its side, possibly after its commit point, so the write
- * may have landed; the next listing says which.
+ * The failures of a write after which the sync lists and plans again: the
+ * transaction went (another session of this device began one), a body did
+ * not fully arrive, or the server failed on its side, possibly after its
+ * commit point, so the write may have landed; the next listing says which,
+ * and the next `begin` of the same transaction whether it is still open.
  */
-const RETRY_WRITE: ReadonlySet<string> = new Set<WorkspaceErrorCode>(['noTransaction', 'internal']);
+const RETRY_WRITE: ReadonlySet<string> = new Set<WorkspaceErrorCode>([
+	'noTransaction',
+	'internal',
+	'incomplete',
+]);
+
+/** The failures of a write after which its transaction is of no more use: the next write begins another. */
+const DISCARD_TX: ReadonlySet<string> = new Set<WorkspaceErrorCode>([
+	'noTransaction',
+	'quota',
+	'badPath',
+	'badToken',
+	'unknownApp',
+	'protocol',
+]);
 
 /**
  * Errors after which retrying cannot help: sync stops until the device pairs
@@ -227,6 +346,32 @@ const browserTimers: SyncTimers = {
 	clear: (handle) => clearTimeout(handle as number),
 };
 
+/** A change one transaction stages: a body to put, with its size and etag, or a delete. */
+interface Change {
+	key: DocumentKey;
+	path: string;
+	/** The etag the listing named, which the document must still have at the commit. */
+	ifEtag: string | null;
+	put: { body: Body; bytes: number; etag: string } | null;
+}
+
+/** A body read in part or whole, kept across attempts and cut-off connections in this run. */
+interface PartialRead {
+	etag: string;
+	chunks: Uint8Array[];
+	received: number;
+}
+
+/** The transaction this device writes in while it is open on the server, and the bodies it staged. */
+interface OpenTransaction {
+	id: string;
+	/** By canonical key: the bodies staged, which a later write of the same bytes resumes. */
+	bodies: Map<string, StagedBody>;
+	/** Whether its bodies together are larger than `SMALL_TRANSFER_BYTES`: it is then saved to resume. */
+	large: boolean;
+	total: number;
+}
+
 /** A server that answered `hello`: its client, its welcome, and which one it is. */
 interface Reached {
 	client: SyncClient;
@@ -262,9 +407,10 @@ function fallbacksFrom(
  * main of the family is the server the device pairs with, so that only its
  * refusals stop sync and the device follows the family through every switch
  * of its main. The server it paired with before becomes a fallback. The
- * device id, the token, `lastEtag` and `lastRevision` stay: every server of
- * the family admits the same device, an etag is the document's hash, and a
- * revision the set's.
+ * device id, the token and `lastRevision` stay: every server of the family
+ * admits the same device, and a revision is the hash of the set's keys and
+ * etags. An upload kept to resume stays too: on a server that does not hold
+ * its transaction, `begin` opens it empty, and its bodies go from the start.
  */
 function movedTo(pairing: Pairing, main: FallbackServer, welcome: Welcome): Pairing {
 	const before: FallbackServer = {
@@ -310,13 +456,21 @@ function withFallbacks(pairing: Pairing, fallbacks: FallbackServer[]): Pairing {
  * failed connection retries on a growing delay while the app is visible,
  * and so does a temporary refusal (a blocked address, once a minute); there
  * is only ever one connection, and closing it invalidates whatever was
- * still in flight on it. A write is always conditional on the etag read, and
- * a lost race re-reads and re-merges.
+ * still in flight on it.
  *
- * It syncs one document of the app's set, `SYNC_DOCUMENT` (`data.json`): a
- * sync asks for the set's revision, and when it moved, lists the set, reads
- * the document at the etag the listing names, and writes it in a
- * transaction conditional on that etag.
+ * A sync asks for the set's revision; when it moved, or something changed
+ * here, it lists the set page by page, reads what the adapter selects at the
+ * etags the listing names, has the adapter plan, and writes the plan in one
+ * transaction conditional on those etags. A read that finds a document
+ * changed (`stale`), a conflict at the commit, and a failure that may have
+ * come after the commit point all list and plan again; a conflict keeps the
+ * transaction, so bodies that are still wanted are not sent again.
+ *
+ * A transfer cut off with the connection resumes or starts over: one of
+ * `SMALL_TRANSFER_BYTES` or less starts over by itself, a larger one waits
+ * for the app's `resumeTransfer()` or `restartTransfer()`. A large upload is
+ * saved in the pairing record, so it resumes after the app reloads too; a
+ * read is kept in memory only.
  */
 export class SyncEngine<DocCode extends string = never> {
 	private readonly store: PairingStore;
@@ -352,12 +506,28 @@ export class SyncEngine<DocCode extends string = never> {
 	private running: Promise<void> | null = null;
 	private again = false;
 	private writeTimes: number[] = [];
+	/** The transfer under way or cut off. */
+	private transfer: Transfer | null = null;
+	/** `transfer.done` when the state last told it. */
+	private toldDone = 0;
+	/** Reads kept for the next attempt, by canonical key, until a plan takes them. */
+	private readonly reads = new Map<string, PartialRead>();
+	/** The transaction this device writes in, while it may still be open on the server. */
+	private openTx: OpenTransaction | null = null;
+	/** When a large upload's progress was last saved, in ms. */
+	private uploadSavedAt = 0;
+	/** The divergences the server last named. */
+	private diverged: DivergedServer[] = [];
+	/** The name of the main, for the question about a divergence. */
+	private mainName: string | null = null;
 	private state: SyncState<string> = {
 		status: 'unpaired',
 		serverName: null,
 		via: null,
 		lastSyncAt: null,
 		error: null,
+		transfer: null,
+		diverged: [],
 	};
 
 	constructor(options: SyncEngineOptions<DocCode>) {
@@ -376,6 +546,23 @@ export class SyncEngine<DocCode extends string = never> {
 		if (!this.pairing) {
 			this.setState({ status: 'unpaired', error: null });
 			return;
+		}
+
+		// A large upload cut off in an earlier run waits for the app's choice.
+		const upload = this.pairing.upload;
+		if (upload) {
+			this.openTx = {
+				id: upload.tx,
+				bodies: new Map(upload.bodies.map((body) => [documentPath(body), body])),
+				large: true,
+				total: upload.total,
+			};
+			this.transfer = {
+				direction: 'up',
+				done: upload.done,
+				total: upload.total,
+				interrupted: true,
+			};
 		}
 
 		this.setState({ status: 'connecting', error: null });
@@ -416,6 +603,53 @@ export class SyncEngine<DocCode extends string = never> {
 	}
 
 	/**
+	 * Resumes a large transfer that was cut off (`transfer.interrupted`): the
+	 * next sync lists and plans again, and sends or reads only what the
+	 * server or this device does not hold yet. Does nothing when no transfer
+	 * waits.
+	 */
+	async resumeTransfer(): Promise<void> {
+		if (!this.transfer?.interrupted) return;
+		this.transfer = null;
+		this.retryIndex = 0;
+		this.setState({});
+		await this.trigger();
+	}
+
+	/**
+	 * Starts a large transfer that was cut off (`transfer.interrupted`) over:
+	 * what was sent or read of it is dropped, and the next sync sends or reads
+	 * everything afresh. Does nothing when no transfer waits.
+	 */
+	async restartTransfer(): Promise<void> {
+		if (!this.transfer?.interrupted) return;
+		this.transfer = null;
+		this.reads.clear();
+		// The next write begins another transaction, which discards this one on the server.
+		this.forgetTransaction();
+		this.retryIndex = 0;
+		this.setState({});
+		await this.trigger();
+	}
+
+	/**
+	 * Answers a divergence (`state.diverged`) for the whole set: keeps the
+	 * copy of the main (`'main'`) or of the subordinate `serverId`
+	 * (`'subordinate'`). Ask the user with both servers' names. Resolves once
+	 * the server has answered, the first choice on any server winning; the
+	 * divergence then leaves the state, and the copy not kept changes like
+	 * any other write. Rejects with `closed` while there is no connection.
+	 */
+	async resolveDivergence(serverId: string, keep: Keep): Promise<void> {
+		const client = this.ready ? this.client : null;
+		if (!client) throw new WorkspaceError('Not connected to a server', 'closed');
+		await client.resolve(serverId, keep);
+		if (client !== this.client) return;
+		this.diverged = this.diverged.filter((entry) => entry.serverId !== serverId);
+		this.setState({});
+	}
+
+	/**
 	 * Pairs with the server a code names, then syncs at once — the first frame
 	 * after `welcome` is what confirms the pairing to the server. A failure
 	 * leaves the previous state as it was and is rethrown for the page to show.
@@ -445,7 +679,7 @@ export class SyncEngine<DocCode extends string = never> {
 			fingerprint: code.fingerprint,
 			port: code.port,
 			hosts: welcome.hosts,
-			lastEtag: null,
+			lastRevision: null,
 			lastSyncAt: null,
 		};
 		this.pairing = withFallbacks(
@@ -456,9 +690,11 @@ export class SyncEngine<DocCode extends string = never> {
 		this.halted = null;
 		this.syncedCount = null;
 		this.retryIndex = 0;
+		this.resetTransfers();
 
 		this.attach(client);
 		this.ready = true;
+		this.heard(welcome);
 		this.setState({ status: 'syncing', error: null });
 		await this.requestSync();
 	}
@@ -481,6 +717,9 @@ export class SyncEngine<DocCode extends string = never> {
 		this.pairing = null;
 		this.halted = null;
 		this.syncedCount = null;
+		this.resetTransfers();
+		this.diverged = [];
+		this.mainName = null;
 		this.store.clear();
 		this.setState({ status: 'unpaired', error: null });
 	}
@@ -718,6 +957,16 @@ export class SyncEngine<DocCode extends string = never> {
 			client.onChanged(() => {
 				if (client === this.client && this.ready) void this.requestSync();
 			}),
+			client.onDiverged((servers) => {
+				if (client !== this.client) return;
+				this.diverged = servers;
+				this.setState({});
+			}),
+			client.onResolved((server) => {
+				if (client !== this.client) return;
+				this.diverged = this.diverged.filter((entry) => entry.serverId !== server);
+				this.setState({});
+			}),
 			client.onClosed((error) => {
 				if (client === this.client) this.fail(error);
 			}),
@@ -764,6 +1013,11 @@ export class SyncEngine<DocCode extends string = never> {
 		const client = this.client;
 		const pairing = this.pairing;
 		if (!client || !this.ready || !pairing || this.halted) return;
+		if (this.transfer?.interrupted) {
+			// A large transfer was cut off: the app chooses to resume or restart it.
+			this.setState({ status: 'interrupted', error: null });
+			return;
+		}
 		const generation = this.generation;
 		const current = (): boolean => generation === this.generation;
 
@@ -771,7 +1025,11 @@ export class SyncEngine<DocCode extends string = never> {
 		try {
 			const head = await client.head();
 			if (!current()) return;
-			if (head === pairing.lastRevision && this.syncedCount === this.adapter.changeCount()) {
+			if (
+				head === pairing.lastRevision &&
+				this.syncedCount === this.adapter.changeCount() &&
+				!this.openTx
+			) {
 				this.setState({ status: 'connected' });
 				return;
 			}
@@ -784,26 +1042,11 @@ export class SyncEngine<DocCode extends string = never> {
 
 				const listing = await listAll(client);
 				if (!current()) return;
-				const listed = listing.docs.find(isSyncDocument);
-				if (
-					(listed?.etag ?? null) === pairing.lastEtag &&
-					this.syncedCount === this.adapter.changeCount()
-				) {
-					// Only other documents of the set moved.
-					this.savePairing({ lastRevision: listing.revision });
-					this.setState({ status: 'connected', error: null });
-					return;
-				}
-
-				let doc: ServerDocument = { etag: null, body: new Uint8Array(0) };
-				if (listed) {
-					const read = await client.get(SYNC_DOCUMENT, { etag: listed.etag });
-					if (!current()) return;
-					if (isStale(read)) {
-						retry(new WorkspaceError('The document kept changing while it was read', 'conflict'));
-						continue;
-					}
-					doc = { etag: read.etag, body: read.body };
+				const read = await this.read(client, this.selected(listing), current);
+				if (read === null) return;
+				if (read === 'stale') {
+					retry(new WorkspaceError('The documents kept changing while they were read', 'conflict'));
+					continue;
 				}
 
 				const now = this.now();
@@ -811,30 +1054,40 @@ export class SyncEngine<DocCode extends string = never> {
 				// local state in the same tick, so an edit made after this is
 				// counted past it and the next sync picks it up.
 				const count = this.adapter.changeCount();
-				const plan = this.adapter.plan(doc, now);
+				const plan = this.adapter.plan(listing, read, now);
+				this.reads.clear();
 				if (plan.apply) await plan.apply();
 				if (!current()) return;
+				const changes = await this.changesOf(plan, listing);
+				if (!current()) return;
 
-				let etag = doc.etag;
 				let revision = listing.revision;
-				if (plan.write) {
-					this.guardWrite(now);
-					const written = await this.write(client, doc.etag, plan.write, current);
+				if (changes.length > 0) {
+					const written = await this.write(client, changes, now, current);
 					if (written === null) return;
 					if (written instanceof WorkspaceError) {
 						retry(written);
 						continue;
 					}
-					etag = written.docs.find(isSyncDocument)?.etag ?? null;
 					revision = written.revision;
+					this.adapter.committed?.(written.docs);
+					if (revision !== this.revisionAfter(listing, changes)) {
+						// A commit checks only the documents it writes: another device
+						// wrote others between the listing and it, which this device has
+						// not read. Its revision is not synced here; sync again.
+						revision = listing.revision;
+						this.again = true;
+					}
+				} else if (this.openTx) {
+					// Nothing left to write: a transaction kept for resuming is of no more use.
+					const tx = this.openTx.id;
+					this.forgetTransaction();
+					await client.abort(tx);
+					if (!current()) return;
 				}
 
 				this.syncedCount = count;
-				this.savePairing({
-					lastEtag: etag,
-					lastRevision: revision,
-					lastSyncAt: now.toISOString(),
-				});
+				this.savePairing({ lastRevision: revision, lastSyncAt: now.toISOString() });
 				this.retryIndex = 0;
 				this.setState({ status: 'connected', error: null });
 				return;
@@ -845,48 +1098,330 @@ export class SyncEngine<DocCode extends string = never> {
 		}
 	}
 
+	/** The revision `listing` has once `changes` are applied to it. */
+	private revisionAfter(listing: Listing, changes: Change[]): string | null {
+		const etags = new Map(listing.docs.map((doc) => [documentPath(doc), doc.etag]));
+		for (const change of changes) {
+			if (change.put) etags.set(change.path, change.put.etag);
+			else etags.delete(change.path);
+		}
+		return revisionOf(etags);
+	}
+
+	/** The documents of `listing` the adapter selects, each once, as the listing names them. */
+	private selected(listing: Listing): DocumentInfo[] {
+		const listed = new Map(listing.docs.map((doc) => [documentPath(doc), doc]));
+		const out = new Map<string, DocumentInfo>();
+		for (const key of this.adapter.select(listing)) {
+			const path = documentPath(key);
+			const doc = listed.get(path);
+			if (doc && !out.has(path)) out.set(path, doc);
+		}
+		return [...out.values()];
+	}
+
 	/**
-	 * Writes `body` as `SYNC_DOCUMENT` in a transaction of its own, if the
-	 * document still has `ifEtag`. Resolves with the commit, with the error
-	 * to read and merge again after (a conflict, or a failure in
+	 * Reads `wanted` at the etags the listing named, resuming from what an
+	 * earlier attempt read of the same etag. Resolves with the documents, with
+	 * `'stale'` when one changed since the listing, or with `null` once the
+	 * client was dropped; any other failure is thrown.
+	 */
+	private async read(
+		client: SyncClient,
+		wanted: DocumentInfo[],
+		current: () => boolean,
+	): Promise<DocumentBody[] | 'stale' | null> {
+		const etags = new Map(wanted.map((doc) => [documentPath(doc), doc.etag]));
+		for (const [path, partial] of this.reads) {
+			if (etags.get(path) !== partial.etag) this.reads.delete(path);
+		}
+		if (wanted.length === 0) return [];
+
+		let done = 0;
+		for (const partial of this.reads.values()) done += partial.received;
+		const total = wanted.reduce((sum, doc) => sum + doc.bytes, 0);
+		this.beginTransfer('down', done, total);
+
+		const out: DocumentBody[] = [];
+		try {
+			for (const doc of wanted) {
+				const path = documentPath(doc);
+				let partial = this.reads.get(path);
+				if (!partial) {
+					partial = { etag: doc.etag, chunks: [], received: 0 };
+					this.reads.set(path, partial);
+				}
+				if (partial.received < doc.bytes) {
+					const into = partial;
+					const got = await client.get(keyOf(doc), {
+						etag: doc.etag,
+						offset: into.received,
+						onPiece: (piece) => {
+							into.chunks.push(piece.slice());
+							into.received += piece.byteLength;
+							this.moved(piece.byteLength);
+						},
+					});
+					if (!current()) {
+						this.cutOff();
+						return null;
+					}
+					if (isStale(got)) {
+						this.reads.delete(path);
+						this.endTransfer();
+						return 'stale';
+					}
+				}
+				out.push({ ...doc, body: joined(partial.chunks, doc.bytes) });
+			}
+		} catch (error) {
+			if (!current() || CONNECTION_LOST.has(asWorkspaceError(error).code)) {
+				this.cutOff();
+				if (!current()) return null;
+			} else {
+				this.endTransfer();
+			}
+			throw error;
+		}
+
+		this.endTransfer();
+		return out;
+	}
+
+	/**
+	 * What `plan` changes on the server, against `listing`: each body with
+	 * its etag, left out when the server holds the same; each delete of a
+	 * document the listing holds, left out for a document the plan also puts.
+	 */
+	private async changesOf(plan: SyncPlan, listing: Listing): Promise<Change[]> {
+		const listed = new Map(listing.docs.map((doc) => [documentPath(doc), doc.etag]));
+		const changes = new Map<string, Change>();
+		for (const { doc, body } of plan.put ?? []) {
+			const path = documentPath(doc);
+			const etag = await etagOf(body);
+			const ifEtag = listed.get(path) ?? null;
+			if (etag === ifEtag) {
+				changes.delete(path);
+				continue;
+			}
+			changes.set(path, {
+				key: keyOf(doc),
+				path,
+				ifEtag,
+				put: { body, bytes: bodySize(body), etag },
+			});
+		}
+		for (const doc of plan.delete ?? []) {
+			const path = documentPath(doc);
+			const ifEtag = listed.get(path);
+			if (ifEtag === undefined || changes.has(path)) continue;
+			changes.set(path, { key: keyOf(doc), path, ifEtag, put: null });
+		}
+		return [...changes.values()];
+	}
+
+	/**
+	 * Writes `changes` in one transaction: the one kept open from before when
+	 * it holds nothing else (a conflict, a cut-off upload, a failed commit),
+	 * so each body it staged that is still wanted resumes from what the
+	 * server received; a new one otherwise. Resolves with the commit, with
+	 * the error to list and plan again after (a conflict, or a failure in
 	 * `RETRY_WRITE`), or with `null` once the client was dropped meanwhile;
 	 * any other failure is thrown.
 	 */
 	private async write(
 		client: SyncClient,
-		ifEtag: string | null,
-		body: Uint8Array,
+		changes: Change[],
+		now: Date,
 		current: () => boolean,
 	): Promise<CommitResult | WorkspaceError<string> | null> {
-		const tx = newTransactionId();
-		let result: CommitResult;
+		// Refused before any byte goes, though counted at the commit.
+		this.guardWrite(now, false);
+		const total = changes.reduce((sum, change) => sum + (change.put?.bytes ?? 0), 0);
+		const wanted = new Set(changes.map((change) => change.path));
+		let sending = false;
+
 		try {
-			await client.begin(tx);
+			let tx = this.openTx;
+			let staged: StagedChange[] = [];
+			if (tx) {
+				staged = (await client.begin(tx.id)).staged;
+				if (!current()) return null;
+				// A change it staged that is no longer wanted cannot be taken back.
+				if (staged.some((change) => !wanted.has(documentPath(change)))) tx = null;
+			}
+			if (!tx) {
+				this.forgetTransaction();
+				tx = { id: newTransactionId(), bodies: new Map(), large: false, total: 0 };
+				staged = (await client.begin(tx.id)).staged;
+				if (!current()) return null;
+			}
+
+			// A body resumes when the transaction staged the same bytes for it.
+			const offsets = changes.map((change) => {
+				const body = change.put;
+				if (!body) return 0;
+				const had = tx.bodies.get(change.path);
+				const on = staged.find(
+					(entry) =>
+						!entry.delete && documentPath(entry) === change.path && entry.bytes === body.bytes,
+				);
+				return on && had?.etag === body.etag && had.bytes === body.bytes ? on.received : 0;
+			});
+			tx.bodies = new Map(
+				changes.flatMap((change) =>
+					change.put
+						? [[change.path, { ...change.key, bytes: change.put.bytes, etag: change.put.etag }]]
+						: [],
+				),
+			);
+			tx.large = total > SMALL_TRANSFER_BYTES;
+			tx.total = total;
+			this.openTx = tx;
+			// A small one starts over when it is cut off: nothing to resume after a reload.
+			if (!tx.large) this.dropUploadRecord();
+
+			sending = true;
+			this.beginTransfer(
+				'up',
+				offsets.reduce((sum, offset) => sum + offset, 0),
+				total,
+			);
+			this.saveUpload(true);
+			for (const [i, change] of changes.entries()) {
+				if (!change.put) {
+					await client.delete(tx.id, change.key, change.ifEtag);
+				} else {
+					let position = offsets[i];
+					await client.put(tx.id, change.key, change.ifEtag, change.put.body, position, (at) => {
+						this.moved(at - position);
+						position = at;
+						this.saveUpload(false);
+					});
+					this.moved(change.put.bytes - position);
+				}
+				if (!current()) {
+					this.cutOff();
+					return null;
+				}
+			}
+			sending = false;
+			this.endTransfer();
+
+			this.guardWrite(this.now(), true);
+			const result = await client.commit(tx.id);
 			if (!current()) return null;
-			await client.put(tx, SYNC_DOCUMENT, ifEtag, body);
-			if (!current()) return null;
-			result = await client.commit(tx);
-			if (!current()) return null;
+			if (result.committed) {
+				this.forgetTransaction();
+				return result;
+			}
+			// A conflict leaves the transaction open with its bodies: the next
+			// attempt returns to it, and sends again only what changed.
+			return new WorkspaceError('Another device wrote first', 'conflict');
 		} catch (error) {
-			if (!current()) return null;
 			const failure = asWorkspaceError(error);
+			if (!current() || CONNECTION_LOST.has(failure.code)) {
+				if (sending) this.cutOff();
+				if (!current()) return null;
+				throw failure;
+			}
+			this.endTransfer();
+			if (DISCARD_TX.has(failure.code)) this.forgetTransaction();
 			// A failure after the commit point may have applied the write and
-			// ended the transaction; one before it leaves the transaction open,
-			// which the next begin discards. Either way the next listing tells.
+			// ended the transaction; one before it leaves the transaction
+			// open. Either way the next listing tells what the set holds, and
+			// the next begin of the same id whether it is still open.
 			if (RETRY_WRITE.has(failure.code)) return failure;
 			throw failure;
 		}
-		if (result.committed) return result;
-
-		// A conflict leaves the transaction open; the next begin would discard
-		// it, but it need not wait for that.
-		await client.abort(tx);
-		if (!current()) return null;
-		return new WorkspaceError('Another device kept writing first', 'conflict');
 	}
 
-	/** Counts a write, refusing it past the limit. */
-	private guardWrite(now: Date): void {
+	/** A transfer starts: `done` of its `total` bytes are already there. */
+	private beginTransfer(direction: Transfer['direction'], done: number, total: number): void {
+		this.transfer = { direction, done, total, interrupted: false };
+		this.toldDone = done;
+		this.setState({});
+	}
+
+	/** `bytes` more of the transfer went; the state is told every 1% or 64 KiB, and at the end. */
+	private moved(bytes: number): void {
+		const transfer = this.transfer;
+		if (!transfer || bytes === 0) return;
+		transfer.done += bytes;
+		const step = Math.max(64 * 1024, transfer.total / 100);
+		if (transfer.done - this.toldDone >= step || transfer.done >= transfer.total) {
+			this.toldDone = transfer.done;
+			this.setState({});
+		}
+	}
+
+	private endTransfer(): void {
+		if (!this.transfer) return;
+		this.transfer = null;
+		this.setState({});
+	}
+
+	/**
+	 * The transfer under way was cut off with its connection. A large one
+	 * waits for the app's choice, kept to resume; a small one starts over by
+	 * itself: its reads are dropped, and the next write begins another
+	 * transaction.
+	 */
+	private cutOff(): void {
+		const transfer = this.transfer;
+		if (!transfer || transfer.interrupted) return;
+		if (transfer.total > SMALL_TRANSFER_BYTES) {
+			this.transfer = { ...transfer, interrupted: true };
+			if (transfer.direction === 'up') this.saveUpload(true);
+		} else {
+			this.transfer = null;
+			if (transfer.direction === 'down') this.reads.clear();
+			else this.forgetTransaction();
+		}
+		this.setState({});
+	}
+
+	/** Saves a large upload's transaction and progress to resume, at most every `UPLOAD_SAVE_MS` unless `force`. */
+	private saveUpload(force: boolean): void {
+		const tx = this.openTx;
+		if (!tx?.large || !this.pairing) return;
+		const time = this.now().getTime();
+		if (!force && time - this.uploadSavedAt < UPLOAD_SAVE_MS) return;
+		this.uploadSavedAt = time;
+		const done = this.transfer?.direction === 'up' ? this.transfer.done : 0;
+		this.savePairing({
+			upload: { tx: tx.id, total: tx.total, done, bodies: [...tx.bodies.values()] },
+		});
+	}
+
+	/** Forgets the transaction kept open, here and in the pairing record. */
+	private forgetTransaction(): void {
+		this.openTx = null;
+		this.dropUploadRecord();
+	}
+
+	/** Removes a large upload from the pairing record. */
+	private dropUploadRecord(): void {
+		if (!this.pairing?.upload) return;
+		const next = { ...this.pairing };
+		delete next.upload;
+		this.pairing = next;
+		this.store.save(next);
+	}
+
+	/** Forgets every transfer: for a new pairing, or none. */
+	private resetTransfers(): void {
+		this.transfer = null;
+		this.reads.clear();
+		this.openTx = null;
+	}
+
+	/**
+	 * The write guard: past `MAX_WRITES_PER_MINUTE` commits within a minute,
+	 * writing stops until the app starts again. `count` counts a commit;
+	 * without it, this only refuses a write once the limit is reached.
+	 */
+	private guardWrite(now: Date, count: boolean): void {
 		const time = now.getTime();
 		this.writeTimes = this.writeTimes.filter((at) => time - at < WRITE_WINDOW_MS);
 		if (this.writesStopped || this.writeTimes.length >= MAX_WRITES_PER_MINUTE) {
@@ -896,12 +1431,13 @@ export class SyncEngine<DocCode extends string = never> {
 			);
 			throw new WorkspaceError('Too many writes within a minute', 'tooManyWrites');
 		}
-		this.writeTimes.push(time);
+		if (count) this.writeTimes.push(time);
 	}
 
 	private fail(error: WorkspaceError<string>): void {
 		if (error instanceof DocumentError || HALTING.has(error.code)) {
 			this.halted = error;
+			this.reads.clear();
 			this.cancelTimers();
 			this.dropClient();
 			this.setState({ status: 'error', error });
@@ -992,16 +1528,32 @@ export class SyncEngine<DocCode extends string = never> {
 		}
 		this.pairing = next;
 		this.store.save(next);
+		this.heard(welcome);
+	}
+
+	/**
+	 * Takes the divergences a welcome names, which replace those of any
+	 * server before, and the main's name for asking about them: the server's
+	 * own when it answers as a main, otherwise the paired server's, the main
+	 * this device last heard of.
+	 */
+	private heard(welcome: Welcome): void {
+		this.diverged = welcome.diverged ?? [];
+		this.mainName =
+			welcome.role === 'subordinate' ? (this.pairing?.name ?? welcome.name) : welcome.name;
 		this.setState({});
 	}
 
 	private setState(patch: Partial<SyncState<string>>): void {
+		const mainName = this.mainName ?? this.pairing?.name ?? '';
 		this.state = {
 			...this.state,
 			...patch,
 			serverName: this.pairing?.name ?? null,
 			via: this.via,
 			lastSyncAt: this.pairing?.lastSyncAt ?? null,
+			transfer: this.transfer ? { ...this.transfer } : null,
+			diverged: this.diverged.map((entry) => ({ ...entry, mainName })),
 		};
 		this.onState({ ...this.state } as SyncState<DocCode>);
 	}

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Pairing, PairingStore } from '../src/PairingStore.js';
 import { MAIN_GRACE_MS, SyncEngine, type SyncAdapter, type SyncState } from '../src/SyncEngine.js';
 import { FakeServer } from '../src/testing/FakeServer.js';
+import { DATA } from './engineHarness.js';
 import { CODE, makePairing, settle } from './fixtures.js';
 
 /*
@@ -54,8 +55,9 @@ function setup(options: { fallbacks?: boolean } = {}) {
 	// A document that is never merged: an empty server gets one write.
 	const adapter: SyncAdapter = {
 		changeCount: () => state.changeCount,
-		plan: (doc) => ({
-			write: doc.etag === null ? new TextEncoder().encode('{"notes":[]}') : null,
+		select: () => [DATA],
+		plan: (_listing, read) => ({
+			put: read.length === 0 ? [{ doc: DATA, body: new TextEncoder().encode('{"notes":[]}') }] : [],
 		}),
 	};
 	const pairingStore: PairingStore = {
@@ -175,7 +177,7 @@ describe('SyncEngine with fallback servers', () => {
 			'put#1',
 			'commit#1',
 		]);
-		expect(state.pairing?.lastEtag).toBe(sub.etag);
+		expect(state.pairing?.lastRevision).toBe(sub.revision);
 	});
 
 	it('falls back at once when the main has failed', async () => {
@@ -206,11 +208,11 @@ describe('SyncEngine with fallback servers', () => {
 		const { engine, main, sub, state } = setup();
 		engine.start(true);
 		await settle();
-		expect(state.pairing?.lastEtag).toBe(main.etag);
+		expect(state.pairing?.lastRevision).toBe(main.revision);
 		expect(state.pairing?.lastRevision).toBe(main.revision);
 
 		// The subordinate pulled the main's documents: same bytes, same etags, same revision.
-		sub.store(main.body);
+		sub.storeDocument(DATA, main.document(DATA) ?? '');
 		expect(sub.revision).toBe(main.revision);
 		main.connectError = 'connectTimeout';
 		engine.setVisible(false);
@@ -351,7 +353,7 @@ describe('SyncEngine with fallback servers', () => {
 
 			expect(last()).toMatchObject({ status: 'connected', serverName: 'Laptop', via: null });
 			expect(state.pairing?.serverId).toBe(sub.serverId);
-			expect(state.pairing?.lastEtag).toBe(sub.etag);
+			expect(state.pairing?.lastRevision).toBe(sub.revision);
 		});
 
 		it('only the new main’s refusals stop sync once it is the paired server', async () => {

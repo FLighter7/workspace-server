@@ -1,7 +1,7 @@
 /**
  * The client for workspace-server: pair a device, reach the server over
  * WebRTC on the local network with no signaling, and keep an app's
- * document in sync. The wire contract is the server's `docs/protocol.md`.
+ * documents in sync. The wire contract is the server's `docs/protocol.md`.
  *
  * Most apps need `parsePairingCode`, `createPairingStore`, `SyncEngine` with
  * their own `SyncAdapter`, and `startInPage`; the rest is there for apps
@@ -34,6 +34,8 @@ export {
 	type PairingStorage,
 	type PairingStore,
 	type PairingStoreOptions,
+	type PendingUpload,
+	type StagedBody,
 } from './PairingStore.js';
 export { buildServerAnswer, randomIceUfrag } from './serverAnswer.js';
 export {
@@ -60,6 +62,7 @@ export {
 	type StagedChange,
 	type Welcome,
 } from './ServerClient.js';
+export { Sha256, etagOf } from './sha256.js';
 export { startInPage, type Page, type PageAware } from './startInPage.js';
 export {
 	BLOCKED_RETRY_MS,
@@ -68,10 +71,14 @@ export {
 	MAX_CONFLICT_RETRIES,
 	MAX_WRITES_PER_MINUTE,
 	RETRY_DELAYS_MS,
-	SYNC_DOCUMENT,
+	SMALL_TRANSFER_BYTES,
 	SyncEngine,
+	UPLOAD_SAVE_MS,
 	connectToServer,
-	type ServerDocument,
+	documentPath,
+	type Divergence,
+	type DocumentBody,
+	type PlannedPut,
 	type SyncAdapter,
 	type SyncClient,
 	type SyncEngineOptions,
@@ -79,6 +86,7 @@ export {
 	type SyncState,
 	type SyncStatus,
 	type SyncTimers,
+	type Transfer,
 } from './SyncEngine.js';
 export {
 	DocumentError,

@@ -1,6 +1,34 @@
 import { readFallbackServer, type FallbackServer, type ServerTarget } from './PairingCode.js';
 
 /**
+ * A body of an unfinished upload, as the device staged it: its document, its
+ * size, and its etag (the SHA-256 of its bytes), which tells whether the body
+ * a later sync wants to write is the same one, and so may resume.
+ */
+export interface StagedBody {
+	path: string;
+	id: string;
+	type: string;
+	bytes: number;
+	etag: string;
+}
+
+/**
+ * A large upload that did not finish: its transaction, open on the server
+ * for 24 hours after its last activity, and the bodies it staged. A `begin`
+ * with the same `tx` returns to it, and each body the next sync still wants
+ * resumes from what the server reports it received.
+ */
+export interface PendingUpload {
+	tx: string;
+	/** The bytes of every body the upload puts. */
+	total: number;
+	/** How many of them the server held, as last known here; `begin` says exactly. */
+	done: number;
+	bodies: StagedBody[];
+}
+
+/**
  * What a device keeps after pairing: how to reach the server it paired
  * with, and who it is there. Its fallback servers take the same device and
  * token.
@@ -13,32 +41,29 @@ export interface Pairing extends ServerTarget {
 	/** This device's secret token; the server keeps only its hash. */
 	token: string;
 	/**
-	 * The etag of the synced document (`data.json`) at the last successful
-	 * sync; `null` when there was none.
+	 * The revision of the app's set at the last successful sync, `null` for an
+	 * empty set or before the first: a sync that finds the set still at it,
+	 * with no local change since, reads nothing. Every server of a family
+	 * holding the same files has the same revision.
 	 */
-	lastEtag: string | null;
-	/**
-	 * The revision of the app's set at the last successful sync: a sync that
-	 * finds the set still at it, with no local change since, reads nothing.
-	 * Absent from a record saved before a sync recorded one.
-	 */
-	lastRevision?: string | null;
+	lastRevision: string | null;
 	/** ISO 8601 UTC of the last successful sync. */
 	lastSyncAt: string | null;
 	/**
 	 * The paired server's subordinates, as its last `welcome` listed them:
 	 * the engine syncs with one of them when the paired server is out of
-	 * reach. Absent from a record saved before there were any, which reads
-	 * as none.
+	 * reach. Absent when there are none.
 	 */
 	fallbacks?: FallbackServer[];
 	/**
 	 * The family's term as the paired server last named it as the main (see
 	 * `Welcome.term`). The device follows a fallback that answers as the
 	 * main at this term or a higher one: it becomes the paired server.
-	 * Absent from a record saved before, which reads as 0.
+	 * Absent at 0.
 	 */
 	term?: number;
+	/** A large upload cut off before its commit, to resume; absent when there is none. */
+	upload?: PendingUpload;
 }
 
 /** Where the sync engine keeps this device's pairing. */
@@ -73,11 +98,35 @@ function isNullableString(value: unknown): value is string | null {
 	return value === null || isString(value);
 }
 
+function isCount(value: unknown): value is number {
+	return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function readStagedBody(value: unknown): StagedBody | null {
+	if (typeof value !== 'object' || value === null) return null;
+	const { path, id, type, bytes, etag } = value as Record<string, unknown>;
+	if (!isString(path) || !isString(id) || !isString(type) || !isCount(bytes) || !isString(etag)) {
+		return null;
+	}
+	return { path, id, type, bytes, etag };
+}
+
+/** A pending upload as stored; `null` when any part of it does not read. */
+function readUpload(value: unknown): PendingUpload | null {
+	if (typeof value !== 'object' || value === null) return null;
+	const { tx, total, done, bodies } = value as Record<string, unknown>;
+	if (!isString(tx) || !isCount(total) || !isCount(done) || !Array.isArray(bodies)) return null;
+	const read = bodies.map(readStagedBody);
+	if (read.some((body) => body === null)) return null;
+
+	return { tx, total, done, bodies: read as StagedBody[] };
+}
+
 function readPairing(value: unknown): Pairing | null {
 	if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
 	const raw = value as Record<string, unknown>;
 	const { serverId, name, device, token, password, fingerprint, port, hosts } = raw;
-	const { lastEtag, lastSyncAt } = raw;
+	const { lastRevision, lastSyncAt } = raw;
 
 	const valid =
 		isString(serverId) &&
@@ -92,7 +141,7 @@ function readPairing(value: unknown): Pairing | null {
 		Array.isArray(hosts) &&
 		hosts.length > 0 &&
 		hosts.every(isString) &&
-		isNullableString(lastEtag) &&
+		isNullableString(lastRevision) &&
 		isNullableString(lastSyncAt);
 	if (!valid) return null;
 
@@ -105,7 +154,7 @@ function readPairing(value: unknown): Pairing | null {
 		fingerprint,
 		port,
 		hosts: [...(hosts as string[])],
-		lastEtag,
+		lastRevision,
 		lastSyncAt,
 	};
 	// A list that does not read costs the fallbacks, never the pairing.
@@ -115,9 +164,11 @@ function readPairing(value: unknown): Pairing | null {
 				.filter((server): server is FallbackServer => server !== null)
 		: [];
 	if (fallbacks.length > 0) pairing.fallbacks = fallbacks;
-	const { lastRevision, term } = raw;
-	if (isNullableString(lastRevision)) pairing.lastRevision = lastRevision;
+	const { term } = raw;
 	if (typeof term === 'number' && Number.isSafeInteger(term) && term > 0) pairing.term = term;
+	// One that does not read costs the resume: the next sync uploads afresh.
+	const upload = readUpload(raw.upload);
+	if (upload) pairing.upload = upload;
 
 	return pairing;
 }

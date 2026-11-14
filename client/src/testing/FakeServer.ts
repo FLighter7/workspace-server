@@ -1,18 +1,21 @@
-import type { Body } from '../ChannelFraming.js';
+import { bodySize, type Body } from '../ChannelFraming.js';
 import type { FallbackServer, ServerTarget } from '../PairingCode.js';
 import type {
 	Began,
 	CommitResult,
+	DivergedServer,
 	DocumentEtag,
 	DocumentKey,
 	GetOptions,
+	Keep,
 	ListPage,
 	ReadDocument,
 	Stale,
 	StagedAck,
 	Welcome,
 } from '../ServerClient.js';
-import { SYNC_DOCUMENT, type SyncClient } from '../SyncEngine.js';
+import { Sha256 } from '../sha256.js';
+import { documentPath, type SyncClient } from '../SyncEngine.js';
 import { WorkspaceError, type WorkspaceErrorCode } from '../WorkspaceError.js';
 
 function bytesOf(body: Uint8Array | string): Uint8Array {
@@ -23,19 +26,8 @@ async function bytesOfBody(body: Body): Promise<Uint8Array> {
 	return body instanceof Uint8Array ? body.slice() : new Uint8Array(await body.arrayBuffer());
 }
 
-/** A 64-bit FNV-1a hash of `bytes`, as 16 hex digits: the fake's stand-in for SHA-256. */
-function hash(bytes: Uint8Array): string {
-	let h = 0xcbf29ce484222325n;
-	for (const byte of bytes) {
-		h ^= BigInt(byte);
-		h = (h * 0x100000001b3n) & 0xffffffffffffffffn;
-	}
-	return h.toString(16).padStart(16, '0');
-}
-
-/** A key's canonical form, `path/id.type`, or `id.type` at the app's root. */
-function keyString(key: DocumentKey): string {
-	return key.path === '' ? `${key.id}.${key.type}` : `${key.path}/${key.id}.${key.type}`;
+function sha256(bytes: Uint8Array): string {
+	return new Sha256().update(bytes).hex();
 }
 
 function keyOf(key: DocumentKey): DocumentKey {
@@ -43,39 +35,70 @@ function keyOf(key: DocumentKey): DocumentKey {
 }
 
 /** A document a `FakeServer` holds. */
-interface StoredDocument {
+export interface FakeDocument {
 	key: DocumentKey;
 	etag: string;
 	body: Uint8Array;
 }
 
-/** A change a fake transaction holds: a body to write, or `null` to delete. */
+/** A tombstone a `FakeServer` holds: a document deleted from the set, and when. */
+export interface FakeTombstone {
+	key: DocumentKey;
+	at: string;
+}
+
+/**
+ * A change a fake transaction holds: a body of `bytes` bytes of which `data`
+ * has arrived, or a delete.
+ */
 export interface FakeChange {
 	key: DocumentKey;
 	ifEtag: string | null;
-	body: Uint8Array | null;
+	delete: boolean;
+	bytes: number;
+	data: Uint8Array;
 }
 
-const SYNC_KEY = keyString(SYNC_DOCUMENT);
-
-/** A transaction id as the server takes it: 16 to 64 of `[A-Za-z0-9_-]`. */
-const TX_ID = /^[A-Za-z0-9_-]{16,64}$/;
-
-/** An open transaction of a `FakeServer`: whose it is, and what it staged, by key. */
+/** An open transaction of a `FakeServer`: whose it is, and what it staged, by canonical key. */
 export interface FakeTransaction {
 	device: string;
 	changes: Map<string, FakeChange>;
 }
 
+/** A `put` as a `FakeServer` took it: the body's size, where it started, and the bytes that came. */
+export interface FakePut {
+	key: DocumentKey;
+	ifEtag: string | null;
+	bytes: number;
+	offset: number;
+	body: Uint8Array;
+}
+
+/** A transaction id as the server takes it: 16 to 64 of `[A-Za-z0-9_-]`. */
+const TX_ID = /^[A-Za-z0-9_-]{16,64}$/;
+
+/** How many tombstones the set keeps, as the real server does. */
+const TOMBSTONES = 1000;
+
 /**
  * One in-memory workspace-server for tests of an app's sync: pass `connect`
  * as the engine's `connect`. It keeps an app's set of opaque documents, as
- * the real one does, with etags and a revision that, as on the real one,
- * depend only on the bytes: two fake servers holding the same documents
- * report the same. `store`, `body`, `etag` and `text` are about the document
- * `SyncEngine` syncs (`data.json`). Switches let a test make it fail the way
- * a real one can. `log` records every call in order, across clients
- * (`hello#1`, `put#2`, …).
+ * the real one does: etags are the SHA-256 of the bytes, and the revision
+ * is the hash of the set's keys and etags, so two fake servers holding the
+ * same documents report the same, as real ones do. A listing comes in pages
+ * of `pageSize`, tombstones after the documents; a `get` at an etag the
+ * document no longer has is `stale`; transactions belong to a device, stage
+ * bodies that resume from what arrived, and fail a commit on a conflict
+ * (left open) or on a body that has not fully arrived (`incomplete`).
+ *
+ * Switches make it fail as a real one can, and `log` records every call in
+ * order, across clients (`hello#1`, `put#2`, …). It also models a
+ * divergence of the app's servers as a device sees it: `setDiverged` names
+ * the servers that wait for a choice (in every welcome, and pushed to every
+ * open client), and a client's `resolve` takes the first choice for each,
+ * tells the others `resolved`, records it in `resolutions`, and calls
+ * `onResolve`, where a test makes the set what the choice keeps. What
+ * happens between the servers themselves is not modelled.
  *
  * Several engines may share one server, standing in for several devices.
  * Several servers stand in for a main and its subordinates: give each its
@@ -97,8 +120,10 @@ export class FakeServer {
 	term: number | undefined = undefined;
 	/** The welcome's list of subordinates; left out when `undefined`, as a subordinate does. */
 	subordinates: FallbackServer[] | undefined = undefined;
-	/** The app's documents, by `path/id.type`. */
-	readonly documents = new Map<string, StoredDocument>();
+	/** The app's documents, by canonical key (`path/id.type`). */
+	readonly documents = new Map<string, FakeDocument>();
+	/** The set's tombstones, by canonical key, oldest first. */
+	readonly removed = new Map<string, FakeTombstone>();
 	/** Paired devices: id to token. */
 	devices = new Map<string, string>([['dev1', 'tok1']]);
 	/**
@@ -112,6 +137,14 @@ export class FakeServer {
 	readonly cursors = new Set<string>();
 	/** The most entries one list page carries; the real server's is 500. */
 	pageSize = 500;
+	/** The divergences that wait for a device's choice; see `setDiverged`. */
+	diverged: DivergedServer[] = [];
+	/** Every choice taken, first for its server, in order. */
+	readonly resolutions: { server: string; keep: Keep; device: string }[] = [];
+	/** Called with each choice taken: a test makes the set what it keeps here. */
+	onResolve: ((server: string, keep: Keep) => void) | null = null;
+	/** When a tombstone is made: a test may fix the clock. */
+	now: () => Date = () => new Date();
 
 	/** Make `connect` fail with this code (e.g. `connectTimeout`). */
 	connectError: WorkspaceErrorCode | null = null;
@@ -125,13 +158,21 @@ export class FakeServer {
 	commitAppliedFirst = false;
 	/** Answer this many next `commit`s with a conflict, as though another device wrote first. */
 	conflicts = 0;
+	/**
+	 * Cut the connection once this many more bytes of `put` bodies have
+	 * arrived: the body stays staged with what came, and the put fails with
+	 * `closed`, as when a connection drops while the device sends.
+	 */
+	cutPutAfter: number | null = null;
+	/** The same for `get` bodies: the bytes before the cut reach `onPiece`, then the get fails. */
+	cutGetAfter: number | null = null;
 	/** While set, `connect` waits for it: a server slow to answer, or one away until it times out. */
 	connectGate: Promise<void> | null = null;
 
 	readonly clients: FakeClient[] = [];
 	readonly log: string[] = [];
 	/** Every `put`, committed or not, in order. */
-	readonly puts: { key: DocumentKey; ifEtag: string | null; body: Uint8Array }[] = [];
+	readonly puts: FakePut[] = [];
 
 	readonly connect = async (target: ServerTarget): Promise<SyncClient> => {
 		void target;
@@ -171,56 +212,69 @@ export class FakeServer {
 		};
 	}
 
-	/** Stores `data.json` as though another device had written it; returns its etag. */
-	store(body: Uint8Array | string): string {
-		return this.storeDocument(SYNC_DOCUMENT, body);
-	}
-
-	/** Stores any document as though another device had written it; returns its etag. */
+	/** Stores a document as though another device had written it; returns its etag. */
 	storeDocument(key: DocumentKey, body: Uint8Array | string): string {
 		const bytes = bytesOf(body);
-		const etag = hash(bytes);
-		this.documents.set(keyString(key), { key: keyOf(key), etag, body: bytes });
+		const etag = sha256(bytes);
+		const path = documentPath(key);
+		this.documents.set(path, { key: keyOf(key), etag, body: bytes });
+		this.removed.delete(path);
 		return etag;
 	}
 
-	/** Removes a document as though another device had deleted it. */
+	/** Removes a document as though another device had deleted it, leaving its tombstone. */
 	removeDocument(key: DocumentKey): void {
-		this.documents.delete(keyString(key));
+		const path = documentPath(key);
+		if (!this.documents.delete(path)) return;
+		this.removed.delete(path);
+		this.removed.set(path, { key: keyOf(key), at: this.now().toISOString() });
+		for (const oldest of this.removed.keys()) {
+			if (this.removed.size <= TOMBSTONES) break;
+			this.removed.delete(oldest);
+		}
 	}
 
-	/** The etag of `data.json`, `null` when there is none. */
-	get etag(): string | null {
-		return this.documents.get(SYNC_KEY)?.etag ?? null;
+	/** The bytes of a document, `null` when there is none. */
+	document(key: DocumentKey): Uint8Array | null {
+		return this.documents.get(documentPath(key))?.body.slice() ?? null;
 	}
 
-	/** The bytes of `data.json`, empty when there is none. */
-	get body(): Uint8Array {
-		return this.documents.get(SYNC_KEY)?.body.slice() ?? new Uint8Array(0);
+	/** A document as text, `null` when there is none. */
+	text(key: DocumentKey): string | null {
+		const body = this.document(key);
+		return body === null ? null : new TextDecoder().decode(body);
 	}
 
-	/** `data.json` as text. */
-	text(): string {
-		return new TextDecoder().decode(this.body);
+	/** The etag of a document, `null` when there is none. */
+	etag(key: DocumentKey): string | null {
+		return this.documents.get(documentPath(key))?.etag ?? null;
 	}
 
 	/**
-	 * The set's revision: a hash of its keys and etags, `null` for an empty
-	 * set, so the same documents give the same revision on every fake server.
+	 * The set's revision: the SHA-256 of `<key>\0<etag>\n` lines sorted by
+	 * key, `null` for an empty set, as the real server makes it.
 	 */
 	get revision(): string | null {
 		if (this.documents.size === 0) return null;
 		const lines = [...this.documents.keys()]
 			.sort()
-			.map((key) => `${key}\0${this.documents.get(key)?.etag ?? ''}\n`)
+			.map((path) => `${path}\0${this.documents.get(path)?.etag ?? ''}\n`)
 			.join('');
-		return hash(new TextEncoder().encode(lines));
+		return sha256(new TextEncoder().encode(lines));
 	}
 
 	/** Every open client but `except` hears a `changed`, as after a commit. */
 	pushChanged(except?: FakeClient): void {
 		for (const client of this.clients) {
 			if (client !== except && client.open) client.emitChanged(this.revision);
+		}
+	}
+
+	/** Names the divergences that wait for a choice; every open client hears `diverged`. */
+	setDiverged(servers: DivergedServer[]): void {
+		this.diverged = servers.map((server) => ({ ...server }));
+		for (const client of this.clients) {
+			if (client.open) client.emitDiverged(this.diverged);
 		}
 	}
 }
@@ -237,6 +291,8 @@ export class FakeClient implements SyncClient {
 	/** The device this connection authenticated as; `null` before. */
 	device: string | null = null;
 	private readonly changed = new Set<(revision: string | null) => void>();
+	private readonly divergedListeners = new Set<(servers: DivergedServer[]) => void>();
+	private readonly resolvedListeners = new Set<(server: string) => void>();
 	private readonly closed = new Set<(error: WorkspaceError) => void>();
 
 	constructor(
@@ -291,19 +347,25 @@ export class FakeClient implements SyncClient {
 		}
 		const revision = this.server.revision;
 		if ('revision' in options && options.revision !== revision) return { stale: revision };
-		const keys = [...this.server.documents.keys()].sort();
-		const from = options.cursor === undefined ? 0 : keys.indexOf(options.cursor) + 1;
-		const pageKeys = keys.slice(from, from + this.server.pageSize);
+		const docs = [...this.server.documents.keys()].sort();
+		const removed = [...this.server.removed.keys()].sort();
+		const from = cursor === undefined ? 0 : Number(cursor.slice(cursor.indexOf('#') + 1));
+		const to = from + this.server.pageSize;
 		const page: ListPage = {
 			revision,
-			docs: pageKeys.map((key) => {
-				const doc = this.server.documents.get(key) as StoredDocument;
+			docs: docs.slice(from, to).map((path) => {
+				const doc = this.server.documents.get(path) as FakeDocument;
 				return { ...keyOf(doc.key), etag: doc.etag, bytes: doc.body.byteLength };
 			}),
-			removed: [],
+			removed: removed
+				.slice(Math.max(0, from - docs.length), Math.max(0, to - docs.length))
+				.map((path) => {
+					const tombstone = this.server.removed.get(path) as FakeTombstone;
+					return { ...keyOf(tombstone.key), at: tombstone.at };
+				}),
 		};
-		if (from + pageKeys.length < keys.length) {
-			page.cursor = pageKeys[pageKeys.length - 1];
+		if (to < docs.length + removed.length) {
+			page.cursor = `${revision ?? 'empty'}#${to}`;
 			this.server.cursors.add(page.cursor);
 		}
 
@@ -312,20 +374,26 @@ export class FakeClient implements SyncClient {
 
 	async get(key: DocumentKey, options: GetOptions = {}): Promise<ReadDocument | Stale> {
 		this.call('get');
-		const doc = this.server.documents.get(keyString(key));
+		const doc = this.server.documents.get(documentPath(key));
 		const etag = options.etag ?? null;
-		if (!doc || (etag !== null && doc.etag !== etag)) return { stale: this.server.revision };
 		const offset = options.offset ?? 0;
-		const body = doc.body.slice(offset);
+		if (offset > 0 && (etag === null || (doc && offset > doc.body.byteLength))) {
+			this.refuse('An offset without an etag, or past the document');
+		}
+		if (!doc || (etag !== null && doc.etag !== etag)) return { stale: this.server.revision };
+		let body = doc.body.slice(offset);
+		const cut = this.server.cutGetAfter;
+		if (cut !== null && cut < body.byteLength) {
+			this.server.cutGetAfter = null;
+			body = body.slice(0, cut);
+			if (options.onPiece && body.byteLength > 0) options.onPiece(body);
+			this.drop();
+			throw new WorkspaceError('The connection to the server closed', 'closed');
+		}
+		if (cut !== null) this.server.cutGetAfter = cut - body.byteLength;
 		if (options.onPiece) {
 			if (body.byteLength > 0) options.onPiece(body);
-			return {
-				...keyOf(key),
-				etag: doc.etag,
-				bytes: doc.body.byteLength,
-				offset,
-				body: new Uint8Array(0),
-			};
+			body = new Uint8Array(0);
 		}
 
 		return { ...keyOf(key), etag: doc.etag, bytes: doc.body.byteLength, offset, body };
@@ -352,10 +420,10 @@ export class FakeClient implements SyncClient {
 			tx,
 			staged: [...open.changes.values()].map((change) => ({
 				...keyOf(change.key),
-				...(change.body === null ? { delete: true as const } : {}),
+				...(change.delete ? { delete: true as const } : {}),
 				ifEtag: change.ifEtag,
-				bytes: change.body?.byteLength ?? 0,
-				received: change.body?.byteLength ?? 0,
+				bytes: change.bytes,
+				received: change.data.byteLength,
 			})),
 		};
 	}
@@ -366,25 +434,54 @@ export class FakeClient implements SyncClient {
 		ifEtag: string | null,
 		body: Body,
 		offset = 0,
+		onProgress?: (position: number) => void,
 	): Promise<StagedAck> {
 		this.call('put');
 		this.checkTx(tx);
-		const bytes = await bytesOfBody(body);
+		const size = bodySize(body);
 		const changes = this.changes(tx);
-		const staged = changes.get(keyString(key))?.body;
-		if (offset > 0 && (!staged || staged.byteLength !== bytes.byteLength)) {
+		const path = documentPath(key);
+		const staged = changes.get(path);
+		if (
+			offset > 0 &&
+			(!staged || staged.delete || staged.bytes !== size || offset > staged.data.byteLength)
+		) {
 			this.refuse('A resumed body that does not fit what the transaction staged');
 		}
-		this.server.puts.push({ key: keyOf(key), ifEtag, body: bytes.slice() });
-		changes.set(keyString(key), { key: keyOf(key), ifEtag, body: bytes });
+		const bytes = await bytesOfBody(body);
+		let sent = bytes.slice(offset);
+		const cut = this.server.cutPutAfter;
+		const cutting = cut !== null && cut < sent.byteLength;
+		if (cutting) {
+			this.server.cutPutAfter = null;
+			sent = sent.slice(0, cut);
+		} else if (cut !== null) {
+			this.server.cutPutAfter = cut - sent.byteLength;
+		}
+		const data = new Uint8Array(offset + sent.byteLength);
+		if (offset > 0 && staged) data.set(staged.data.subarray(0, offset));
+		data.set(sent, offset);
+		this.server.puts.push({ key: keyOf(key), ifEtag, bytes: size, offset, body: sent.slice() });
+		changes.set(path, { key: keyOf(key), ifEtag, delete: false, bytes: size, data });
+		onProgress?.(offset + sent.byteLength);
+		if (cutting) {
+			this.drop();
+			throw new WorkspaceError('The connection to the server closed', 'closed');
+		}
 
-		return { ...keyOf(key), received: bytes.byteLength };
+		return { ...keyOf(key), received: data.byteLength };
 	}
 
 	async delete(tx: string, key: DocumentKey, ifEtag: string | null): Promise<StagedAck> {
 		this.call('delete');
 		this.checkTx(tx);
-		this.changes(tx).set(keyString(key), { key: keyOf(key), ifEtag, body: null });
+		this.changes(tx).set(documentPath(key), {
+			key: keyOf(key),
+			ifEtag,
+			delete: true,
+			bytes: 0,
+			data: new Uint8Array(0),
+		});
 
 		return { ...keyOf(key), received: 0 };
 	}
@@ -394,6 +491,9 @@ export class FakeClient implements SyncClient {
 		this.checkTx(tx);
 		const changes = [...this.changes(tx).values()];
 		const server = this.server;
+		if (changes.some((change) => !change.delete && change.data.byteLength < change.bytes)) {
+			throw new WorkspaceError('A body has not fully arrived', 'incomplete');
+		}
 		if (server.commitError && !server.commitAppliedFirst) {
 			const code = server.commitError;
 			server.commitError = null;
@@ -419,8 +519,8 @@ export class FakeClient implements SyncClient {
 
 		const before = server.revision;
 		for (const change of changes) {
-			if (change.body === null) server.removeDocument(change.key);
-			else server.storeDocument(change.key, change.body);
+			if (change.delete) server.removeDocument(change.key);
+			else server.storeDocument(change.key, change.data);
 		}
 		server.transactions.delete(tx);
 		if (server.revision !== before) server.pushChanged(this);
@@ -449,6 +549,26 @@ export class FakeClient implements SyncClient {
 		return { tx };
 	}
 
+	async resolve(serverId: string, keep: Keep): Promise<{ server: string }> {
+		this.call('resolve');
+		const server = this.server;
+		const waiting = server.diverged.some((entry) => entry.serverId === serverId);
+		if (waiting) {
+			// The first choice wins; any later one changes nothing and is answered all the same.
+			server.diverged = server.diverged.filter((entry) => entry.serverId !== serverId);
+			server.resolutions.push({ server: serverId, keep, device: this.device ?? '' });
+			for (const client of server.clients) {
+				if (client === this || !client.open) continue;
+				client.emitResolved(serverId);
+				client.emitDiverged(server.diverged);
+			}
+			server.onResolve?.(serverId, keep);
+		}
+		this.emitResolved(serverId);
+
+		return { server: serverId };
+	}
+
 	async forget(): Promise<void> {
 		this.call('forget');
 		this.server.devices.clear();
@@ -458,6 +578,16 @@ export class FakeClient implements SyncClient {
 	onChanged(listener: (revision: string | null) => void): () => void {
 		this.changed.add(listener);
 		return () => this.changed.delete(listener);
+	}
+
+	onDiverged(listener: (servers: DivergedServer[]) => void): () => void {
+		this.divergedListeners.add(listener);
+		return () => this.divergedListeners.delete(listener);
+	}
+
+	onResolved(listener: (server: string) => void): () => void {
+		this.resolvedListeners.add(listener);
+		return () => this.resolvedListeners.delete(listener);
 	}
 
 	onClosed(listener: (error: WorkspaceError) => void): () => void {
@@ -473,6 +603,16 @@ export class FakeClient implements SyncClient {
 
 	emitChanged(revision: string | null): void {
 		for (const listener of [...this.changed]) listener(revision);
+	}
+
+	emitDiverged(servers: DivergedServer[]): void {
+		for (const listener of [...this.divergedListeners]) {
+			listener(servers.map((server) => ({ ...server })));
+		}
+	}
+
+	emitResolved(server: string): void {
+		for (const listener of [...this.resolvedListeners]) listener(server);
 	}
 
 	/** The server side closes the channel: the connection is lost. */
@@ -509,7 +649,7 @@ export class FakeClient implements SyncClient {
 	}
 
 	private current(key: DocumentKey): DocumentEtag {
-		return { ...keyOf(key), etag: this.server.documents.get(keyString(key))?.etag ?? null };
+		return { ...keyOf(key), etag: this.server.etag(key) };
 	}
 
 	private welcome(): Welcome {
@@ -523,6 +663,9 @@ export class FakeClient implements SyncClient {
 		if (this.server.term !== undefined) welcome.term = this.server.term;
 		if (this.server.subordinates) {
 			welcome.subordinates = this.server.subordinates.map((s) => ({ ...s, hosts: [...s.hosts] }));
+		}
+		if (this.server.diverged.length > 0) {
+			welcome.diverged = this.server.diverged.map((server) => ({ ...server }));
 		}
 
 		return welcome;
