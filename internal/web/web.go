@@ -81,9 +81,9 @@ var (
 	// ErrNotConnected: the server is linked to this one but not connected
 	// now.
 	ErrNotConnected = errors.New("that server is not connected to this one now")
-	// ErrFollowsMain: a subordinate takes the apps' quotas from its main,
-	// so they are changed on the main's page.
-	ErrFollowsMain = errors.New("this server is linked to a main server, which sets the apps' quotas: change it on the main's page")
+	// ErrFollowsMain: a subordinate takes the quota of the apps its main
+	// lists from the main, so it is changed on the main's page.
+	ErrFollowsMain = errors.New("this server is linked to a main server, which sets this app's quota: change it on the main's page")
 )
 
 // AppInfo is a served app and the state of its data.
@@ -102,6 +102,10 @@ type AppInfo struct {
 	// subordinate: "quota" when its files would take this server or the
 	// main past the app's quota. "" when it does not.
 	Failing string `json:"failing,omitempty"`
+	// FollowsMain: on a subordinate, the main lists the app, and sets its
+	// quota; SetQuota refuses it with ErrFollowsMain. An app only the
+	// subordinate serves is its own.
+	FollowsMain bool `json:"followsMain"`
 }
 
 // Divergence names the other server of a divergence, as the page shows it:
@@ -159,10 +163,12 @@ type Backend interface {
 	DeleteApp(id string) error
 	// SetQuota sets the app's quota; zero is the default. Its errors wrap
 	// apps.ErrNotFound, apps.ErrInvalid (out of range) or ErrFollowsMain
-	// (on a subordinate, which takes the main's), or are internal.
+	// (an app a subordinate follows its main for, which sets the quota), or
+	// are internal.
 	SetQuota(id string, quota int64) error
-	// OpenFolder shows the app's folder in the system's file manager,
-	// creating it if it is missing. It runs nothing else. An unknown app is
+	// OpenFolder shows the app's folder in the system's file manager, or,
+	// when it has none yet, the nearest folder above it that exists, up to
+	// WSS-Data; it creates nothing and runs nothing else. An unknown app is
 	// an error wrapping apps.ErrNotFound; any other error is internal.
 	OpenFolder(id string) error
 	Devices() []DeviceInfo

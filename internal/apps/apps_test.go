@@ -45,8 +45,10 @@ func TestOpenWritesDefault(t *testing.T) {
 }
 
 func TestValidID(t *testing.T) {
-	valid := []string{"todo", "a", "my-app-2", strings.Repeat("a", 64)}
-	invalid := []string{"", "Todo", "../x", "a/b", "a.b", "a b", "é", "a\n", strings.Repeat("a", 65)}
+	valid := []string{"todo", "a", "my-app-2", strings.Repeat("a", 64), "conf", "com10", "lpt", "nul-1", "auxiliary"}
+	invalid := []string{"", "Todo", "../x", "a/b", "a.b", "a b", "é", "a\n", strings.Repeat("a", 65),
+		// Windows' reserved device names: the id names a folder.
+		"con", "prn", "aux", "nul", "com1", "com9", "lpt1", "com0", "lpt0"}
 	for _, id := range valid {
 		if !ValidID(id) {
 			t.Errorf("ValidID(%q) = false, want true", id)

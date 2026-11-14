@@ -17,6 +17,7 @@ const todo: AppInfo = {
 	devices: 2,
 	folder: 'C:\\ws\\WSS-Data\\apps\\todo',
 	diverged: [],
+	followsMain: false,
 };
 
 const notes: AppInfo = {
@@ -29,6 +30,7 @@ const notes: AppInfo = {
 	devices: 0,
 	folder: 'C:\\ws\\WSS-Data\\apps\\notes',
 	diverged: [],
+	followsMain: false,
 };
 
 const asMain: UpstreamStatus = {
@@ -87,7 +89,8 @@ describe('AppsSection on a main', () => {
 		expect(first).toContain('5 MB of 50 MB');
 		expect(first).toContain('C:\\ws\\WSS-Data\\apps\\todo');
 		const bar = card('Todo').querySelector('[role="progressbar"][aria-hidden="false"]');
-		expect(bar?.getAttribute('aria-label')).toBe('Space used of the quota');
+		expect(bar?.getAttribute('aria-label')).toBe('Space used of the quota of Todo');
+		expect(bar?.getAttribute('aria-valuetext')).toBe('5 MB of 50 MB');
 		expect(bar?.getAttribute('aria-valuenow')).toBe('10');
 		expect(card('Notes').textContent).toContain('FilesNo files yet');
 		expect(card('Notes').textContent).toContain('Last writeNot yet');
@@ -148,11 +151,47 @@ describe('AppsSection on a main', () => {
 		await settle();
 		byLabel('Change the quota of Todo')?.click();
 		await settle();
+		const field = dialog().querySelector('input') as HTMLInputElement;
+		field.value = '60';
+		field.dispatchEvent(new Event('input'));
+		await settle();
 		dialog().querySelector('form')?.dispatchEvent(new Event('submit'));
 		await settle();
 		expect(dialog().textContent).toContain(
 			'This server is linked to a main server, which sets the quotas.',
 		);
+	});
+
+	it('changes nothing when the field is left as it was, so a quota of no whole MB stays', async () => {
+		apps.mockResolvedValue([{ ...todo, quota: 50 * MB + 123 }]);
+		const setQuota = vi.spyOn(serverApi, 'setQuota').mockResolvedValue(null);
+		const wrapper = mountPage(AppsSection);
+		await settle();
+		byLabel('Change the quota of Todo')?.click();
+		await settle();
+		expect((dialog().querySelector('input') as HTMLInputElement).value).toBe('50');
+		dialog().querySelector('form')?.dispatchEvent(new Event('submit'));
+		await settle();
+		expect(setQuota).not.toHaveBeenCalled();
+		expect(wrapper.findComponent({ name: 'QuotaDialog' }).props('modelValue')).toBe(false);
+	});
+
+	it('drops a polling error once the server answers again, and lists the apps without the link', async () => {
+		apps.mockRejectedValueOnce(new ApiError('network', ''));
+		upstream.mockRejectedValue(new ApiError('internal', 'link'));
+		vi.spyOn(serverApi, 'addApp').mockResolvedValue(null);
+		mountPage(AppsSection);
+		await settle();
+		expect(text()).toContain('The server cannot be reached.');
+
+		const id = document.querySelector('form input') as HTMLInputElement;
+		id.value = 'photos';
+		id.dispatchEvent(new Event('input'));
+		await settle();
+		id.closest('form')?.dispatchEvent(new Event('submit'));
+		await settle();
+		expect(text()).not.toContain('The server cannot be reached.');
+		expect(card('Todo')).toBeTruthy();
 	});
 
 	it("opens the app's folder through the server", async () => {
@@ -163,6 +202,20 @@ describe('AppsSection on a main', () => {
 		await settle();
 		expect(openFolder).toHaveBeenCalledWith('notes');
 		expect(text()).toContain('The folder of Notes opens in the file manager.');
+	});
+
+	it("refuses an id Windows reserves for a device, which could not name the app's folder", async () => {
+		const addApp = vi.spyOn(serverApi, 'addApp').mockResolvedValue(null);
+		mountPage(AppsSection);
+		await settle();
+		const id = document.querySelector('form input') as HTMLInputElement;
+		id.value = 'con';
+		id.dispatchEvent(new Event('input'));
+		await settle();
+		id.closest('form')?.dispatchEvent(new Event('submit'));
+		await settle();
+		expect(text()).toContain('Windows reserves this name for a device');
+		expect(addApp).not.toHaveBeenCalled();
 	});
 
 	it('adds an app with its quota in bytes', async () => {
@@ -188,16 +241,23 @@ describe('AppsSection on a subordinate', () => {
 		upstream.mockResolvedValue(asSubordinate);
 	});
 
-	it('shows the quota without changing it, and says the main sets it', async () => {
-		apps.mockResolvedValue([todo]);
+	it('shows the quota of an app the main lists without changing it, and says the main sets it', async () => {
+		apps.mockResolvedValue([{ ...todo, followsMain: true }, notes]);
 		mountPage(AppsSection);
 		await settle();
 		expect(byLabel('Change the quota of Todo')).toBeNull();
 		expect(byLabel('Open folder of Todo')).not.toBeNull();
-		expect(text()).toContain(
+		expect(card('Todo').textContent).toContain(
 			"The main server, Desk, sets the quota: change it on the main's page.",
 		);
-		expect([...document.querySelectorAll('form input')]).toHaveLength(2);
+		// An app only this server serves is its own.
+		expect(byLabel('Change the quota of Notes')).not.toBeNull();
+		expect(card('Notes').textContent).not.toContain('sets the quota');
+		// A new app takes a quota, which the main's replaces if it serves the app too.
+		expect([...document.querySelectorAll('form input')]).toHaveLength(3);
+		expect(text()).toContain(
+			"If the main server serves an app with this ID too, the main's quota replaces it.",
+		);
 	});
 
 	it('names the main it diverged from, and a sync the quota holds', async () => {
@@ -206,6 +266,7 @@ describe('AppsSection on a subordinate', () => {
 				...todo,
 				diverged: [{ serverId: 'MainServer01', name: 'Desk', since: '2026-11-13T09:00:00Z' }],
 				failing: 'quota',
+				followsMain: true,
 			},
 		]);
 		mountPage(AppsSection);

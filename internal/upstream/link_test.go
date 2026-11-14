@@ -643,11 +643,33 @@ func TestAppList(t *testing.T) {
 		t.Fatal(err)
 	}
 	notes := main.write("notes", `{"n":1}`, nil)
+	if err := sub.apps.Add(apps.App{ID: "photos", Name: "Photos"}); err != nil {
+		t.Fatal(err)
+	}
+	if sub.link.Follows("todo") {
+		t.Error("a main follows todo")
+	}
 
 	sub.linkTo(main)
 	waitFor(t, "notes to be added and pulled", func() bool { return sub.etag("notes") == notes })
 	if a, ok := sub.apps.Get("notes"); !ok || a.Name != "Notes" {
 		t.Errorf("the subordinate's notes app: %+v, %v; want it named Notes", a, ok)
+	}
+	// The apps the main lists are followed, their quota the main's; one only
+	// the subordinate serves is its own. upstream.json keeps the list.
+	if !sub.link.Follows("notes") || !sub.link.Follows("todo") || sub.link.Follows("photos") {
+		t.Errorf("follows notes %v, todo %v, photos %v; want true, true, false",
+			sub.link.Follows("notes"), sub.link.Follows("todo"), sub.link.Follows("photos"))
+	}
+	if st, err := load(sub.link.d.Path); err != nil || !slices.Equal(st.Apps, []string{"notes", "todo"}) {
+		t.Errorf("upstream.json apps = %v, %v; want notes and todo", st, err)
+	}
+	ran := 0
+	if err := sub.link.SetLocalQuota("photos", func() error { ran++; return nil }); err != nil || ran != 1 {
+		t.Errorf("SetLocalQuota(photos) = %v, ran %d times; want it run", err, ran)
+	}
+	if err := sub.link.SetLocalQuota("notes", func() error { ran++; return nil }); !errors.Is(err, ErrFollowed) || ran != 1 {
+		t.Errorf("SetLocalQuota(notes) = %v, ran %d times; want ErrFollowed without running", err, ran)
 	}
 
 	if err := main.apps.Add(apps.App{ID: "chess", Name: "Chess"}); err != nil {
@@ -668,6 +690,9 @@ func TestAppList(t *testing.T) {
 		t.Errorf("notes on the subordinate after its removal on the main: listed %v, etag %q; want both kept", ok, sub.etag("notes"))
 	}
 	waitFor(t, "notes' base to go", func() bool { _, ok := sub.link.baseOf("notes"); return !ok })
+	if sub.link.Follows("notes") {
+		t.Error("the subordinate still follows notes, which the main no longer serves")
+	}
 	if !slices.Equal(sub.link.Status().Apps, []string{"chess", "todo"}) {
 		t.Errorf("synced apps %v, want chess and todo", sub.link.Status().Apps)
 	}

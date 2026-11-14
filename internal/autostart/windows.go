@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"runtime"
+	"syscall"
 
 	"golang.org/x/sys/windows"
 )
@@ -97,16 +99,29 @@ func browserCommand(url string) *exec.Cmd {
 }
 
 // openFolder opens path in Explorer through the shell itself
-// (ShellExecuteW, the "open" verb on a folder), with no command line in
-// between that could take the path apart.
+// (ShellExecuteW), with no command line in between that could take the path
+// apart. The verb is "explore", which belongs to folders, not "open",
+// which would run a file (OpenFolder has checked that path is a folder,
+// but the folder could be swapped in between). The shell wants COM
+// initialised, single-threaded apartment, on the calling thread, which is
+// locked for the call.
 func openFolder(path string) error {
-	verb, err := windows.UTF16PtrFromString("open")
+	verb, err := windows.UTF16PtrFromString("explore")
 	if err != nil {
 		return err
 	}
 	file, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	// S_FALSE: COM was initialised on this thread already, which still
+	// takes a CoUninitialize. Another mode (RPC_E_CHANGED_MODE) is left
+	// alone; the shell works in it too.
+	switch err := windows.CoInitializeEx(0, windows.COINIT_APARTMENTTHREADED|windows.COINIT_DISABLE_OLE1DDE); err {
+	case nil, syscall.Errno(windows.S_FALSE):
+		defer windows.CoUninitialize()
 	}
 	if err := windows.ShellExecute(0, verb, file, nil, nil, windows.SW_SHOWNORMAL); err != nil {
 		return fmt.Errorf("open the folder %s: %w", path, err)

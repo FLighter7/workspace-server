@@ -69,6 +69,7 @@ beforeEach(() => {
 			devices: 1,
 			folder: 'C:\\ws\\WSS-Data\\apps\\todo',
 			diverged: [],
+			followsMain: false,
 		},
 	]);
 	vi.spyOn(serverApi, 'devices').mockResolvedValue([laptop, phone]);

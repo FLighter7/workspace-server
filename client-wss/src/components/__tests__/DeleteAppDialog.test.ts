@@ -15,6 +15,7 @@ const app: AppInfo = {
 	devices: 1,
 	folder: '/data/WSS-Data/apps/notes',
 	diverged: [],
+	followsMain: false,
 };
 
 afterEach(() => {

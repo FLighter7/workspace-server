@@ -158,6 +158,9 @@ func (s *server) Apps() []web.AppInfo {
 			Folder:   s.appFolder(a.ID),
 			Diverged: s.divergences(a.ID, link),
 			Failing:  link.Failing[a.ID],
+			// On a subordinate, an app the main lists: the main sets its
+			// quota.
+			FollowsMain: s.link.Follows(a.ID),
 		}
 		// An app whose folder cannot be read shows as empty; the hub
 		// reports the error to its devices.
@@ -196,13 +199,22 @@ func (s *server) divergences(app string, link upstream.Status) []web.Divergence 
 	return out
 }
 
-// SetQuota sets the app's quota on a main, and tells its subordinates, which
-// take it with the app list. A subordinate refuses: it takes its main's.
+// SetQuota sets the app's quota, and tells this server's subordinates,
+// which take it with the app list. A subordinate refuses for an app it
+// follows its main for, whose quota is the main's; an app only it serves
+// is its own. The link orders the write with the main's quotas
+// (Link.SetLocalQuota), so a link made meanwhile never has it land on an
+// app it has just started to follow.
 func (s *server) SetQuota(id string, quota int64) error {
-	if s.link.Role() == upstream.RoleSubordinate {
-		return web.ErrFollowsMain
+	var changed bool
+	err := s.link.SetLocalQuota(id, func() error {
+		var err error
+		changed, err = s.apps.SetQuota(id, quota)
+		return err
+	})
+	if errors.Is(err, upstream.ErrFollowed) {
+		return fmt.Errorf("%w: %s", web.ErrFollowsMain, err)
 	}
-	changed, err := s.apps.SetQuota(id, quota)
 	if err != nil {
 		return err
 	}
@@ -214,15 +226,27 @@ func (s *server) SetQuota(id string, quota int64) error {
 	return nil
 }
 
-// OpenFolder shows the app's folder in the system's file manager, making the
-// folder first when the app has no files yet. Only that folder is opened.
+// OpenFolder shows the app's folder in the system's file manager. It
+// creates nothing: an app that has no folder yet (no files ever written)
+// shows the apps' folder that would hold it, or else the WSS-Data folder.
+// The app is checked again once the folder is chosen, so an app deleted
+// meanwhile opens nothing.
 func (s *server) OpenFolder(id string) error {
 	if _, ok := s.apps.Get(id); !ok {
 		return fmt.Errorf("%w: %q", apps.ErrNotFound, id)
 	}
-	dir := s.appFolder(id)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+	dir := ""
+	for _, d := range []string{s.appFolder(id), filepath.Join(s.dataWSS, storeDir), s.dataWSS} {
+		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
+			dir = d
+			break
+		}
+	}
+	if dir == "" {
+		return fmt.Errorf("the data folder %s is missing", s.dataWSS)
+	}
+	if _, ok := s.apps.Get(id); !ok {
+		return fmt.Errorf("%w: %q", apps.ErrNotFound, id)
 	}
 	return s.openFolder(dir)
 }

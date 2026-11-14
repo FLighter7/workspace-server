@@ -24,10 +24,6 @@
 	margin: 0.75rem 0 0;
 }
 
-.warning {
-	color: rgb(var(--v-theme-warning));
-}
-
 .error {
 	color: rgb(var(--v-theme-error));
 }
@@ -60,15 +56,14 @@
 					</FactItem>
 					<FactItem :label="t('used')">
 						<div :class="$style.usage">
-							<span>
-								{{ t('usedOf', { used: format.bytes(app.size), quota: format.bytes(app.quota) }) }}
-							</span>
+							<span>{{ usedText(app) }}</span>
 							<VProgressLinear
 								:model-value="usedPercent(app)"
 								:color="usageColor(app)"
 								height="6"
 								rounded
-								:aria-label="t('quotaUsed')"
+								:aria-label="t('quotaUsed', { app: app.name })"
+								:aria-valuetext="usedText(app)"
 							/>
 						</div>
 					</FactItem>
@@ -97,7 +92,7 @@
 					<p v-if="app.size >= app.quota" :class="$style.error">{{ t('quotaFull') }}</p>
 				</div>
 				<I18nT
-					v-if="followsMain"
+					v-if="app.followsMain"
 					keypath="quotaFollowsMain"
 					tag="p"
 					scope="global"
@@ -117,7 +112,7 @@
 						{{ t('openFolder') }}
 					</VBtn>
 					<VBtn
-						v-if="!followsMain"
+						v-if="!app.followsMain"
 						:aria-label="t('changeQuotaLabel', { app: app.name })"
 						@click="openQuota(app)"
 					>
@@ -148,12 +143,11 @@
 				autocomplete="off"
 			/>
 			<VTextField
-				v-if="!followsMain"
 				v-model="newQuota"
 				type="number"
 				inputmode="numeric"
 				:label="t('quotaField')"
-				:hint="t('quotaAddHint')"
+				:hint="t(linked ? 'quotaAddLinkedHint' : 'quotaAddHint')"
 				persistent-hint
 				:rules="[quotaRule]"
 			/>
@@ -178,7 +172,7 @@ import { computed, ref, useTemplateRef } from 'vue';
 import { I18nT, useI18n } from 'vue-i18n';
 import type { VForm } from 'vuetify/components';
 import { serverApi } from '@/api/client';
-import { ID_PATTERN } from '@/api/ids';
+import { ID_PATTERN, RESERVED_ID } from '@/api/ids';
 import type { AppInfo, DeviceInfo, NewApp, UpstreamStatus } from '@/api/types';
 import { boot } from '@/boot';
 import DeleteAppDialog from '@/components/DeleteAppDialog.vue';
@@ -198,8 +192,9 @@ import s from '@/styles/section.module.scss';
 /**
  * The apps this server serves: each with its files, the space they take of
  * its quota, its folder, and what needs the user (a divergence to choose on a
- * device, a sync the quota holds); changing the quota (on a main: a
- * subordinate takes its main's), opening the folder, deleting the app, and
+ * device, a sync the quota holds); changing the quota (not for an app a
+ * subordinate follows its main for: the main sets that one), opening the
+ * folder, deleting the app, and
  * adding one. The list is polled while the section is shown, so the marks
  * come and go by themselves.
  */
@@ -228,28 +223,48 @@ const editing = ref<AppInfo | null>(null);
 /** The app whose folder is being opened. */
 const opening = ref<string | null>(null);
 
-/** A subordinate takes the apps and their quotas from its main. */
-const followsMain = computed(() => upstream.value?.linked === true);
+/**
+ * A subordinate: it takes the quota of each app its main lists from the main
+ * (AppInfo.followsMain); an app only it serves is its own.
+ */
+const linked = computed(() => upstream.value?.linked === true);
 const mainName = computed(() => upstream.value?.name ?? '');
 const totalFiles = computed(() => apps.value.reduce((sum, app) => sum + app.files, 0));
 const totalSize = computed(() => apps.value.reduce((sum, app) => sum + app.size, 0));
 
+/**
+ * The apps, and the link for the main's name. The link is read on its own:
+ * a failure there leaves the list as it comes. An error shown by an earlier
+ * poll goes once the server answers again.
+ */
 async function loadApps(): Promise<void> {
+	void loadUpstream();
 	try {
-		const [list, link] = await Promise.all([serverApi.apps(), serverApi.upstream()]);
-		apps.value = list;
-		upstream.value = link;
+		apps.value = await serverApi.apps();
 	} catch (error) {
 		appsMessage.value = errorMessage(error);
 		return;
 	}
 	loaded.value = true;
+	if (appsMessage.value?.error) appsMessage.value = null;
+}
+
+async function loadUpstream(): Promise<void> {
+	try {
+		upstream.value = await serverApi.upstream();
+	} catch {
+		// The list says what matters; the main's name waits for the next poll.
+	}
 }
 
 usePolling(loadApps);
 
+function usedText(app: AppInfo): string {
+	return t('usedOf', { used: format.bytes(app.size), quota: format.bytes(app.quota) });
+}
+
 function usedPercent(app: AppInfo): number {
-	return app.quota > 0 ? Math.min(100, (app.size / app.quota) * 100) : 0;
+	return app.quota > 0 ? Math.min(100, Math.round((app.size / app.quota) * 100)) : 0;
 }
 
 /** The bar warns from 90 %, and is red once the files fill the quota. */
@@ -267,6 +282,7 @@ function hasMarks(app: AppInfo): boolean {
 function idRule(id: string): true | string {
 	if (id === '') return t('fieldRequired');
 	if (!ID_PATTERN.test(id)) return t('idInvalid');
+	if (RESERVED_ID.test(id)) return t('idReserved');
 	if (apps.value.some((app) => app.id === id)) return t('errExists');
 	return true;
 }
@@ -274,9 +290,9 @@ function idRule(id: string): true | string {
 async function addApp(): Promise<void> {
 	if (!(await addForm.value?.validate())?.valid) return;
 
-	const app: NewApp = { id: newId.value };
-	// A subordinate takes the main's quota for an app the main serves.
-	if (!followsMain.value) app.quota = Number(newQuota.value) * MB;
+	// On a subordinate, the main's quota replaces this one once the main
+	// lists the app too; the field's hint says so.
+	const app: NewApp = { id: newId.value, quota: Number(newQuota.value) * MB };
 	const name = newName.value.trim();
 	if (name) app.name = name;
 

@@ -124,7 +124,9 @@ test("the quota is changed on the main's page, and the laptop follows it, read-o
 	const desk = await openPage(browser, main.base, '#apps');
 	const card = todoCard(desk);
 	await expect(card).toContainText('of 50 MB');
-	await expect(card.getByRole('progressbar', { name: 'Space used of the quota' })).toBeVisible();
+	await expect(
+		card.getByRole('progressbar', { name: 'Space used of the quota of Todo' }),
+	).toBeVisible();
 	const change = card.getByRole('button', { name: 'Change the quota of Todo' });
 	await change.click();
 	const dialog = desk.getByRole('dialog', { name: 'The quota of Todo' });
@@ -153,14 +155,19 @@ test("the quota is changed on the main's page, and the laptop follows it, read-o
 			{ timeout: 20_000 },
 		)
 		.toBe(3 * MB);
+	// An app only the laptop serves keeps a quota of its own.
+	await sub.api('POST', '/api/apps', { id: 'photos', name: 'Photos' });
 	const laptop = await openPage(browser, sub.base, '#apps');
 	const subCard = todoCard(laptop);
+	await expect(laptop.getByRole('button', { name: 'Change the quota of Photos' })).toBeVisible();
 	await expect(subCard).toContainText('of 3 MB');
 	await expect(subCard).toContainText(
 		"The main server, Desk, sets the quota: change it on the main's page.",
 	);
 	await expect(subCard.getByRole('button', { name: /Change the quota/ })).toHaveCount(0);
-	await expect(laptop.getByLabel('Quota, in MB')).toHaveCount(0);
+	// A new app takes a quota of its own, until the main serves it too.
+	await expect(laptop.getByLabel('Quota, in MB')).toHaveValue('50');
+	await expect(laptop.getByText("the main's quota replaces it")).toBeVisible();
 	await expectNoCspViolations(laptop);
 	await laptop.context().close();
 });

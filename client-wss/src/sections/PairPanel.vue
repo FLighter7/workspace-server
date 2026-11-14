@@ -33,7 +33,7 @@
 						<FactItem :label="t('when')">{{ format.time(refusal.at) }}</FactItem>
 					</FactList>
 					<!-- Only an id the server could serve gets the offer. -->
-					<template v-if="ID_PATTERN.test(refusal.app)" #actions>
+					<template v-if="validAppId(refusal.app)" #actions>
 						<VBtn color="primary" variant="flat" @click="addRefused(refusal.app)">
 							{{ t('addIt') }}
 						</VBtn>
@@ -48,7 +48,7 @@
 import { onMounted, ref, useTemplateRef } from 'vue';
 import { I18nT, useI18n } from 'vue-i18n';
 import { serverApi } from '@/api/client';
-import { ID_PATTERN } from '@/api/ids';
+import { validAppId } from '@/api/ids';
 import type { Refusal } from '@/api/types';
 import FactItem from '@/components/FactItem.vue';
 import FactList from '@/components/FactList.vue';

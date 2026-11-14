@@ -156,7 +156,10 @@ test('with the desk switched off, the laptop is made the main by force, behind a
 		name: 'Desk is out of reach. Make this server the main anyway?',
 	});
 	await expect(dialog).toContainText(
-		'If the main still runs, both act as main until they meet: devices sync with whichever one they reach, and nothing is lost.',
+		'If the main still runs, both act as main until they meet: devices sync with whichever one they reach.',
+	);
+	await expect(dialog).toContainText(
+		'An app changed on both meanwhile has diverged: a device chooses which copy to keep',
 	);
 	await expect(dialog).toContainText(
 		'When the two meet, the one made main later wins: the old main steps down by itself and syncs through this server.',

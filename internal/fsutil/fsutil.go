@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // syncDir is SyncDir; a test replaces it.
@@ -82,4 +83,24 @@ func ReadFileShared(name string) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// WindowsDevice reports whether name is one of Windows' reserved device
+// names, in any case: CON, PRN, AUX, NUL, COM0-COM9, LPT0-LPT9. Such a name
+// cannot name a file or folder there (the device is opened instead), so a name
+// that becomes a path segment refuses them on every system. COM0 and LPT0
+// are refused too: Windows documents them as reserved, although Windows 10
+// opens them as ordinary files.
+func WindowsDevice(name string) bool {
+	switch strings.ToUpper(name) {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	if len(name) == 4 && '0' <= name[3] && name[3] <= '9' {
+		switch strings.ToUpper(name[:3]) {
+		case "COM", "LPT":
+			return true
+		}
+	}
+	return false
 }

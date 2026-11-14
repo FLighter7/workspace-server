@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/FLighter7/workspace-server/internal/fsutil"
 )
 
 // A document is the file <folder>/<id>.<type> in its app's folder; Key holds
@@ -151,23 +153,5 @@ func validName(s string) bool {
 			return false
 		}
 	}
-	return !windowsDevice(s)
-}
-
-// windowsDevice reports whether name is one of Windows' reserved device
-// names, in any case: the charset allows only lowercase, but the comparison
-// does not rely on that. COM0 and LPT0 are refused too: Windows documents
-// them as reserved, although Windows 10 opens them as ordinary files.
-func windowsDevice(name string) bool {
-	switch strings.ToUpper(name) {
-	case "CON", "PRN", "AUX", "NUL":
-		return true
-	}
-	if len(name) == 4 && '0' <= name[3] && name[3] <= '9' {
-		switch strings.ToUpper(name[:3]) {
-		case "COM", "LPT":
-			return true
-		}
-	}
-	return false
+	return !fsutil.WindowsDevice(s)
 }

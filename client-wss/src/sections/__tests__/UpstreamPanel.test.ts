@@ -204,7 +204,8 @@ describe('UpstreamPanel making this server the main', () => {
 			'Desk is out of reach. Make this server the main anyway?',
 		);
 		expect(dialog().textContent).toContain('both act as main until they meet');
-		expect(dialog().textContent).toContain('nothing is lost');
+		expect(dialog().textContent).toContain('a device chooses which copy to keep');
+		expect(dialog().textContent).not.toContain('nothing is lost');
 		expect(dialog().textContent).toContain('the old main steps down by itself');
 		button('Make it the main anyway', dialog()).click();
 		await settle();

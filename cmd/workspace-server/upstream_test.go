@@ -85,10 +85,28 @@ func TestTwoServersLinkPullAndPush(t *testing.T) {
 		t.Errorf("upstream.json: %v", err)
 	}
 
-	// The quota is the main's: the subordinate's page refuses to change it,
-	// and takes the one set on the main's page.
+	// The quota of an app the main lists is the main's: the subordinate's
+	// page refuses to change it, and takes the one set on the main's page.
+	// An app only the subordinate serves is its own.
 	if code, resp := sub.send(t, http.MethodPut, "/api/apps/todo", `{"quota":3145728}`); code != http.StatusConflict || !strings.Contains(resp, `"followsMain"`) {
 		t.Errorf("PUT a quota on the subordinate = %d %s, want 409 followsMain", code, resp)
+	}
+	if code, resp := sub.send(t, http.MethodPost, "/api/apps", `{"id":"photos"}`); code != http.StatusCreated {
+		t.Fatalf("POST an app on the subordinate = %d %s", code, resp)
+	}
+	if code, resp := sub.send(t, http.MethodPut, "/api/apps/photos", `{"quota":4194304}`); code != http.StatusNoContent {
+		t.Errorf("PUT the quota of the subordinate's own app = %d %s, want 204", code, resp)
+	}
+	_, subList := sub.send(t, http.MethodGet, "/api/apps", "")
+	var subApps []web.AppInfo
+	_ = json.Unmarshal([]byte(subList), &subApps)
+	for _, a := range subApps {
+		if want := a.ID != "photos"; a.FollowsMain != want {
+			t.Errorf("the subordinate's %s: followsMain %v, want %v", a.ID, a.FollowsMain, want)
+		}
+		if a.ID == "photos" && a.Quota != 4<<20 {
+			t.Errorf("photos' quota %d, want 4 MiB", a.Quota)
+		}
 	}
 	if code, resp := main.send(t, http.MethodPut, "/api/apps/todo", `{"quota":3145728}`); code != http.StatusNoContent {
 		t.Fatalf("PUT a quota on the main = %d %s", code, resp)

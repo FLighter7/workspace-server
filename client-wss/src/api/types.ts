@@ -75,6 +75,8 @@ export interface AppInfo {
 	diverged: Divergence[];
 	/** On a subordinate, why the app's sync with the main keeps failing: "quota". */
 	failing?: string;
+	/** On a subordinate, the main lists the app and sets its quota; an app only it serves is its own. */
+	followsMain: boolean;
 }
 
 /** The other server of a divergence, and since when (RFC 3339). */

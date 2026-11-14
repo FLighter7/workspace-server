@@ -62,7 +62,8 @@ func TestSetQuotaOnAMain(t *testing.T) {
 	}
 }
 
-// OpenFolder opens the app's folder, made if it is missing, and nothing
+// OpenFolder opens the app's folder, or while it has none the nearest
+// folder above it that exists, up to WSS-Data, and creates nothing; nothing
 // for an app the server does not serve.
 func TestOpenFolderOpensTheAppsFolder(t *testing.T) {
 	s, dir := newTestServer(t, io.Discard)
@@ -71,15 +72,31 @@ func TestOpenFolderOpensTheAppsFolder(t *testing.T) {
 		opened = append(opened, path)
 		return nil
 	}
+	appDir := filepath.Join(dir, "WSS-Data", "apps", "todo")
+	if err := os.RemoveAll(appDir); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.OpenFolder("todo"); err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(dir, "WSS-Data", "apps", "todo")
-	if !slices.Equal(opened, []string{want}) {
-		t.Errorf("opened %v, want [%s]", opened, want)
+	if _, err := os.Stat(appDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the app's folder after opening: %v; want it not made", err)
 	}
-	if fi, err := os.Stat(want); err != nil || !fi.IsDir() {
-		t.Errorf("the app's folder: %v", err)
+	if err := os.MkdirAll(filepath.Dir(appDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.OpenFolder("todo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(appDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.OpenFolder("todo"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Join(dir, "WSS-Data"), filepath.Join(dir, "WSS-Data", "apps"), appDir}
+	if !slices.Equal(opened, want) {
+		t.Errorf("opened %v, want %v", opened, want)
 	}
 	if err := s.OpenFolder("notes"); !errors.Is(err, apps.ErrNotFound) {
 		t.Errorf("an unknown app: %v, want ErrNotFound", err)
@@ -87,7 +104,7 @@ func TestOpenFolderOpensTheAppsFolder(t *testing.T) {
 	if err := s.OpenFolder("../todo"); !errors.Is(err, apps.ErrNotFound) {
 		t.Errorf("a path for an id: %v, want ErrNotFound", err)
 	}
-	if len(opened) != 1 {
+	if len(opened) != 3 {
 		t.Errorf("opened %v after the refusals", opened)
 	}
 	s.openFolder = func(string) error { return errors.New("no file manager") }

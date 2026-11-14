@@ -1019,7 +1019,7 @@ func TestJSONShape(t *testing.T) {
 		}
 	}
 	for path, want := range map[string][]string{
-		"/api/apps":             {"devices", "diverged", "files", "folder", "id", "modified", "name", "quota", "size"},
+		"/api/apps":             {"devices", "diverged", "files", "folder", "followsMain", "id", "modified", "name", "quota", "size"},
 		"/api/devices":          {"app", "connected", "id", "lastSeen", "name", "pairedAt"},
 		"/api/pairing/refusals": {"app", "at", "device"},
 	} {

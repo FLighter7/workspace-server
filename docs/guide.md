@@ -118,11 +118,11 @@ On the first start the server creates its folder and an entry for the `todo` app
   - **Remove** disconnects a device and ends its access.
 - **Apps** (Приложения):
   - lists each app with the number of its files, the space they take of its quota (with a bar), the last write, the number of its devices and its folder; with more than one app, the totals of all of them come first;
-  - **Open folder** (Открыть папку) opens the app's folder in Explorer, Finder or your file manager, on the computer the server runs on (the page is open only there);
-  - **Change the quota** (Изменить квоту) sets how much space the app's files may take together on this server, in MB, from 1 MB to 1 TB; 50 MB by default. Once the files reach it, devices cannot add more until you raise it or remove files in the app; lowering it deletes nothing. On a server linked to a main the button is not there: the main sets the quota, and the linked server follows it;
+  - **Open folder** (Открыть папку) opens the app's folder in Explorer, Finder or your file manager, on the computer the server runs on (the page is open only there); the window may open behind the browser;
+  - **Change the quota** (Изменить квоту) sets how much space the app's files may take together on this server, in MB, from 1 MB to 1 TB; 50 MB by default. Once the files reach it, devices cannot add more until you raise it or remove files in the app; lowering it deletes nothing. On a server linked to a main, an app the main serves too has no such button: the main sets its quota, and the linked server follows it; an app only the linked server serves keeps its own;
   - **Diverged: choose on a device** marks an app whose copies here and on another server, which it names, differ: the app does not sync between the two until you choose on a device which copy to keep (see "When the two copies differ");
   - **Held by the quota**, on a server linked to a main, marks an app that cannot sync with the main because its files would go over the quota here or on the main: raise the quota on the main's page, or remove files in the app on a device. The server keeps trying;
-  - here you add an app (its id, a name and its quota), or delete one together with its files and devices. Deleting shows exactly what goes, offers to open the app's folder first so that you can copy its files elsewhere, and asks you to type the app's id.
+  - here you add an app (its id, a name and its quota; Windows' device names such as `con` or `nul` cannot be an id), or delete one together with its files and devices. Deleting shows exactly what goes, offers to open the app's folder first so that you can copy its files elsewhere, and asks you to type the app's id.
 
 ## Pairing a device
 
@@ -189,8 +189,8 @@ The laptop's server can take the main's role over: when the laptop becomes the c
 - **While the PC is reachable:** on the laptop's page, open **Server** → **Upstream server** and press **Make this server the main**, or on the PC's page, open **Devices** → **Linked servers** and press **Make it the main** on the laptop's card. Confirm. The two servers first make their data the same, then the PC's server hands its role over and links to the laptop's; any other server linked to the PC follows by itself.
 - **While the PC cannot be reached** (switched off, away, broken): press **Make this server the main** on the laptop's page. The page asks again and says what happens next:
   - the laptop's server becomes the main at once;
-  - if the PC's server still runs, both act as the main until they meet again; devices sync with whichever one they reach, and nothing is lost;
-  - when the two meet, the one made the main later wins: the PC's server steps down by itself and syncs through the laptop's; where both changed an app meanwhile, the copies have diverged, and your devices ask which to keep (see "When the two copies differ").
+  - if the PC's server still runs, both act as the main until they meet again; devices sync with whichever one they reach;
+  - when the two meet, the one made the main later wins: the PC's server steps down by itself and syncs through the laptop's; where both changed an app meanwhile, the copies have diverged, and your devices ask which to keep. The copy you keep replaces the other, and a change only the other held comes back only from a device that still has it (see "When the two copies differ").
 - **If the PC is gone for good,** the laptop's page lists it among the servers it waits for. Once you know it will not come back, remove it under **Devices** on the laptop's page.
 - **Devices** keep working throughout: a device paired with the PC finds the laptop's server as the main and from then on treats it as the server it is paired with.
 

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/FLighter7/workspace-server/internal/apps"
 	"github.com/FLighter7/workspace-server/internal/devices"
 	"github.com/FLighter7/workspace-server/internal/fsutil"
 	"github.com/FLighter7/workspace-server/internal/wsclient"
@@ -38,6 +39,10 @@ type state struct {
 	// hands its own registry over at its next announce, and forgets it once
 	// the main has it.
 	Handover bool `json:"handover,omitempty"`
+	// Apps lists, sorted, the apps the main last listed, which this server
+	// follows: their quota is the main's (Link.Follows). Kept here, so that
+	// it holds while the main is out of reach and across a restart.
+	Apps []string `json:"apps,omitempty"`
 }
 
 var (
@@ -56,6 +61,7 @@ func (s *state) clone() *state {
 	c.Hosts = append([]string(nil), s.Hosts...)
 	c.Devices = append([]devices.Entry(nil), s.Devices...)
 	c.Removed = append([]devices.Tombstone(nil), s.Removed...)
+	c.Apps = append([]string(nil), s.Apps...)
 	return &c
 }
 
@@ -108,6 +114,11 @@ func (s *state) validate() error {
 	}
 	if s.Term < 0 {
 		return errors.New("term must be 0 or more")
+	}
+	for i, id := range s.Apps {
+		if !apps.ValidID(id) {
+			return fmt.Errorf("apps[%d]: %q is not an app id", i, id)
+		}
 	}
 	return nil
 }

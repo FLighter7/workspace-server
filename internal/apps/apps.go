@@ -49,8 +49,9 @@ type file struct {
 	Apps []App `json:"apps"`
 }
 
-// ValidID reports whether id matches ^[a-z0-9-]{1,64}$. The id becomes a path
-// segment, so this is an allowlist.
+// ValidID reports whether id matches ^[a-z0-9-]{1,64}$ and is not one of
+// Windows' reserved device names (con, nul, com1, ...). The id becomes a
+// path segment, so this is an allowlist.
 func ValidID(id string) bool {
 	if len(id) < 1 || len(id) > maxIDLen {
 		return false
@@ -61,7 +62,7 @@ func ValidID(id string) bool {
 			return false
 		}
 	}
-	return true
+	return !fsutil.WindowsDevice(id)
 }
 
 // normalize applies the defaults and then validates the ranges.

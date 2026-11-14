@@ -103,6 +103,9 @@ var (
 	ErrBadCode    = errors.New("this is not a pairing code of a workspace-server")
 	ErrOwnCode    = errors.New("the pairing code is this server's own")
 	ErrNotStopped = errors.New("the write guard has not stopped this app")
+	// ErrFollowed: the main sets this app's quota, since this server
+	// follows the main for it.
+	ErrFollowed = errors.New("this server follows its main for this app, and the main sets its quota")
 )
 
 // RefusedError is a pairing the upstream server refused or that could not
@@ -284,6 +287,11 @@ type Link struct {
 	// another of its subordinates diverged on it and waits for a choice
 	// (welcome and diverged pushes); absent when none does. Under divMu.
 	others map[string]string
+
+	// quotaMu orders the main's quotas, which adopt writes with the list of
+	// apps followed, and a quota changed here (SetLocalQuota), so that a
+	// change here never lands on an app just followed.
+	quotaMu sync.Mutex
 }
 
 // Open loads the link from deps.Path; a missing file is a main's state. It
@@ -1163,6 +1171,8 @@ func (l *Link) replicate(reg wsclient.Registry) {
 // ids to sync. A quota out of this server's range is left as it was, and
 // logged.
 func (l *Link) adopt(list []wsclient.App) []string {
+	l.quotaMu.Lock()
+	defer l.quotaMu.Unlock()
 	var want []string
 	changed := false
 	for _, a := range list {
@@ -1199,7 +1209,37 @@ func (l *Link) adopt(list []wsclient.App) []string {
 		l.d.Writer.AppsChanged()
 	}
 	slices.Sort(want)
+	l.mu.Lock()
+	if l.st != nil && !slices.Equal(l.st.Apps, want) {
+		l.st.Apps = slices.Clone(want)
+		l.saveLocked()
+	}
+	l.mu.Unlock()
 	return want
+}
+
+// Follows reports whether this server follows its main for app: it is a
+// subordinate, and the main listed app the last time it sent its apps. The
+// main sets such an app's quota. An app only this server serves (added here,
+// or one the main stopped serving) is its own.
+func (l *Link) Follows(app string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.st != nil && slices.Contains(l.st.Apps, app)
+}
+
+// SetLocalQuota runs set, which changes app's quota on this server, unless
+// this server follows its main for app (ErrFollowed). It runs under the
+// lock adopt writes the main's quotas under, so a change here and the main's
+// list are never interleaved: a main that lists app later writes its own
+// quota over this one.
+func (l *Link) SetLocalQuota(app string, set func() error) error {
+	l.quotaMu.Lock()
+	defer l.quotaMu.Unlock()
+	if l.Follows(app) {
+		return ErrFollowed
+	}
+	return set()
 }
 
 // forgetDropped forgets the base of the apps listed here that the main no

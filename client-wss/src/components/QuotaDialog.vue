@@ -62,6 +62,8 @@ const titleId = useId();
 const form = useTemplateRef<VForm>('form');
 const input = useTemplateRef<{ focus: () => void }>('input');
 const megabytes = ref('');
+/** What the field showed when the dialog opened: a quota of no whole MB is rounded there. */
+const shown = ref('');
 const busy = ref(false);
 const message = ref<Message | null>(null);
 
@@ -72,6 +74,7 @@ useReturnFocus(open);
 watch(open, (isOpen) => {
 	if (!isOpen) return;
 	megabytes.value = props.app ? String(Math.max(1, Math.round(props.app.quota / MB))) : '';
+	shown.value = megabytes.value;
 	busy.value = false;
 	message.value = null;
 });
@@ -83,6 +86,12 @@ function focusInput(): void {
 async function save(): Promise<void> {
 	const app = props.app;
 	if (!app || !(await form.value?.validate())?.valid) return;
+	// Saved as shown, a quota of no whole MB (apps.json edited by hand) would
+	// be rounded: a field left as it was changes nothing.
+	if (megabytes.value.trim() === shown.value) {
+		open.value = false;
+		return;
+	}
 	const quota = Number(megabytes.value) * MB;
 	busy.value = true;
 	try {
