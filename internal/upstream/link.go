@@ -274,11 +274,11 @@ type Link struct {
 	divTell chan struct{}
 
 	// running is the worker of each app now, for AppRemoving, which stops
-	// it; removing marks the apps being removed here, whose workers do not
-	// start. relist tells the link session that a removal ended. All under
-	// mu.
+	// it; removing counts the removals of each app under way here, whose
+	// workers do not start meanwhile. relist tells the link session that a
+	// removal ended. All under mu.
 	running  map[string]*appWorker
-	removing map[string]bool
+	removing map[string]int
 	relist   chan struct{}
 	// others is, per app, the main whose sessions of the app last said that
 	// another of its subordinates diverged on it and waits for a choice
@@ -322,7 +322,7 @@ func Open(d Deps) (*Link, error) {
 		pushes: map[string][]time.Time{}, stopped: map[string]bool{}, failing: map[string]string{}, resumes: map[string]chan struct{}{},
 		up: map[string]*string{}, links: map[string]*appLink{}, hidden: map[string][2]*string{}, local: map[string]chan struct{}{},
 		divs: map[string]*divergence{}, divTell: make(chan struct{}, 1),
-		running: map[string]*appWorker{}, removing: map[string]bool{}, relist: make(chan struct{}, 1),
+		running: map[string]*appWorker{}, removing: map[string]int{}, relist: make(chan struct{}, 1),
 		others: map[string]string{},
 	}, nil
 }
@@ -1028,16 +1028,19 @@ func (l *Link) session(ctx context.Context) error {
 				}
 			}
 			delete(workers, id)
-			if _, listed := l.d.Apps.Get(id); !listed || l.isRemoving(id) {
+			if _, listed := l.d.Apps.Get(id); !listed {
 				continue
 			}
 			wctx, stop := context.WithCancel(sctx)
-			w := appWorker{stop: stop, done: make(chan struct{})}
-			workers[id] = w
-			l.setRunning(id, &w)
+			w := &appWorker{stop: stop, done: make(chan struct{})}
+			if !l.startRunning(id, w) {
+				stop() // being removed: it starts once the removal ends
+				continue
+			}
+			workers[id] = *w
 			wg.Go(func() {
 				defer close(w.done)
-				defer l.setRunning(id, nil)
+				defer l.stopRunning(id, w)
 				l.worker(wctx, id, fatal)
 			})
 		}
@@ -1056,6 +1059,7 @@ func (l *Link) session(ctx context.Context) error {
 					w.stop()
 					<-w.done // a sync in flight must not save its base after it is forgotten
 					delete(workers, id)
+					l.setFailing(id, "")
 					l.d.Logf("app %q: the main no longer serves it; it stops syncing, and its data here stays", id)
 				}
 			}
@@ -1209,21 +1213,33 @@ func (l *Link) forgetDropped(want []string) {
 	}
 }
 
-// setRunning records w as app's worker now; nil when it returned.
-func (l *Link) setRunning(app string, w *appWorker) {
+// startRunning records w as app's worker, unless a removal of app is under
+// way, and reports whether it did. The check and the record are one step
+// under mu, so AppRemoving either sees the worker, and stops it, or the
+// worker never starts.
+func (l *Link) startRunning(app string, w *appWorker) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if w == nil {
-		delete(l.running, app)
-		return
+	if l.removing[app] > 0 {
+		return false
 	}
 	l.running[app] = w
+	return true
+}
+
+// stopRunning forgets w as app's worker, once it returned.
+func (l *Link) stopRunning(app string, w *appWorker) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.running[app] == w {
+		delete(l.running, app)
+	}
 }
 
 func (l *Link) isRemoving(app string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.removing[app]
+	return l.removing[app] > 0
 }
 
 // AppRemoving tells the link that app is about to be deleted here, its
@@ -1236,33 +1252,50 @@ func (l *Link) isRemoving(app string) bool {
 // whole, rather than pushing the deletion of everything the main holds.
 // The link session tells the main that no divergence of the app waits
 // any more. An app this server still lists after done (the removal failed)
-// syncs again at once; one removed comes back with the main's next app list.
+// keeps the write guard's stop and count, reads its base and divergence
+// again from what is left on disk, and syncs again at once; one removed
+// comes back with the main's next app list. Removals of one app may overlap:
+// its workers start only once every one has ended. done may be called more
+// than once.
 func (l *Link) AppRemoving(app string) (done func()) {
 	l.mu.Lock()
-	l.removing[app] = true
+	l.removing[app]++
 	w := l.running[app]
 	l.mu.Unlock()
 	if w != nil {
 		w.stop()
 		<-w.done
 	}
-	return func() {
-		l.mu.Lock()
+	var once sync.Once
+	return func() { once.Do(func() { l.removalEnded(app) }) }
+}
+
+// removalEnded ends one removal of app (AppRemoving). What the link holds
+// in memory of the app's files is dropped either way, to be read again
+// from disk; the write guard's state and a quota's hold go only when the
+// app is no longer listed here, so a failed removal does not resume an app
+// the guard stopped.
+func (l *Link) removalEnded(app string) {
+	_, listed := l.d.Apps.Get(app)
+	l.mu.Lock()
+	if l.removing[app]--; l.removing[app] <= 0 {
 		delete(l.removing, app)
-		delete(l.links, app)
-		delete(l.up, app)
-		delete(l.hidden, app)
+	}
+	delete(l.links, app)
+	delete(l.up, app)
+	delete(l.hidden, app)
+	if !listed {
 		delete(l.stopped, app)
 		delete(l.failing, app)
 		delete(l.pushes, app)
-		l.mu.Unlock()
-		l.divMu.Lock()
-		delete(l.divs, app)
-		delete(l.others, app)
-		l.divMu.Unlock()
-		poke(l.relist)
-		poke(l.divTell)
 	}
+	l.mu.Unlock()
+	l.divMu.Lock()
+	delete(l.divs, app)
+	delete(l.others, app)
+	l.divMu.Unlock()
+	poke(l.relist)
+	poke(l.divTell)
 }
 
 // appWorker is the worker of one app: stop ends it, done closes once it

@@ -388,3 +388,76 @@ func TestComparableRevision(t *testing.T) {
 		t.Error("a listing with every key valid here still has a comparable revision")
 	}
 }
+
+// A removal that fails (the app still listed after it) keeps the write
+// guard's stop: the app does not resume by itself.
+func TestFailedRemovalKeepsTheWriteGuard(t *testing.T) {
+	main := startNode(t, "Desk")
+	sub := startNode(t, "Laptop")
+	v0 := main.write("todo", `{"n":0}`, nil)
+	sub.linkTo(main)
+	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v0) })
+	tab := sub.device("todo")
+	pushed, _ := tripGuard(t, main, sub, tab, v0)
+
+	done := sub.link.AppRemoving("todo")
+	done() // nothing was removed: the app is still listed here
+	time.Sleep(500 * time.Millisecond)
+	if st := sub.link.Status(); !slices.Equal(st.Stopped, []string{"todo"}) {
+		t.Errorf("stopped %v after a failed removal, want todo", st.Stopped)
+	}
+	if main.etag("todo") != pushed {
+		t.Error("the app the guard stopped synced after a failed removal")
+	}
+	if err := sub.link.Resume("todo"); err != nil {
+		t.Errorf("resume: %v", err)
+	}
+}
+
+// Removals of one app may overlap: its worker starts only once the last
+// ends, and starting it is one step with the check, so a removal either
+// stops it or it never starts. done is idempotent.
+func TestOverlappingRemovals(t *testing.T) {
+	main := startNode(t, "Desk")
+	sub := startNode(t, "Laptop")
+	v1 := main.write("todo", `{"v":1}`, nil)
+	sub.linkTo(main)
+	waitFor(t, "the agreed etag", func() bool { return sub.agreed("todo", v1) })
+
+	first := sub.link.AppRemoving("todo")
+	second := sub.link.AppRemoving("todo")
+	if sub.link.startRunning("todo", &appWorker{done: make(chan struct{})}) {
+		t.Fatal("a worker started during a removal")
+	}
+	first()
+	first()
+	if !sub.link.isRemoving("todo") {
+		t.Fatal("the first removal's end ended the second")
+	}
+	v2 := main.write("todo", `{"v":2}`, &v1)
+	time.Sleep(300 * time.Millisecond)
+	if sub.etag("todo") != v1 {
+		t.Error("the app synced while a removal was under way")
+	}
+	second()
+	if sub.link.isRemoving("todo") {
+		t.Fatal("still removing after both ended")
+	}
+	waitFor(t, "the app to sync again", func() bool { return sub.etag("todo") == v2 })
+}
+
+// An app the main stops serving drops its quota hold from the status.
+func TestDroppedAppDropsItsQuotaHold(t *testing.T) {
+	main := startNode(t, "Desk")
+	sub := startNode(t, "Laptop")
+	sub.linkTo(main)
+	waitFor(t, "an agreed empty set", func() bool { b, ok := sub.link.baseOf("todo"); return ok && len(b) == 0 })
+	sub.quota.Store(apps.MinQuota)
+	main.writeKey("todo", "big.bin", bigBody(2<<20), nil)
+	waitFor(t, "the quota hold", func() bool { return sub.link.Status().Failing["todo"] == reasonQuota })
+	if err := main.hub.RemoveApp("todo"); err != nil {
+		t.Fatal(err)
+	}
+	main.hub.AppsChanged()
+	waitFor(t, "the hold to go", func() bool { return len(sub.link.Status().Failing) == 0 })
+}
