@@ -78,7 +78,7 @@ engine.localChanged();
 3. **`select(listing)`:** the documents to read. The engine reads each at the etag the listing named; one that changed meanwhile is `stale`, and the sync lists again.
 4. **`plan(listing, read, now)`:** what the merge changes here (`apply`) and on the server (`put` and `delete`).
 5. **One transaction** writes the whole plan: each body conditional on the etag the listing named for its document (or on its absence), each delete on the etag listed. A body the server holds already (the same etag) and a delete of what it does not hold are left out, so a plan may name everything it has; a plan that changes nothing writes nothing. If another device wrote one of those documents first, the commit is a conflict, and the engine lists, reads and plans again, up to three times; the transaction stays open, so a body still wanted as it is goes no second time.
-6. **`committed(docs)`**, optional: the etag each document put now has (`null` for one deleted).
+6. **`committed(docs)`**, optional: the etag each document the plan put now has, and `null` for each it deleted, once the server holds them: those the commit wrote, and those the server held as planned already (the same bytes, or no document to delete). A body the commit names with another etag than the one sent is left out, and the engine syncs again.
 
 A commit checks only the documents it writes. When another device wrote other documents between the listing and the commit, the engine sees it (the revision the commit names is not the listing's plus its own changes) and syncs again, so the next `select` gets them.
 
@@ -99,19 +99,19 @@ Rules that keep devices from writing back and forth:
 
 `state.transfer` is the transfer under way, `{ direction, done, total, interrupted }`, or `null`: `'down'` for one sync's reads together, `'up'` for one transaction's bodies together, `done` and `total` in bytes.
 
-- **Cut off** (the connection lost, the page hidden, the app reloaded), a transfer of at most `SMALL_TRANSFER_BYTES` (1 MiB) starts over by itself with the next sync.
-- **A larger one waits** for the user: `transfer.interrupted` is `true` and, once connected, `status` is `'interrupted'`; sync does nothing else meanwhile. Offer two buttons:
+- **Cut off** (the connection lost, the page hidden, the app reloaded), a transfer of at most `SMALL_TRANSFER_BYTES` (1 MiB) starts over by itself with the next sync, and a larger one with at most that much left goes on by itself.
+- **A larger one with more left waits** for the user: `transfer.interrupted` is `true` and, once connected, `status` is `'interrupted'`; sync does nothing else meanwhile. Offer two buttons:
   - `resumeTransfer()` lists and plans again, and sends or reads only the rest: a body the transaction staged resumes from what the server received if the plan still writes the same bytes (the same etag), and a read resumes from where it stopped while the document keeps its etag. What changed meanwhile goes from the start.
   - `restartTransfer()` drops what was sent or read, and starts afresh.
-- **A large upload survives a reload:** the engine keeps its transaction and the etags of its bodies in the pairing record (`Pairing.upload`, its progress saved at most every 5 s), and the next run starts with the transfer interrupted. The server keeps a transaction 24 hours after its last activity. A read is kept in memory only: a reload starts it over.
-- A commit cut off after every byte arrived needs no choice: the next sync returns to the transaction and commits it.
+- **A large upload survives a reload:** the engine keeps its transaction, the server it is open on and the etags of its bodies in the pairing record (`Pairing.upload`), saved when the upload starts, when it is cut off and once every body arrived. The next run asks as above when more than 1 MiB was left to send; otherwise it goes on by itself (a commit whose answer was lost, a conflict). The server keeps a transaction 24 hours after its last activity; on another server of the family (a fallback) the bodies go from the start. A read is kept in memory only: a reload starts it over.
+- **Only what the server holds resumes:** the record names a body for a document only once the server holds that body's bytes or none, so an edit made meanwhile, or a put that never arrived, never leaves the old bytes under the new etag; `done` (bytes handed to the channel, up to 1 MiB ahead of what arrived) decides whether to ask, and the server's `began` where to resume.
 
 ### Divergence
 
 The user's laptop can run a server linked to the main one (a subordinate). When both changed the app's documents while they could not reach each other, the two copies **diverged**: the servers merge nothing, and every device of the app is asked which copy to keep, whole. `state.diverged` lists what waits, `[{ serverId, name, since, mainName }]`: the subordinate's id and name, when it diverged, and the main's name.
 
 - **Ask naming both servers**, "Keep {mainName}'s copy or {name}'s?": roles move with a switch of the main, so "main" and "subordinate" mean nothing to the user. `mainName` is the main the device last reached, or the server it is paired with.
-- **`resolveDivergence(serverId, 'main' | 'subordinate')`** sends the choice, and resolves once the server answered; it rejects with `closed` while there is no connection. The first choice on any server wins; a later one is answered all the same. Either way the entry leaves `state.diverged`, on this device and on every other connected one.
+- **`resolveDivergence(serverId, 'main' | 'subordinate')`** sends the choice, and resolves once the server answered; it rejects with `closed` while there is no connection. Requests on one connection go one at a time, so it waits for one in flight, a large upload's body included. The first choice on any server wins; a later one is answered all the same. Either way the entry leaves `state.diverged`, on this device and on every other connected one.
 - **Afterwards** the copy not kept becomes the one kept, and the devices see it change like any other write, and merge as always.
 - **Sync goes on** meanwhile: a device syncs with whichever server it reaches. The list stays while the connection is down, and the next server reached replaces it.
 
@@ -129,7 +129,7 @@ A server can be linked to the user's main server as its **subordinate**: a lapto
 
 ### The pairing record
 
-`createPairingStore({ key })` keeps one JSON record under `key` in `localStorage`: the server and how to reach it, the device id and token, `lastRevision` and `lastSyncAt`, and optionally `fallbacks`, `term` and `upload`. It holds the device's token, so it belongs in no backup and is never synced. A record that does not read (one written by a release before `1.0.0-rc.2`, which has no `lastRevision`, included) reads as no pairing: the device pairs again.
+`createPairingStore({ key })` keeps one JSON record under `key` in `localStorage`: the server and how to reach it, the device id and token, `lastRevision` and `lastSyncAt`, and optionally `fallbacks`, `term` and `upload`. A record that cannot be saved (storage full or blocked) is logged with `console.warn`; sync goes on for this run. It holds the device's token, so it belongs in no backup and is never synced. A record that does not read (one written by a release before `1.0.0-rc.2`, which has no `lastRevision`, included) reads as no pairing: the device pairs again.
 
 ### States and errors
 
@@ -142,6 +142,8 @@ A server can be linked to the user's main server as its **subordinate**: a lapto
 | `internal`, and any code it does not know                                                 | `paused`: retries on the same schedule as `unreachable`                                                   |
 | `badToken`, `unknownApp`, `serverChanged`, `protocol`, `tooManyWrites`, a `DocumentError` | `error`: stops until the device pairs again or the app starts again                                       |
 | `quota`, `badPath`, `incomplete`, `conflict`, `notAuthenticated`                          | `error`: tries again on the next edit, push or `syncNow`                                                  |
+
+A plan the server refused with `quota` or `badPath` is not sent again while the plan and the set stay as they were: the next sync shows the error without sending a byte. A change to the plan or to the set, or `syncNow()` (after the user raised the quota, say), sends it again.
 
 A write that fails with `noTransaction`, `incomplete` or `internal` (which may come after the server's commit point, with the write applied) is never committed again as it was: the engine lists, reads and plans again, within the same three attempts, and returns to the transaction only if the server still holds it open; past them, the error is handled as the table says. `tooManyWrites` is the engine's own guard: more than 10 commits within a minute stop writing until the app starts again.
 
@@ -161,7 +163,7 @@ A write that fails with `noTransaction`, `incomplete` or `internal` (which may c
 `@flighter/wss-client/testing` has a `FakeServer`: pass its `connect` to the engine, and several engines can share one, standing in for several devices. It holds an app's set of documents in memory, with etags and revisions computed as the real server's are, list pages (`pageSize`), tombstones, `stale` reads, transactions that belong to a device and resume from what arrived, and conflicts.
 
 - **Its set:** `storeDocument(key, body)` and `removeDocument(key)` change it as another device would; `document(key)`, `text(key)`, `etag(key)`, `revision`, `documents`, `removed` and `transactions` show what it holds, `puts` every body it took (with its `offset` and the bytes that came), and `log` every call in order (`put#1`, `commit#2`, …).
-- **Failures:** `connectError`, `helloError`, `pairError`, `conflicts` (that many next commits conflict), `commitError` with `commitAppliedFirst` (before or after the commit point), `connectGate` for one slow to answer, and `cutPutAfter` / `cutGetAfter`, which drop the connection once that many more body bytes went, the body staged with what arrived, as a real cut does.
+- **Failures:** `connectError`, `helloError`, `pairError`, `conflicts` (that many next commits conflict), `commitError` with `commitAppliedFirst` (before or after the commit point), `connectGate` for one slow to answer, `cutPutAfter` / `cutGetAfter`, which drop the connection once that many more body bytes went, the body staged with what arrived, as a real cut does, `losePuts` (that many next put frames never arrive, and the connection drops), and `quota`, refused once a put's body arrived and at the commit, as the real server does.
 - **A divergence:** `setDiverged([{ serverId, name, since }])` names what waits, in every `welcome` and pushed to every open client; a client's `resolve` takes the first choice for each, tells the other clients `resolved`, records it in `resolutions` and calls `onResolve(server, keep)`, where a test makes the set what the choice keeps (with `storeDocument`, then `pushChanged()`). What passes between two servers is not modelled.
 
 For a main and its subordinates, give each `FakeServer` its own `serverId` and `port`, set `role`, list the subordinates' `entry()` in the main's `subordinates`, let them share the main's `devices`, and pass `FakeServer.route(main, laptop)` as `connect`. Set `term` for a family that switched its main. `FakeChannel` stands in for a data channel under `ServerClient`.

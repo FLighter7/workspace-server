@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SMALL_TRANSFER_BYTES, SyncEngine, type Transfer } from '../src/SyncEngine.js';
-import { FakeClient } from '../src/testing/FakeServer.js';
+import {
+	SMALL_TRANSFER_BYTES,
+	SyncEngine,
+	type SyncState,
+	type Transfer,
+} from '../src/SyncEngine.js';
+import { FakeClient, FakeServer } from '../src/testing/FakeServer.js';
 import { settle, setup } from './engineHarness.js';
+import { makePairing } from './fixtures.js';
 
 /*
  * Transfers cut off with their connection (docs/protocol.md, "Transactions"
@@ -120,7 +126,7 @@ describe('SyncEngine transfers', () => {
 
 	it('a large upload cut off can be started over', async () => {
 		const device = setup({ files: true });
-		device.writeFile(PHOTO, bytes(2 * MiB));
+		device.writeFile(PHOTO, bytes(3 * MiB));
 		device.server.cutPutAfter = MiB;
 
 		device.engine.start(true);
@@ -132,14 +138,14 @@ describe('SyncEngine transfers', () => {
 
 		expect(device.server.puts.map((put) => put.offset)).toEqual([0, 0]);
 		expect([...device.server.transactions.keys()]).not.toContain(tx);
-		expect(same(device.server.document(PHOTO), bytes(2 * MiB))).toBe(true);
+		expect(same(device.server.document(PHOTO), bytes(3 * MiB))).toBe(true);
 		expect(device.last()).toMatchObject({ status: 'connected', transfer: null });
 		expect(device.state.pairing).not.toHaveProperty('upload');
 	});
 
 	it('a large upload cut off by a reload resumes in the next run', async () => {
 		const device = setup({ files: true });
-		const body = bytes(2 * MiB, 3);
+		const body = bytes(3 * MiB, 3);
 		device.writeFile(PHOTO, body);
 		device.server.cutPutAfter = MiB + MiB / 2;
 		device.engine.start(true);
@@ -155,7 +161,7 @@ describe('SyncEngine transfers', () => {
 
 		expect(states.at(-1)).toMatchObject({
 			status: 'interrupted',
-			transfer: { direction: 'up', done: saved?.done, total: 2 * MiB, interrupted: true },
+			transfer: { direction: 'up', done: saved?.done, total: 3 * MiB, interrupted: true },
 		});
 
 		await next.resumeTransfer();
@@ -168,17 +174,17 @@ describe('SyncEngine transfers', () => {
 
 	it('a body that changed since it was cut off goes again from the start', async () => {
 		const device = setup({ files: true });
-		device.writeFile(PHOTO, bytes(2 * MiB, 1));
+		device.writeFile(PHOTO, bytes(3 * MiB, 1));
 		device.server.cutPutAfter = MiB;
 		device.engine.start(true);
 		await settle();
 		await device.fire(2000);
 
-		device.writeFile(PHOTO, bytes(2 * MiB, 2));
+		device.writeFile(PHOTO, bytes(3 * MiB, 2));
 		await device.engine.resumeTransfer();
 
 		expect(device.server.puts.map((put) => put.offset)).toEqual([0, 0]);
-		expect(same(device.server.document(PHOTO), bytes(2 * MiB, 2))).toBe(true);
+		expect(same(device.server.document(PHOTO), bytes(3 * MiB, 2))).toBe(true);
 	});
 
 	it('hiding the app during a large upload cuts it off', async () => {
@@ -274,18 +280,18 @@ describe('SyncEngine transfers', () => {
 
 	it('a large read whose document changed meanwhile reads it afresh', async () => {
 		const device = setup({ files: true });
-		device.server.storeDocument(PHOTO, bytes(2 * MiB, 1));
+		device.server.storeDocument(PHOTO, bytes(3 * MiB, 1));
 		device.server.cutGetAfter = MiB;
 		device.engine.start(true);
 		await settle();
 		await device.fire(2000);
 
-		device.server.storeDocument(PHOTO, bytes(2 * MiB, 2));
+		device.server.storeDocument(PHOTO, bytes(3 * MiB, 2));
 		const get = vi.spyOn(FakeClient.prototype, 'get');
 		await device.engine.resumeTransfer();
 
 		expect(get.mock.calls.map(([, options]) => options?.offset)).toEqual([0]);
-		expect(same(device.local.files.get('photos/p1.jpg')?.body ?? null, bytes(2 * MiB, 2))).toBe(
+		expect(same(device.local.files.get('photos/p1.jpg')?.body ?? null, bytes(3 * MiB, 2))).toBe(
 			true,
 		);
 		get.mockRestore();
@@ -293,7 +299,7 @@ describe('SyncEngine transfers', () => {
 
 	it('a large read cut off can be started over', async () => {
 		const device = setup({ files: true });
-		device.server.storeDocument(PHOTO, bytes(2 * MiB));
+		device.server.storeDocument(PHOTO, bytes(3 * MiB));
 		device.server.cutGetAfter = MiB;
 		device.engine.start(true);
 		await settle();
@@ -329,5 +335,175 @@ describe('SyncEngine transfers', () => {
 
 		expect(device.last().transfer).toBeNull();
 		expect(device.state.pairing).not.toHaveProperty('upload');
+	});
+
+	it('a large upload with less than SMALL_TRANSFER_BYTES left goes on by itself when cut off', async () => {
+		const device = setup({ files: true });
+		const body = bytes(3 * MiB);
+		device.writeFile(PHOTO, body);
+		device.server.cutPutAfter = 2 * MiB + MiB / 2;
+
+		device.engine.start(true);
+		await settle();
+		expect(device.last()).toMatchObject({ status: 'unreachable', transfer: null });
+
+		await device.fire(2000);
+
+		expect(device.server.puts.map((put) => put.offset)).toEqual([0, 2 * MiB + MiB / 2]);
+		expect(same(device.server.document(PHOTO), body)).toBe(true);
+		expect(device.last()).toMatchObject({ status: 'connected', transfer: null });
+	});
+});
+
+/*
+ * The record of a transaction's bodies never names bytes the server does
+ * not hold: a put that never reached the server must not let a resume
+ * confirm or finish another body's bytes under the new body's etag.
+ */
+describe('SyncEngine resuming only what the server holds', () => {
+	const P2 = { path: 'photos', id: 'p2', type: 'jpg' };
+
+	it('a body edited after it was staged, whose new put never arrived, is sent whole', async () => {
+		const device = setup({ files: true });
+		device.writeFile(PHOTO, bytes(2 * MiB, 1));
+		device.writeFile(P2, bytes(2 * MiB, 2));
+		// Both bodies staged whole; the connection drops at the commit.
+		const original = FakeClient.prototype.commit;
+		const commit = vi.spyOn(FakeClient.prototype, 'commit').mockImplementationOnce(async function (
+			this: FakeClient,
+		) {
+			this.drop();
+			throw new Error('never sent');
+		});
+		device.engine.start(true);
+		await settle();
+		commit.mockImplementation(original);
+
+		// Both edited, same sizes; the next attempt is cut 1 MiB into the first,
+		// so the second's put never goes.
+		device.writeFile(PHOTO, bytes(2 * MiB, 11));
+		device.writeFile(P2, bytes(2 * MiB, 12));
+		device.server.cutPutAfter = MiB;
+		await device.fire(2000);
+		expect(device.last().transfer).toMatchObject({ interrupted: true });
+
+		await device.engine.resumeTransfer();
+
+		expect(same(device.server.document(PHOTO), bytes(2 * MiB, 11))).toBe(true);
+		expect(same(device.server.document(P2), bytes(2 * MiB, 12))).toBe(true);
+		expect(device.local.known.get('photos/p2.jpg')).toBe(device.server.etag(P2));
+		commit.mockRestore();
+	});
+
+	it('a resumed offset never lands on the bytes of an older body: no mixed body', async () => {
+		const device = setup({ files: true });
+		const A = bytes(3 * MiB, 1);
+		const B = bytes(3 * MiB, 2);
+		device.writeFile(PHOTO, A);
+		device.server.cutPutAfter = MiB;
+		device.engine.start(true);
+		await settle();
+		await device.fire(2000);
+		expect(device.last().status).toBe('interrupted');
+
+		// Edited meanwhile, the same size; the put of B never reaches the server.
+		device.writeFile(PHOTO, B);
+		device.server.losePuts = 1;
+		await device.engine.resumeTransfer();
+		await device.fire(2000);
+		expect(device.last().status).toBe('interrupted');
+		await device.engine.resumeTransfer();
+
+		expect(same(device.server.document(PHOTO), B)).toBe(true);
+		const last = device.server.puts.at(-1);
+		expect(last?.offset).toBe(0);
+	});
+
+	it('a transaction of another server is not resumed there, whatever that one holds under its id', async () => {
+		const main = new FakeServer();
+		main.role = 'main';
+		const laptop = new FakeServer();
+		Object.assign(laptop, { serverId: 'S2', name: 'Laptop', port: 47802, role: 'subordinate' });
+		laptop.fingerprint = Array.from({ length: 32 }, () => 'CD').join(':');
+		laptop.devices = main.devices;
+		const device = setup({
+			files: true,
+			server: main,
+			pairing: makePairing({ ...main.entry(), fallbacks: [laptop.entry()] }),
+		});
+		const engine = new SyncEngine({
+			...device.engineOptions,
+			connect: FakeServer.route(main, laptop),
+		});
+		const body = bytes(3 * MiB, 4);
+		device.writeFile(PHOTO, body);
+		main.cutPutAfter = MiB;
+		engine.start(true);
+		await settle();
+		const tx = device.state.pairing?.upload?.tx ?? '';
+		expect(device.state.pairing?.upload?.server).toBe('S1');
+		// The laptop happens to hold other bytes of that size under that id.
+		laptop.transactions.set(tx, {
+			device: 'dev1',
+			changes: new Map([
+				[
+					'photos/p1.jpg',
+					{ key: PHOTO, ifEtag: null, delete: false, bytes: 3 * MiB, data: bytes(3 * MiB, 9) },
+				],
+			]),
+		});
+
+		main.connectError = 'connectTimeout';
+		await device.fire(2000);
+		await engine.resumeTransfer();
+
+		expect(same(laptop.document(PHOTO), body)).toBe(true);
+		expect(laptop.puts.map((put) => put.offset)).toEqual([0]);
+	});
+
+	it('a large upload whose commit landed and whose answer was lost asks nothing after a reload', async () => {
+		const device = setup({ files: true });
+		device.writeFile(PHOTO, bytes(3 * MiB, 1));
+		const original = FakeClient.prototype.commit;
+		const commit = vi.spyOn(FakeClient.prototype, 'commit').mockImplementationOnce(async function (
+			this: FakeClient,
+			tx: string,
+		) {
+			await original.call(this, tx);
+			this.drop();
+			throw new Error('lost');
+		});
+		device.engine.start(true);
+		await settle();
+		commit.mockRestore();
+		expect(device.state.pairing?.upload).toMatchObject({ done: 3 * MiB, total: 3 * MiB });
+
+		const states: SyncState[] = [];
+		const next = new SyncEngine({ ...device.engineOptions, onState: (s) => states.push(s) });
+		next.start(true);
+		await settle();
+
+		expect(states.at(-1)).toMatchObject({ status: 'connected', transfer: null });
+		expect(device.server.puts).toHaveLength(1);
+		expect(device.state.pairing).not.toHaveProperty('upload');
+		// The adapter hears that the body it planned is there.
+		expect(device.local.dirty.size).toBe(0);
+	});
+
+	it('a large upload that ran out of conflict retries asks nothing after a reload', async () => {
+		const device = setup({ files: true });
+		device.writeFile(PHOTO, bytes(3 * MiB, 1));
+		device.server.conflicts = 4;
+		device.engine.start(true);
+		await settle();
+		expect(device.last()).toMatchObject({ status: 'error', error: { code: 'conflict' } });
+
+		const states: SyncState[] = [];
+		const next = new SyncEngine({ ...device.engineOptions, onState: (s) => states.push(s) });
+		next.start(true);
+		await settle();
+
+		expect(states.at(-1)).toMatchObject({ status: 'connected', transfer: null });
+		expect(device.server.puts.at(-1)).toMatchObject({ offset: 3 * MiB });
 	});
 });

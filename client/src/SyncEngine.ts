@@ -162,10 +162,12 @@ export interface SyncAdapter {
 	 */
 	plan(listing: Listing, read: DocumentBody[], now: Date): SyncPlan;
 	/**
-	 * Told what a commit of the plan wrote: each document put, with its new
-	 * etag, and each deleted, with `null`. An app that keeps the etag of each
-	 * document it holds remembers these, so its next `select` does not read
-	 * back what it wrote itself. Optional.
+	 * Told, once the server holds them, the documents the plan put, each
+	 * with its etag, and those it deleted, with `null`: what the commit
+	 * wrote, and what the server held as planned already. An app that keeps
+	 * the etag of each document it holds remembers these, so its next
+	 * `select` does not read back what it wrote itself. A body the commit
+	 * names with another etag than the one sent is left out. Optional.
 	 */
 	committed?(docs: DocumentEtag[]): void;
 }
@@ -222,8 +224,6 @@ export const MAIN_GRACE_MS = 2000;
  * transfer is one sync's reads, or one transaction's bodies, together.
  */
 export const SMALL_TRANSFER_BYTES = 1024 * 1024;
-/** How often, at most, a large upload's progress is saved to the pairing record while it runs. */
-export const UPLOAD_SAVE_MS = 5000;
 
 const WRITE_WINDOW_MS = 60_000;
 
@@ -365,11 +365,32 @@ interface PartialRead {
 /** The transaction this device writes in while it is open on the server, and the bodies it staged. */
 interface OpenTransaction {
 	id: string;
-	/** By canonical key: the bodies staged, which a later write of the same bytes resumes. */
+	/** The server it is open on: another holds nothing of it, or something else under its id. */
+	server: string;
+	/**
+	 * By canonical key: the body the server stages for the key, in part or
+	 * whole, which a later write of the same bytes resumes. A key is named
+	 * here with a body only once the server holds that body or nothing for
+	 * it, never while it may still hold another body's bytes.
+	 */
 	bodies: Map<string, StagedBody>;
 	/** Whether its bodies together are larger than `SMALL_TRANSFER_BYTES`: it is then saved to resume. */
-	large: boolean;
+	persist: boolean;
 	total: number;
+}
+
+/** What `changesOf` makes of a plan: what to write, and what the server holds as planned already. */
+interface Changes {
+	changes: Change[];
+	/** Puts the server holds with the same bytes, and deletes of what it does not hold. */
+	held: DocumentEtag[];
+}
+
+/** A plan the server refused (`quota`, `badPath`), not sent again while nothing changes. */
+interface Refused {
+	signature: string;
+	revision: string | null;
+	error: WorkspaceError<string>;
 }
 
 /** A server that answered `hello`: its client, its welcome, and which one it is. */
@@ -514,8 +535,12 @@ export class SyncEngine<DocCode extends string = never> {
 	private readonly reads = new Map<string, PartialRead>();
 	/** The transaction this device writes in, while it may still be open on the server. */
 	private openTx: OpenTransaction | null = null;
-	/** When a large upload's progress was last saved, in ms. */
-	private uploadSavedAt = 0;
+	/** The server the open connection reached, by id. */
+	private connectedTo: string | null = null;
+	/** The last plan the server refused, not sent again while nothing changes. */
+	private refused: Refused | null = null;
+	/** Set by `syncNow`: a refused plan is sent again once, as the user asked. */
+	private retryRefused = false;
 	/** The divergences the server last named. */
 	private diverged: DivergedServer[] = [];
 	/** The name of the main, for the question about a divergence. */
@@ -548,21 +573,27 @@ export class SyncEngine<DocCode extends string = never> {
 			return;
 		}
 
-		// A large upload cut off in an earlier run waits for the app's choice.
+		// A large upload cut off in an earlier run: the next sync returns to it.
+		// With more than SMALL_TRANSFER_BYTES left to send it waits for the
+		// app's choice; with less (every body sent, the commit's answer lost),
+		// it goes on by itself.
 		const upload = this.pairing.upload;
 		if (upload) {
 			this.openTx = {
 				id: upload.tx,
+				server: upload.server,
 				bodies: new Map(upload.bodies.map((body) => [documentPath(body), body])),
-				large: true,
+				persist: true,
 				total: upload.total,
 			};
-			this.transfer = {
-				direction: 'up',
-				done: upload.done,
-				total: upload.total,
-				interrupted: true,
-			};
+			if (upload.total - upload.done > SMALL_TRANSFER_BYTES) {
+				this.transfer = {
+					direction: 'up',
+					done: upload.done,
+					total: upload.total,
+					interrupted: true,
+				};
+			}
 		}
 
 		this.setState({ status: 'connecting', error: null });
@@ -597,8 +628,13 @@ export class SyncEngine<DocCode extends string = never> {
 		}, CHANGE_DEBOUNCE_MS);
 	}
 
+	/**
+	 * Syncs at once. A plan the server refused (`quota`, `badPath`) is sent
+	 * again by this, and otherwise only once something changed.
+	 */
 	async syncNow(): Promise<void> {
 		this.retryIndex = 0;
+		this.retryRefused = true;
 		await this.trigger();
 	}
 
@@ -639,6 +675,8 @@ export class SyncEngine<DocCode extends string = never> {
 	 * the server has answered, the first choice on any server winning; the
 	 * divergence then leaves the state, and the copy not kept changes like
 	 * any other write. Rejects with `closed` while there is no connection.
+	 * Requests on one connection go one at a time, so it waits for one in
+	 * flight, a large upload's body included.
 	 */
 	async resolveDivergence(serverId: string, keep: Keep): Promise<void> {
 		const client = this.ready ? this.client : null;
@@ -1058,20 +1096,52 @@ export class SyncEngine<DocCode extends string = never> {
 				this.reads.clear();
 				if (plan.apply) await plan.apply();
 				if (!current()) return;
-				const changes = await this.changesOf(plan, listing);
+				const { changes, held } = await this.changesOf(plan, listing);
 				if (!current()) return;
 
 				let revision = listing.revision;
+				let reported = held;
 				if (changes.length > 0) {
-					const written = await this.write(client, changes, now, current);
+					const signature = changes
+						.map((change) => `${change.path} ${change.ifEtag} ${change.put?.etag ?? '-'}`)
+						.join('\n');
+					const refused = this.refused;
+					const retryRefused = this.retryRefused;
+					this.retryRefused = false;
+					if (
+						refused &&
+						!retryRefused &&
+						refused.signature === signature &&
+						refused.revision === listing.revision
+					) {
+						// The same plan against the same set: the server would refuse it again.
+						this.fail(refused.error);
+						return;
+					}
+					let written: CommitResult | WorkspaceError<string> | null;
+					try {
+						written = await this.write(client, changes, now, current);
+					} catch (error) {
+						const failure = asWorkspaceError(error);
+						if (current() && (failure.code === 'quota' || failure.code === 'badPath')) {
+							this.refused = { signature, revision: listing.revision, error: failure };
+						}
+						throw failure;
+					}
 					if (written === null) return;
 					if (written instanceof WorkspaceError) {
 						retry(written);
 						continue;
 					}
+					this.refused = null;
 					revision = written.revision;
-					this.adapter.committed?.(written.docs);
-					if (revision !== this.revisionAfter(listing, changes)) {
+					const docs = this.landed(changes, written.docs);
+					reported = [...docs, ...held];
+					if (docs.length < written.docs.length) {
+						// A body landed that is not the one sent: write it again.
+						revision = listing.revision;
+						this.again = true;
+					} else if (revision !== this.revisionAfter(listing, changes)) {
 						// A commit checks only the documents it writes: another device
 						// wrote others between the listing and it, which this device has
 						// not read. Its revision is not synced here; sync again.
@@ -1086,6 +1156,8 @@ export class SyncEngine<DocCode extends string = never> {
 					if (!current()) return;
 				}
 
+				if (changes.length === 0) this.refused = null;
+				if (reported.length > 0) this.adapter.committed?.(reported);
 				this.syncedCount = count;
 				this.savePairing({ lastRevision: revision, lastSyncAt: now.toISOString() });
 				this.retryIndex = 0;
@@ -1096,6 +1168,22 @@ export class SyncEngine<DocCode extends string = never> {
 			if (!current()) return;
 			this.fail(asWorkspaceError(error));
 		}
+	}
+
+	/**
+	 * The documents of a commit that hold what was sent: a put whose new etag
+	 * is not the etag of the body sent is left out, and logged. It never
+	 * happens while the transaction's bookkeeping holds; this is the guard
+	 * that an adapter is never told a body landed that did not.
+	 */
+	private landed(changes: Change[], docs: DocumentEtag[]): DocumentEtag[] {
+		const sent = new Map(changes.map((change) => [change.path, change.put?.etag ?? null]));
+		return docs.filter((doc) => {
+			const etag = sent.get(documentPath(doc));
+			if (etag === undefined || etag === doc.etag) return true;
+			console.warn(`Server sync: ${documentPath(doc)} landed with another body than the one sent`);
+			return false;
+		});
 	}
 
 	/** The revision `listing` has once `changes` are applied to it. */
@@ -1191,43 +1279,55 @@ export class SyncEngine<DocCode extends string = never> {
 	/**
 	 * What `plan` changes on the server, against `listing`: each body with
 	 * its etag, left out when the server holds the same; each delete of a
-	 * document the listing holds, left out for a document the plan also puts.
+	 * document the listing holds, left out for a document the plan also
+	 * puts. Of several puts of one key, the last counts.
 	 */
-	private async changesOf(plan: SyncPlan, listing: Listing): Promise<Change[]> {
+	private async changesOf(plan: SyncPlan, listing: Listing): Promise<Changes> {
 		const listed = new Map(listing.docs.map((doc) => [documentPath(doc), doc.etag]));
-		const changes = new Map<string, Change>();
-		for (const { doc, body } of plan.put ?? []) {
-			const path = documentPath(doc);
+		const puts = new Map<string, PlannedPut>();
+		for (const put of plan.put ?? []) {
+			const path = documentPath(put.doc);
+			puts.delete(path);
+			puts.set(path, put);
+		}
+		const changes: Change[] = [];
+		const held: DocumentEtag[] = [];
+		for (const [path, { doc, body }] of puts) {
 			const etag = await etagOf(body);
 			const ifEtag = listed.get(path) ?? null;
 			if (etag === ifEtag) {
-				changes.delete(path);
+				held.push({ ...keyOf(doc), etag });
 				continue;
 			}
-			changes.set(path, {
-				key: keyOf(doc),
-				path,
-				ifEtag,
-				put: { body, bytes: bodySize(body), etag },
-			});
+			changes.push({ key: keyOf(doc), path, ifEtag, put: { body, bytes: bodySize(body), etag } });
 		}
+		const deleting = new Set<string>();
 		for (const doc of plan.delete ?? []) {
 			const path = documentPath(doc);
+			if (puts.has(path) || deleting.has(path)) continue;
+			deleting.add(path);
 			const ifEtag = listed.get(path);
-			if (ifEtag === undefined || changes.has(path)) continue;
-			changes.set(path, { key: keyOf(doc), path, ifEtag, put: null });
+			if (ifEtag === undefined) held.push({ ...keyOf(doc), etag: null });
+			else changes.push({ key: keyOf(doc), path, ifEtag, put: null });
 		}
-		return [...changes.values()];
+		return { changes, held };
 	}
 
 	/**
 	 * Writes `changes` in one transaction: the one kept open from before when
-	 * it holds nothing else (a conflict, a cut-off upload, a failed commit),
-	 * so each body it staged that is still wanted resumes from what the
-	 * server received; a new one otherwise. Resolves with the commit, with
-	 * the error to list and plan again after (a conflict, or a failure in
-	 * `RETRY_WRITE`), or with `null` once the client was dropped meanwhile;
-	 * any other failure is thrown.
+	 * it is open on this server and holds nothing else (a conflict, a cut-off
+	 * upload, a failed commit), so each body it staged that is still wanted
+	 * resumes from what the server received; a new one otherwise. Resolves
+	 * with the commit, with the error to list and plan again after (a
+	 * conflict, or a failure in `RETRY_WRITE`), or with `null` once the
+	 * client was dropped meanwhile; any other failure is thrown.
+	 *
+	 * The transaction's record of its bodies (`OpenTransaction.bodies`, saved
+	 * as `Pairing.upload`) only ever names a body the server holds, in part or
+	 * whole, or one it holds nothing for yet: a staged body that is not the
+	 * one recorded for its key is replaced by a delete before the key is
+	 * recorded with the body to send. So a put that never reached the server
+	 * cannot leave the record naming bytes the server does not hold.
 	 */
 	private async write(
 		client: SyncClient,
@@ -1238,12 +1338,14 @@ export class SyncEngine<DocCode extends string = never> {
 		// Refused before any byte goes, though counted at the commit.
 		this.guardWrite(now, false);
 		const total = changes.reduce((sum, change) => sum + (change.put?.bytes ?? 0), 0);
-		const wanted = new Set(changes.map((change) => change.path));
+		const wanted = new Map(changes.map((change) => [change.path, change]));
 		let sending = false;
 
 		try {
 			let tx = this.openTx;
 			let staged: StagedChange[] = [];
+			// Another server holds none of this transaction, or another's under its id.
+			if (tx && tx.server !== this.connectedTo) tx = null;
 			if (tx) {
 				staged = (await client.begin(tx.id)).staged;
 				if (!current()) return null;
@@ -1252,22 +1354,44 @@ export class SyncEngine<DocCode extends string = never> {
 			}
 			if (!tx) {
 				this.forgetTransaction();
-				tx = { id: newTransactionId(), bodies: new Map(), large: false, total: 0 };
+				tx = {
+					id: newTransactionId(),
+					server: this.connectedTo ?? '',
+					bodies: new Map(),
+					persist: false,
+					total: 0,
+				};
 				staged = (await client.begin(tx.id)).staged;
 				if (!current()) return null;
 			}
+			this.openTx = tx;
 
-			// A body resumes when the transaction staged the same bytes for it.
-			const offsets = changes.map((change) => {
-				const body = change.put;
-				if (!body) return 0;
-				const had = tx.bodies.get(change.path);
-				const on = staged.find(
-					(entry) =>
-						!entry.delete && documentPath(entry) === change.path && entry.bytes === body.bytes,
-				);
-				return on && had?.etag === body.etag && had.bytes === body.bytes ? on.received : 0;
-			});
+			// A body staged that is not the recorded one for what is to be sent
+			// goes first: a put that then never arrives leaves a delete, never
+			// another body's bytes under the new body's etag.
+			const resumable = new Map<string, number>();
+			for (const entry of staged) {
+				if (entry.delete) continue;
+				const path = documentPath(entry);
+				const change = wanted.get(path);
+				const had = tx.bodies.get(path);
+				if (
+					change?.put &&
+					had?.etag === change.put.etag &&
+					had.bytes === change.put.bytes &&
+					entry.bytes === had.bytes
+				) {
+					resumable.set(path, entry.received);
+					continue;
+				}
+				tx.bodies.delete(path);
+				if (change?.put) {
+					await client.delete(tx.id, change.key, change.ifEtag);
+					if (!current()) return null;
+				}
+			}
+
+			const offsets = changes.map((change) => resumable.get(change.path) ?? 0);
 			tx.bodies = new Map(
 				changes.flatMap((change) =>
 					change.put
@@ -1275,19 +1399,15 @@ export class SyncEngine<DocCode extends string = never> {
 						: [],
 				),
 			);
-			tx.large = total > SMALL_TRANSFER_BYTES;
 			tx.total = total;
-			this.openTx = tx;
+			tx.persist = total > SMALL_TRANSFER_BYTES;
+			const done = offsets.reduce((sum, offset) => sum + offset, 0);
 			// A small one starts over when it is cut off: nothing to resume after a reload.
-			if (!tx.large) this.dropUploadRecord();
+			if (tx.persist) this.saveUpload(done);
+			else this.dropUploadRecord();
 
 			sending = true;
-			this.beginTransfer(
-				'up',
-				offsets.reduce((sum, offset) => sum + offset, 0),
-				total,
-			);
-			this.saveUpload(true);
+			this.beginTransfer('up', done, total);
 			for (const [i, change] of changes.entries()) {
 				if (!change.put) {
 					await client.delete(tx.id, change.key, change.ifEtag);
@@ -1296,7 +1416,6 @@ export class SyncEngine<DocCode extends string = never> {
 					await client.put(tx.id, change.key, change.ifEtag, change.put.body, position, (at) => {
 						this.moved(at - position);
 						position = at;
-						this.saveUpload(false);
 					});
 					this.moved(change.put.bytes - position);
 				}
@@ -1307,6 +1426,8 @@ export class SyncEngine<DocCode extends string = never> {
 			}
 			sending = false;
 			this.endTransfer();
+			// Every body arrived: a reload before the commit's answer has nothing to ask.
+			if (tx.persist) this.saveUpload(total);
 
 			this.guardWrite(this.now(), true);
 			const result = await client.commit(tx.id);
@@ -1362,35 +1483,46 @@ export class SyncEngine<DocCode extends string = never> {
 	}
 
 	/**
-	 * The transfer under way was cut off with its connection. A large one
-	 * waits for the app's choice, kept to resume; a small one starts over by
-	 * itself: its reads are dropped, and the next write begins another
-	 * transaction.
+	 * The transfer under way was cut off with its connection. One of at most
+	 * `SMALL_TRANSFER_BYTES` starts over by itself: its reads are dropped, and
+	 * the next write begins another transaction. A larger one with more than
+	 * that left to go waits for the app's choice; with less left, it goes on
+	 * by itself with the next sync. `done` counts what went into the
+	 * channel's buffer, which may be up to 1 MiB ahead of what arrived: it
+	 * decides only whether to ask, never where to resume.
 	 */
 	private cutOff(): void {
 		const transfer = this.transfer;
 		if (!transfer || transfer.interrupted) return;
-		if (transfer.total > SMALL_TRANSFER_BYTES) {
-			this.transfer = { ...transfer, interrupted: true };
-			if (transfer.direction === 'up') this.saveUpload(true);
-		} else {
+		if (transfer.total <= SMALL_TRANSFER_BYTES) {
 			this.transfer = null;
 			if (transfer.direction === 'down') this.reads.clear();
 			else this.forgetTransaction();
+		} else {
+			const ask = transfer.total - transfer.done > SMALL_TRANSFER_BYTES;
+			this.transfer = ask ? { ...transfer, interrupted: true } : null;
+			if (transfer.direction === 'up') this.saveUpload(transfer.done);
 		}
 		this.setState({});
 	}
 
-	/** Saves a large upload's transaction and progress to resume, at most every `UPLOAD_SAVE_MS` unless `force`. */
-	private saveUpload(force: boolean): void {
+	/**
+	 * Saves the open transaction to resume after a reload, with `done` of its
+	 * bytes sent. It is saved when it starts, when it is cut off, and once
+	 * every body arrived, never on progress: the record may be large, and
+	 * storage slow or full.
+	 */
+	private saveUpload(done: number): void {
 		const tx = this.openTx;
-		if (!tx?.large || !this.pairing) return;
-		const time = this.now().getTime();
-		if (!force && time - this.uploadSavedAt < UPLOAD_SAVE_MS) return;
-		this.uploadSavedAt = time;
-		const done = this.transfer?.direction === 'up' ? this.transfer.done : 0;
+		if (!tx?.persist || !this.pairing) return;
 		this.savePairing({
-			upload: { tx: tx.id, total: tx.total, done, bodies: [...tx.bodies.values()] },
+			upload: {
+				tx: tx.id,
+				server: tx.server,
+				total: tx.total,
+				done,
+				bodies: [...tx.bodies.values()],
+			},
 		});
 	}
 
@@ -1414,6 +1546,7 @@ export class SyncEngine<DocCode extends string = never> {
 		this.transfer = null;
 		this.reads.clear();
 		this.openTx = null;
+		this.refused = null;
 	}
 
 	/**
@@ -1538,6 +1671,7 @@ export class SyncEngine<DocCode extends string = never> {
 	 * this device last heard of.
 	 */
 	private heard(welcome: Welcome): void {
+		this.connectedTo = welcome.serverId;
 		this.diverged = welcome.diverged ?? [];
 		this.mainName =
 			welcome.role === 'subordinate' ? (this.pairing?.name ?? welcome.name) : welcome.name;

@@ -21,9 +21,15 @@ export interface StagedBody {
  */
 export interface PendingUpload {
 	tx: string;
+	/** The server the transaction is open on; on another, its bodies go from the start. */
+	server: string;
 	/** The bytes of every body the upload puts. */
 	total: number;
-	/** How many of them the server held, as last known here; `begin` says exactly. */
+	/**
+	 * How many of them had gone when this was saved: at the start, when cut
+	 * off, and once every body arrived. Only `begin` says what the server
+	 * holds; this decides whether to ask before resuming.
+	 */
 	done: number;
 	bodies: StagedBody[];
 }
@@ -114,12 +120,20 @@ function readStagedBody(value: unknown): StagedBody | null {
 /** A pending upload as stored; `null` when any part of it does not read. */
 function readUpload(value: unknown): PendingUpload | null {
 	if (typeof value !== 'object' || value === null) return null;
-	const { tx, total, done, bodies } = value as Record<string, unknown>;
-	if (!isString(tx) || !isCount(total) || !isCount(done) || !Array.isArray(bodies)) return null;
+	const { tx, server, total, done, bodies } = value as Record<string, unknown>;
+	if (
+		!isString(tx) ||
+		!isString(server) ||
+		!isCount(total) ||
+		!isCount(done) ||
+		!Array.isArray(bodies)
+	) {
+		return null;
+	}
 	const read = bodies.map(readStagedBody);
 	if (read.some((body) => body === null)) return null;
 
-	return { tx, total, done, bodies: read as StagedBody[] };
+	return { tx, server, total, done, bodies: read as StagedBody[] };
 }
 
 function readPairing(value: unknown): Pairing | null {
@@ -194,9 +208,10 @@ export function createPairingStore(options: PairingStoreOptions): PairingStore {
 		save(pairing) {
 			try {
 				storage().setItem(key, JSON.stringify(pairing));
-			} catch {
+			} catch (error) {
 				// Storage is full or blocked. Sync still runs for this visit; the
-				// next start finds no pairing and asks to pair again.
+				// next start finds the record as it was last saved, or none.
+				console.warn('Server sync could not save its pairing record', error);
 			}
 		},
 		clear() {

@@ -44,6 +44,7 @@ describe('createPairingStore', () => {
 		const { storage, store } = setup();
 		const upload = {
 			tx: 'tx-0123456789abcdef',
+			server: 'S1',
 			total: 3_000_000,
 			done: 1_000_000,
 			bodies: [{ path: 'photos', id: 'p1', type: 'jpg', bytes: 3_000_000, etag: 'e'.repeat(64) }],
@@ -55,6 +56,7 @@ describe('createPairingStore', () => {
 
 		for (const broken of [
 			{ ...upload, tx: 7 },
+			{ ...upload, server: undefined },
 			{ ...upload, done: -1 },
 			{ ...upload, bodies: [{ ...upload.bodies[0], etag: null }] },
 			'nope',

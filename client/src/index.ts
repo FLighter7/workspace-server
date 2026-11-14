@@ -73,7 +73,6 @@ export {
 	RETRY_DELAYS_MS,
 	SMALL_TRANSFER_BYTES,
 	SyncEngine,
-	UPLOAD_SAVE_MS,
 	connectToServer,
 	documentPath,
 	type Divergence,

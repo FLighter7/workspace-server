@@ -225,4 +225,42 @@ describe('FakeServer tombstones, cut-offs and divergence', () => {
 		]);
 		expect((await theirs.hello('dev2', 'tok2')).diverged).toBeUndefined();
 	});
+
+	it('a lost put leaves what was staged for the key as it was, and drops the connection', async () => {
+		const server = new FakeServer();
+		const first = await connect(server);
+		await first.begin(TX);
+		await first.put(TX, DATA, null, bytes('{"a":1}'));
+		server.losePuts = 1;
+
+		await expect(first.put(TX, DATA, null, bytes('{"b":2}'))).rejects.toMatchObject({
+			code: 'closed',
+		});
+
+		expect(first.open).toBe(false);
+		const second = await connect(server);
+		expect((await second.begin(TX)).staged).toEqual([
+			{ ...DATA, ifEtag: null, bytes: 7, received: 7 },
+		]);
+		await second.commit(TX);
+		expect(server.text(DATA)).toBe('{"a":1}');
+	});
+
+	it('refuses a put past the quota once its body arrived, and a set may always shrink', async () => {
+		const server = new FakeServer();
+		server.storeDocument(NOTE, '12345');
+		server.quota = 8;
+		const client = await connect(server);
+		await client.begin(TX);
+
+		await expect(client.put(TX, DATA, null, bytes('1234'))).rejects.toMatchObject({
+			code: 'quota',
+		});
+		expect(server.puts).toHaveLength(1);
+		expect((await client.begin(TX)).staged).toEqual([]);
+
+		server.quota = 2;
+		await client.delete(TX, NOTE, server.etag(NOTE));
+		await expect(client.commit(TX)).resolves.toMatchObject({ committed: true });
+	});
 });

@@ -273,4 +273,97 @@ describe('SyncEngine with several documents', () => {
 		await engine.syncNow();
 		expect(device.server.log).toEqual(['head#1', 'list#1']);
 	});
+
+	it('a plan that puts a document unchanged and deletes it keeps it', async () => {
+		const device = setup({ files: true });
+		device.server.storeDocument(A, 'alpha');
+		const engine = new SyncEngine({
+			...device.engineOptions,
+			adapter: {
+				...device.engineOptions.adapter,
+				plan: () => ({ put: [{ doc: A, body: new TextEncoder().encode('alpha') }], delete: [A] }),
+			},
+		});
+
+		engine.start(true);
+		await settle();
+
+		expect(device.server.text(A)).toBe('alpha');
+		expect(device.server.log).not.toContain('begin#1');
+	});
+
+	it('tells the adapter of a body the server held already, and of a delete of what it did not hold', async () => {
+		const device = setup({ files: true });
+		const etag = device.server.storeDocument(A, 'alpha');
+		device.local.known.set('notes/a.md', 'older');
+		device.writeFile(A, 'alpha');
+		device.removeFile(B);
+
+		device.engine.start(true);
+		await settle();
+
+		expect(device.local.known.get('notes/a.md')).toBe(etag);
+		expect(device.local.dirty.size).toBe(0);
+		expect(device.local.deleted.size).toBe(0);
+	});
+
+	it('a commit naming another etag than the body sent is not told to the adapter, and syncs again', async () => {
+		const device = setup({ files: true });
+		device.writeFile(A, 'alpha');
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+		const original = FakeClient.prototype.commit;
+		const commit = vi.spyOn(FakeClient.prototype, 'commit').mockImplementationOnce(async function (
+			this: FakeClient,
+			tx: string,
+		) {
+			const result = await original.call(this, tx);
+			return { ...result, docs: result.docs.map((doc) => ({ ...doc, etag: 'f'.repeat(64) })) };
+		});
+		const committed = vi.spyOn(device.engineOptions.adapter, 'committed');
+
+		device.engine.start(true);
+		await settle();
+
+		expect(committed.mock.calls[0]?.[0] ?? []).not.toContainEqual(
+			expect.objectContaining({ id: 'a', etag: 'f'.repeat(64) }),
+		);
+		expect(warn).toHaveBeenCalled();
+		// Synced again: the listing then names the body that is there.
+		expect(device.server.log.filter((entry) => entry.startsWith('list'))).toHaveLength(2);
+		expect(device.state.pairing?.lastRevision).toBe(device.server.revision);
+		commit.mockRestore();
+		warn.mockRestore();
+	});
+
+	it('a plan the server refused for its quota is not sent again until something changes', async () => {
+		const device = setup({ files: true });
+		device.server.quota = 1000;
+		device.writeFile(A, 'x'.repeat(2000));
+
+		device.engine.start(true);
+		await settle();
+		expect(device.last()).toMatchObject({ status: 'error', error: { code: 'quota' } });
+		expect(device.server.puts).toHaveLength(1);
+
+		// An edit that leaves the plan as it was, and a push: nothing is sent.
+		device.local.changeCount++;
+		device.engine.localChanged();
+		await device.fire();
+		device.server.clients[0].emitChanged(device.server.revision);
+		await settle();
+		expect(device.server.puts).toHaveLength(1);
+		expect(device.last()).toMatchObject({ status: 'error', error: { code: 'quota' } });
+
+		// The set changed: the plan is tried against it.
+		device.server.storeDocument(C, 'jpeg');
+		device.server.clients[0].emitChanged(device.server.revision);
+		await settle();
+		expect(device.server.puts).toHaveLength(2);
+
+		// The user asks, after raising the quota: it goes.
+		device.server.quota = null;
+		await device.engine.syncNow();
+		expect(device.server.text(A)).toBe('x'.repeat(2000));
+		expect(device.last()).toMatchObject({ status: 'connected', error: null });
+	});
 });

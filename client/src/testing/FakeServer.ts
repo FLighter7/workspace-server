@@ -166,6 +166,18 @@ export class FakeServer {
 	cutPutAfter: number | null = null;
 	/** The same for `get` bodies: the bytes before the cut reach `onPiece`, then the get fails. */
 	cutGetAfter: number | null = null;
+	/**
+	 * Lose this many next `put` frames: the device sent the frame and its
+	 * body, the server never saw them, and the connection drops. What the
+	 * transaction staged for the key before stays as it was.
+	 */
+	losePuts = 0;
+	/**
+	 * The app's quota in bytes, `null` for none. As on the real server, a
+	 * `put` with which the set after the transaction would pass it is refused
+	 * with `quota` once its whole body has arrived, and so is a `commit`.
+	 */
+	quota: number | null = null;
 	/** While set, `connect` waits for it: a server slow to answer, or one away until it times out. */
 	connectGate: Promise<void> | null = null;
 
@@ -440,6 +452,11 @@ export class FakeClient implements SyncClient {
 		this.checkTx(tx);
 		const size = bodySize(body);
 		const changes = this.changes(tx);
+		if (this.server.losePuts > 0) {
+			this.server.losePuts--;
+			this.drop();
+			throw new WorkspaceError('The connection to the server closed', 'closed');
+		}
 		const path = documentPath(key);
 		const staged = changes.get(path);
 		if (
@@ -462,7 +479,11 @@ export class FakeClient implements SyncClient {
 		if (offset > 0 && staged) data.set(staged.data.subarray(0, offset));
 		data.set(sent, offset);
 		this.server.puts.push({ key: keyOf(key), ifEtag, bytes: size, offset, body: sent.slice() });
-		changes.set(path, { key: keyOf(key), ifEtag, delete: false, bytes: size, data });
+		const change: FakeChange = { key: keyOf(key), ifEtag, delete: false, bytes: size, data };
+		if (!cutting && this.overQuota(changes, change)) {
+			throw new WorkspaceError('The set would pass the app’s quota', 'quota');
+		}
+		changes.set(path, change);
 		onProgress?.(offset + sent.byteLength);
 		if (cutting) {
 			this.drop();
@@ -493,6 +514,9 @@ export class FakeClient implements SyncClient {
 		const server = this.server;
 		if (changes.some((change) => !change.delete && change.data.byteLength < change.bytes)) {
 			throw new WorkspaceError('A body has not fully arrived', 'incomplete');
+		}
+		if (this.overQuota(this.changes(tx))) {
+			throw new WorkspaceError('The set would pass the app’s quota', 'quota');
 		}
 		if (server.commitError && !server.commitAppliedFirst) {
 			const code = server.commitError;
@@ -646,6 +670,28 @@ export class FakeClient implements SyncClient {
 			if (this.open) this.drop();
 		}, 0);
 		throw new WorkspaceError(message, 'protocol');
+	}
+
+	/**
+	 * Whether the set after the transaction's `changes` (and `extra`) would
+	 * pass the quota while being larger than now: a set over its quota can
+	 * always shrink.
+	 */
+	private overQuota(changes: Map<string, FakeChange>, extra?: FakeChange): boolean {
+		const quota = this.server.quota;
+		if (quota === null) return false;
+		const sizes = new Map(
+			[...this.server.documents].map(([path, doc]) => [path, doc.body.byteLength]),
+		);
+		const now = [...sizes.values()].reduce((sum, size) => sum + size, 0);
+		const all = new Map(changes);
+		if (extra) all.set(documentPath(extra.key), extra);
+		for (const [path, change] of all) {
+			if (change.delete) sizes.delete(path);
+			else sizes.set(path, change.bytes);
+		}
+		const after = [...sizes.values()].reduce((sum, size) => sum + size, 0);
+		return after > quota && after > now;
 	}
 
 	private current(key: DocumentKey): DocumentEtag {

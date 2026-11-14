@@ -146,7 +146,10 @@ export class ChannelFraming {
 	 * than 1 MiB. A `Blob` is read a slice at a time, never whole. Resolves
 	 * once every piece is handed to the channel; rejects if the channel
 	 * closes first, or if the `Blob` cannot be read. `onProgress` hears the
-	 * position in the body after every piece handed to the channel.
+	 * position in the body after every piece handed to the channel: up to
+	 * 1 MiB of it may still wait in the channel's buffer, so it shows
+	 * progress, and is never what the server received (`staged` and `began`
+	 * say that).
 	 */
 	async sendFrameWithBody(
 		frame: Frame,
