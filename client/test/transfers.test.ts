@@ -7,6 +7,7 @@ import {
 } from '../src/SyncEngine.js';
 import { FakeClient, FakeServer } from '../src/testing/FakeServer.js';
 import { settle, setup } from './engineHarness.js';
+import type { Pairing } from '../src/PairingStore.js';
 import { makePairing } from './fixtures.js';
 
 /*
@@ -505,5 +506,52 @@ describe('SyncEngine resuming only what the server holds', () => {
 
 		expect(states.at(-1)).toMatchObject({ status: 'connected', transfer: null });
 		expect(device.server.puts.at(-1)).toMatchObject({ offset: 3 * MiB });
+	});
+
+	it('an upload whose record could not be saved is never resumed from an older record', async () => {
+		const device = setup({ files: true });
+		const store = device.engineOptions.pairingStore;
+		let full = false;
+		const options = {
+			...device.engineOptions,
+			pairingStore: {
+				...store,
+				// Storage full: nothing is saved, the older record stays.
+				save: (pairing: Pairing) => {
+					if (full) return false;
+					store.save(pairing);
+					return true;
+				},
+			},
+		};
+		const A = bytes(3 * MiB, 1);
+		const B = bytes(3 * MiB, 2);
+		device.writeFile(PHOTO, A);
+		device.server.cutPutAfter = MiB;
+		const engine = new SyncEngine(options);
+		engine.start(true);
+		await settle();
+		await device.fire(2000);
+		const saved = device.state.pairing?.upload;
+		expect(saved?.bodies[0].etag).toBeDefined();
+
+		// Edited to B, the same size; its record cannot be saved, and it is cut off too.
+		device.writeFile(PHOTO, B);
+		full = true;
+		device.server.cutPutAfter = MiB;
+		await engine.resumeTransfer();
+		// The record still names A under the first transaction.
+		expect(device.state.pairing?.upload).toEqual(saved);
+
+		// The app reloads with A again: the record's transaction holds nothing of B.
+		full = false;
+		device.writeFile(PHOTO, A);
+		const next = new SyncEngine(options);
+		next.start(true);
+		await settle();
+		await next.resumeTransfer();
+
+		expect(same(device.server.document(PHOTO), A)).toBe(true);
+		expect(device.server.puts.at(-1)?.offset).toBe(0);
 	});
 });

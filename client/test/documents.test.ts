@@ -366,4 +366,40 @@ describe('SyncEngine with several documents', () => {
 		expect(device.server.text(A)).toBe('x'.repeat(2000));
 		expect(device.last()).toMatchObject({ status: 'connected', error: null });
 	});
+
+	it('Sync now sends a refused plan again with the sync it starts only, even one that waits', async () => {
+		const device = setup({ files: true });
+		const big = { path: 'videos', id: 'v', type: 'mp4' };
+		device.server.storeDocument(big, new Uint8Array(3 * 1024 * 1024));
+		device.server.quota = 1000;
+		const wanted: { path: string; id: string; type: string }[] = [];
+		const engine = new SyncEngine({
+			...device.engineOptions,
+			adapter: {
+				changeCount: () => device.local.changeCount,
+				select: () => wanted,
+				plan: () => ({ put: [{ doc: A, body: new TextEncoder().encode('x'.repeat(2000)) }] }),
+			},
+		});
+		engine.start(true);
+		await settle();
+		expect(device.server.puts).toHaveLength(1);
+
+		// A large read of the same set is cut off, and waits.
+		wanted.push(big);
+		device.server.cutGetAfter = 1024 * 1024;
+		device.server.clients[0].emitChanged(device.server.revision);
+		await settle();
+		await device.fire(2000);
+		expect(device.states.at(-1)?.status).toBe('interrupted');
+
+		// Sync now while it waits: that sync stops at the question.
+		await engine.syncNow();
+		expect(device.states.at(-1)?.status).toBe('interrupted');
+
+		// Resumed, the read finishes; the refused plan, the set unchanged, is not sent.
+		await engine.resumeTransfer();
+		expect(device.server.puts).toHaveLength(1);
+		expect(device.states.at(-1)).toMatchObject({ status: 'error', error: { code: 'quota' } });
+	});
 });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createPairingStore, type Pairing } from '../src/PairingStore.js';
 import { MemoryStorage, makePairing } from './fixtures.js';
 
@@ -16,7 +16,7 @@ describe('createPairingStore', () => {
 		const { storage, store } = setup();
 		const pairing = makePairing({ lastRevision: 'r1', lastSyncAt: '2026-11-07T10:00:00.000Z' });
 
-		store.save(pairing);
+		expect(store.save(pairing)).toBe(true);
 
 		expect(store.load()).toEqual(pairing);
 		expect(storage.getItem(KEY)).not.toBeNull();
@@ -160,7 +160,10 @@ describe('createPairingStore', () => {
 		});
 
 		expect(store.load()).toBeNull();
-		expect(() => store.save(makePairing())).not.toThrow();
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+		expect(store.save(makePairing())).toBe(false);
+		expect(warn).toHaveBeenCalled();
+		warn.mockRestore();
 		expect(() => store.clear()).not.toThrow();
 	});
 });

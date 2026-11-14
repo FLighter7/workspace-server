@@ -76,7 +76,11 @@ export interface Pairing extends ServerTarget {
 export interface PairingStore {
 	/** `null` for a missing, corrupt or wrongly shaped record alike. */
 	load(): Pairing | null;
-	save(pairing: Pairing): void;
+	/**
+	 * Saves the record. Returns `false` when it could not (storage full or
+	 * blocked); a store that returns nothing is taken to have saved it.
+	 */
+	save(pairing: Pairing): boolean | void;
 	clear(): void;
 }
 
@@ -208,10 +212,12 @@ export function createPairingStore(options: PairingStoreOptions): PairingStore {
 		save(pairing) {
 			try {
 				storage().setItem(key, JSON.stringify(pairing));
+				return true;
 			} catch (error) {
 				// Storage is full or blocked. Sync still runs for this visit; the
 				// next start finds the record as it was last saved, or none.
 				console.warn('Server sync could not save its pairing record', error);
+				return false;
 			}
 		},
 		clear() {

@@ -1051,6 +1051,10 @@ export class SyncEngine<DocCode extends string = never> {
 		const client = this.client;
 		const pairing = this.pairing;
 		if (!client || !this.ready || !pairing || this.halted) return;
+		// `syncNow` sends a refused plan again with the sync it starts, and
+		// only that one, whatever it comes to.
+		const retryRefused = this.retryRefused;
+		this.retryRefused = false;
 		if (this.transfer?.interrupted) {
 			// A large transfer was cut off: the app chooses to resume or restart it.
 			this.setState({ status: 'interrupted', error: null });
@@ -1106,8 +1110,6 @@ export class SyncEngine<DocCode extends string = never> {
 						.map((change) => `${change.path} ${change.ifEtag} ${change.put?.etag ?? '-'}`)
 						.join('\n');
 					const refused = this.refused;
-					const retryRefused = this.retryRefused;
-					this.retryRefused = false;
 					if (
 						refused &&
 						!retryRefused &&
@@ -1391,7 +1393,7 @@ export class SyncEngine<DocCode extends string = never> {
 				}
 			}
 
-			const offsets = changes.map((change) => resumable.get(change.path) ?? 0);
+			let offsets = changes.map((change) => resumable.get(change.path) ?? 0);
 			tx.bodies = new Map(
 				changes.flatMap((change) =>
 					change.put
@@ -1401,10 +1403,23 @@ export class SyncEngine<DocCode extends string = never> {
 			);
 			tx.total = total;
 			tx.persist = total > SMALL_TRANSFER_BYTES;
-			const done = offsets.reduce((sum, offset) => sum + offset, 0);
+			let done = offsets.reduce((sum, offset) => sum + offset, 0);
 			// A small one starts over when it is cut off: nothing to resume after a reload.
-			if (tx.persist) this.saveUpload(done);
-			else this.dropUploadRecord();
+			if (!tx.persist) {
+				this.dropUploadRecord();
+			} else if (!this.saveUpload(done)) {
+				// The record could not be saved for this plan, and an older one
+				// may name other bodies under this transaction's id. Another
+				// transaction, kept in memory only, discards this one on the
+				// server, so that no record ever resumes it after a reload.
+				this.dropUploadRecord();
+				tx = { ...tx, id: newTransactionId(), persist: false };
+				staged = (await client.begin(tx.id)).staged;
+				if (!current()) return null;
+				this.openTx = tx;
+				offsets = changes.map(() => 0);
+				done = 0;
+			}
 
 			sending = true;
 			this.beginTransfer('up', done, total);
@@ -1512,10 +1527,10 @@ export class SyncEngine<DocCode extends string = never> {
 	 * every body arrived, never on progress: the record may be large, and
 	 * storage slow or full.
 	 */
-	private saveUpload(done: number): void {
+	private saveUpload(done: number): boolean {
 		const tx = this.openTx;
-		if (!tx?.persist || !this.pairing) return;
-		this.savePairing({
+		if (!tx?.persist || !this.pairing) return true;
+		return this.savePairing({
 			upload: {
 				tx: tx.id,
 				server: tx.server,
@@ -1626,11 +1641,13 @@ export class SyncEngine<DocCode extends string = never> {
 		this.debounceTimer = null;
 	}
 
-	private savePairing(patch: Partial<Pairing>): void {
-		if (!this.pairing) return;
+	/** Saves `patch` into the pairing record; `false` when the store could not. */
+	private savePairing(patch: Partial<Pairing>): boolean {
+		if (!this.pairing) return true;
 		this.pairing = { ...this.pairing, ...patch };
-		this.store.save(this.pairing);
+		const saved = this.store.save(this.pairing) !== false;
 		this.setState({});
+		return saved;
 	}
 
 	/**
