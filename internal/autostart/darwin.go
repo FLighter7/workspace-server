@@ -75,3 +75,6 @@ func Uninstall() (removed bool, err error) {
 }
 
 func browserCommand(url string) *exec.Cmd { return exec.Command("open", url) }
+
+// openFolder opens path in Finder: open, like the browser's page.
+func openFolder(path string) error { return startOpener(browserCommand(path)) }

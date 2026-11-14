@@ -110,15 +110,19 @@ On the first start the server creates its folder and an entry for the `todo` app
   - **Upstream server** (Связь с главным сервером): links this server to a main one, as a laptop's server is linked to the PC's; see "A laptop as a second server";
   - **Manage the server** (Управление сервером): three buttons, each of which asks first:
     - **Stop the server** stops it and stops it starting at login, like `stop`. Your data is kept.
-    - **Delete data** starts the server over as if it were new: every app's documents, the list of apps and the paired devices are deleted, and every device must pair again. The name, the ports and the data folder are kept. The question lists each app's data and lets you download it first.
+    - **Delete data** starts the server over as if it were new: every app's files, the list of apps and the paired devices are deleted, and every device must pair again. The name, the ports and the data folder are kept. The question lists each app's data, with **Open folder** beside it so that you can copy the files elsewhere first.
     - **Delete the server and all data** stops the server and removes it from the computer, like `delete`: its data, its folders, the program file and the autostart.
 - **Devices** (Устройства):
   - **Pair a device** at the top opens the pairing code; on a server linked to a main, devices pair with the main instead;
   - lists, for each app, its paired devices: when each paired, when it was last seen, and whether it is connected now; servers linked to this one are listed first, under **Linked servers**;
   - **Remove** disconnects a device and ends its access.
 - **Apps** (Приложения):
-  - lists each app with its document size, last change, number of saved versions and number of devices;
-  - here you add an app, or delete one together with its data and devices. Deleting shows exactly what goes, offers to download the current document first, and asks you to type the app's id.
+  - lists each app with the number of its files, the space they take of its quota (with a bar), the last write, the number of its devices and its folder; with more than one app, the totals of all of them come first;
+  - **Open folder** (Открыть папку) opens the app's folder in Explorer, Finder or your file manager, on the computer the server runs on (the page is open only there);
+  - **Change the quota** (Изменить квоту) sets how much space the app's files may take together on this server, in MB, from 1 MB to 1 TB; 50 MB by default. Once the files reach it, devices cannot add more until you raise it or remove files in the app; lowering it deletes nothing. On a server linked to a main the button is not there: the main sets the quota, and the linked server follows it;
+  - **Diverged: choose on a device** marks an app whose copies here and on another server, which it names, differ: the app does not sync between the two until you choose on a device which copy to keep (see "When the two copies differ");
+  - **Held by the quota**, on a server linked to a main, marks an app that cannot sync with the main because its files would go over the quota here or on the main: raise the quota on the main's page, or remove files in the app on a device. The server keeps trying;
+  - here you add an app (its id, a name and its quota), or delete one together with its files and devices. Deleting shows exactly what goes, offers to open the app's folder first so that you can copy its files elsewhere, and asks you to type the app's id.
 
 ## Pairing a device
 
@@ -147,7 +151,7 @@ The PC runs the main server, and a laptop can run a second one that keeps a copy
 3. On the laptop's page, open **Server** and find **Upstream server**. Paste the code and press **Link**, or press **Scan with the camera** and hold the QR code up to the laptop's camera.
 4. The laptop's server is now linked to the main: it takes the main's apps, copies their data, and shows the link's state.
 
-Linking deletes nothing by itself. If both servers already hold an app's data and it differs, the two copies have diverged: see "When the two copies differ" below. The laptop also takes each app's quota from the main. A server that other servers are linked to cannot be linked to another main itself.
+Linking deletes nothing by itself. If both servers already hold an app's data and it differs, the two copies have diverged: see "When the two copies differ" below. The laptop also takes each app's quota from the main, now and whenever it changes there. A server that other servers are linked to cannot be linked to another main itself.
 
 ### Pairing the laptop's browser
 
@@ -169,11 +173,12 @@ If the same data of an app changed on both servers while they were apart, or the
 - the copy you keep replaces the other on the other server, all of it, and the app syncs again. Your devices then merge what they hold with it, as they always do, so a change made only in the other copy comes back from the device that made it;
 - a choice made while the two servers cannot reach each other takes effect when they next meet, however much later, and the copy you did not keep is replaced as it is then, with whatever was written to it after you chose: a device that still holds such a change brings it back, one that has been wiped or is never opened again does not.
 
-While an app's copies have diverged, the laptop cannot be made the main in the planned way: choose first.
+While an app's copies have diverged, the laptop cannot be made the main in the planned way: choose first. Meanwhile the **Apps** page of each server marks the app as diverged, naming the other server, and the laptop's **Upstream server** lists it as waiting for a choice.
 
 ### Keeping an eye on it
 
 - The laptop's **Upstream server** shows the main, whether it is connected, when it was linked, the last sync and the apps synced. If an app writes to the main too often within a minute, it stops syncing with the main, so that a runaway app does not keep rewriting the data on both servers; the section lists it, and its devices still sync with the laptop. Press **Resume** beside it to sync it with the main again at once; a restart of the laptop's server resumes it too. If the app keeps writing that often, it stops again.
+- If an app's files would go over its quota, here or on the main, the app cannot sync with the main: the laptop's **Upstream server** lists it as held by the quota, and its card on the **Apps** page says so. Raise the quota on the main's page, or remove files in the app on a device; the laptop keeps trying, and the app syncs once its files fit.
 - The main's **Devices** lists the laptop's server under **Linked servers**, with its addresses. **Remove** there stops it syncing with the main; its data stays on the laptop.
 - **Unlink** on the laptop's page makes it a main again. Nothing is deleted on either side, and the main's devices no longer sync through the laptop. If the main cannot be reached at that moment, the page says so: remove the laptop on the main's page later.
 
@@ -205,7 +210,7 @@ Run `delete`, or press **Delete the server and all data** on the web page, or, o
 - If you chose your own data folder, only the server's data in it is deleted: its `WSS-Data` folder goes only if nothing else is left in it, and the folder you chose only if it is then empty.
 - **This deletes the server's copy of every app's data and all pairings.**
   - The devices keep their own copies; turn sync off in each app.
-  - Download a document from the Apps page first if you want to keep it.
+  - To keep an app's files, press **Open folder** on the Apps page first and copy them elsewhere.
 - `delete --yes` deletes without asking.
 - **Left behind:**
   - Firewall entries. Windows keeps the rule created on the first run; removing it needs administrator rights: Windows Security → Firewall & network protection → Allow an app through firewall. On macOS the entry is in System Settings → Network → Firewall → Options.
@@ -236,8 +241,8 @@ The apps' data is in a folder named `WSS-Data` in the **data folder**, which is 
 
 ```
 WSS-Data/README.txt                 what the folder is
-WSS-Data/apps/<id>/                 the app's files
-WSS-Data/apps/<id>/.wss/            the server's own records for the app
+WSS-Data/apps/<id>/                 the app's files, in the folders the app chose
+WSS-Data/apps/<id>/.wss/            the server's own records for the app, not the app's data
 ```
 
 - **Leave `WSS-Data` as it is.** Do not change, move, rename or delete it or anything in it, or the apps' data can be lost; its `README.txt` says the same. To move the data, change the data folder on the page.
@@ -251,7 +256,8 @@ WSS-Data/apps/<id>/.wss/            the server's own records for the app
   - If the folder is on a disk that is not connected when the server starts, the server does not start. `server.log` in the server folder says why.
 - **Each app's data** is stored exactly as the app sent it, as plain files.
   - A change replaces a file; no previous versions are kept. A `history/` folder left by an earlier version of the server is not used any more, and can be deleted.
-  - Each app's files may take up to 50 MiB together by default; you can choose another limit when you add the app.
+  - **Open folder** on the Apps page opens an app's folder. The files there are plain files, readable by any program; the `.wss` folder beside them is the server's own.
+  - Each app's files may take up to 50 MB together by default (1 MB here is 1024 × 1024 bytes, as Windows counts): the app's quota. Choose another when you add the app, or change it later on the Apps page.
 - **Writes are atomic:** a crash or power loss leaves either the old file or the new one, never half of one.
 - **`apps.json`** can be edited by hand while the server runs. The change takes effect within a few seconds.
 - **Backing up and moving:** to back up, copy the folders. To move the server to another computer, copy the server folder (and the data folder, if it is another one) there; every pairing keeps working. A data folder you chose is remembered by its full path: on the new computer, put it at the same path before you start the server. If it is not there, the server either does not start or starts with no data.

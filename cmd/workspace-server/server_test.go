@@ -22,6 +22,7 @@ import (
 
 	"github.com/FLighter7/workspace-server/internal/apps"
 	"github.com/FLighter7/workspace-server/internal/config"
+	"github.com/FLighter7/workspace-server/internal/fsutil"
 	"github.com/FLighter7/workspace-server/internal/identity"
 	"github.com/FLighter7/workspace-server/internal/mdns"
 	"github.com/FLighter7/workspace-server/internal/netaddr"
@@ -137,8 +138,11 @@ func TestRunServerKeepsTheDataInTheDataFolder(t *testing.T) {
 	}
 
 	ts := startServer(t, dir, 0, port)
-	if code, body := ts.send(t, http.MethodGet, "/api/apps/todo/document", ""); code != http.StatusOK || body != `{"a":1}` {
-		t.Errorf("GET the document = %d %q, want 200 and the file in the data folder", code, body)
+	if body, ok := ts.document(t, "todo"); !ok || body != `{"a":1}` {
+		t.Errorf("the document = %v %q, want the file in the data folder", ok, body)
+	}
+	if _, list := ts.send(t, http.MethodGet, "/api/apps", ""); !strings.Contains(list, `"files":1`) {
+		t.Errorf("GET /api/apps = %s, want todo's one file", list)
 	}
 	ts.stop(t)
 	for _, name := range []string{"server.log", "server.lock", "identity.json", "apps.json"} {
@@ -771,6 +775,14 @@ func (ts *testServer) send(t *testing.T, method, path, body string) (int, string
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
 	return code, string(data)
+}
+
+// document reads the app's data.json in the WSS-Data folder the server's
+// status names, as todo keeps it; ok is false when there is none.
+func (ts *testServer) document(t *testing.T, app string) (body string, ok bool) {
+	t.Helper()
+	data, err := fsutil.ReadFileShared(filepath.Join(ts.status(t).DataDir, "apps", app, "data.json"))
+	return string(data), err == nil
 }
 
 func (ts *testServer) status(t *testing.T) web.Status {

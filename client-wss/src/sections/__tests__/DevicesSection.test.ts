@@ -62,12 +62,13 @@ beforeEach(() => {
 		{
 			id: 'todo',
 			name: 'Todo',
-			history: 10,
-			maxBytes: 1024,
+			quota: 52_428_800,
+			files: 0,
 			size: 0,
 			modified: null,
-			versions: 0,
 			devices: 1,
+			folder: 'C:\\ws\\WSS-Data\\apps\\todo',
+			diverged: [],
 		},
 	]);
 	vi.spyOn(serverApi, 'devices').mockResolvedValue([laptop, phone]);

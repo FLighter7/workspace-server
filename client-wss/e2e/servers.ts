@@ -199,6 +199,15 @@ export class Server {
 		return (text === '' ? null : JSON.parse(text)) as T;
 	}
 
+	/** The app's document `data.json`, as todo keeps it, read from the data folder; `null` when there is none. */
+	document(app: string): unknown {
+		try {
+			return JSON.parse(readFileSync(join(this.dir, 'WSS-Data', 'apps', app, 'data.json'), 'utf8'));
+		} catch {
+			return null;
+		}
+	}
+
 	/** A fresh one-time pairing code, as the server's page would show it, with its QR code. */
 	pairing(): Promise<{ code: string; qr: string }> {
 		return this.api('POST', '/api/pairing');

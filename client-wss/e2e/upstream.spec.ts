@@ -75,7 +75,7 @@ test('a server links to its main by a pasted code, and shows the link', async ({
 	await expect(fact(page, 'Apps synced')).toHaveText('todo');
 	await expect(fact(page, 'Last sync')).not.toHaveText('Not yet');
 	await expect(section.getByRole('button', { name: "Pair this computer's browser" })).toBeVisible();
-	expect(await sub.api('GET', '/api/apps/todo/document')).toEqual({ v: 1 });
+	expect(sub.document('todo')).toEqual({ v: 1 });
 	await expect(sub.api('POST', '/api/pairing')).rejects.toThrow(/409.*notMain/);
 
 	await expectNoCspViolations(page);
@@ -157,7 +157,7 @@ test('unlinking asks first, says the data stays, and makes the server a main aga
 
 	await expect(said(page)).toHaveText('Unlinked. This server is a main again.');
 	await expect(section.getByLabel("The main server's pairing code")).toBeVisible();
-	expect(await sub.api('GET', '/api/apps/todo/document')).toEqual({ v: 1 });
+	expect(sub.document('todo')).toEqual({ v: 1 });
 	const devices = await main.api<{ kind?: string }[]>('GET', '/api/devices');
 	expect(devices.filter((device) => device.kind === 'server')).toEqual([]);
 

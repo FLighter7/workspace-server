@@ -41,7 +41,6 @@ type fakeBackend struct {
 	status    Status
 	apps      []AppInfo
 	devices   []DeviceInfo
-	docs      map[string][]byte
 	refusals  []pairing.Refusal
 	configErr error
 	deleteErr error
@@ -86,6 +85,11 @@ type fakeBackend struct {
 
 	resumed   []string // the apps resumed, per call
 	resumeErr error
+
+	quotas   []string // "<app>=<quota>", per call
+	quotaErr error
+	opened   []string // the apps whose folder was opened, per call
+	openErr  error
 }
 
 func (f *fakeBackend) record(call string) {
@@ -204,7 +208,6 @@ func newFake() *fakeBackend {
 			ID: "Q2xhdWRlUm9ja3Mx", App: "todo", Name: "iPhone",
 			PairedAt: at, LastSeen: at, Connected: true,
 		}},
-		docs: map[string][]byte{"todo": []byte(`{"items":[]}`)},
 	}
 }
 
@@ -251,9 +254,35 @@ func (f *fakeBackend) DeleteApp(id string) error {
 	return fmt.Errorf("%w: %q", apps.ErrNotFound, id)
 }
 
-func (f *fakeBackend) Document(id string) ([]byte, bool) {
-	d, ok := f.docs[id]
-	return d, ok
+func (f *fakeBackend) SetQuota(id string, quota int64) error {
+	if f.quotaErr != nil {
+		return f.quotaErr
+	}
+	for i, x := range f.apps {
+		if x.ID != id {
+			continue
+		}
+		if quota != 0 && (quota < apps.MinQuota || quota > apps.MaxQuota) {
+			return fmt.Errorf("%w: quota %d is out of range", apps.ErrInvalid, quota)
+		}
+		f.apps[i].Quota = quota
+		f.quotas = append(f.quotas, fmt.Sprintf("%s=%d", id, quota))
+		return nil
+	}
+	return fmt.Errorf("%w: %q", apps.ErrNotFound, id)
+}
+
+func (f *fakeBackend) OpenFolder(id string) error {
+	if f.openErr != nil {
+		return f.openErr
+	}
+	for _, x := range f.apps {
+		if x.ID == id {
+			f.opened = append(f.opened, id)
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %q", apps.ErrNotFound, id)
 }
 
 func (f *fakeBackend) Devices() []DeviceInfo { return f.devices }
@@ -285,7 +314,7 @@ func (f *fakeBackend) IssuePairing() (string, time.Time, error) {
 func (f *fakeBackend) Refusals() []pairing.Refusal { return f.refusals }
 
 func newTestHandler(f *fakeBackend) http.Handler {
-	return newHandler(f, func() int { return testPort }, func() time.Time { return testNow }, testUI)
+	return newHandler(f, func() int { return testPort }, testUI)
 }
 
 // request builds a request the way the page sends it: to 127.0.0.1 on the
@@ -380,7 +409,7 @@ func TestGuardHost(t *testing.T) {
 
 func TestGuardReadsThePortOnEveryRequest(t *testing.T) {
 	port := testPort
-	h := newHandler(newFake(), func() int { return port }, time.Now, testUI)
+	h := newHandler(newFake(), func() int { return port }, testUI)
 	get := func(host string) int {
 		r := request(http.MethodGet, "/api/status", "")
 		r.Host = host
@@ -424,6 +453,8 @@ func TestGuardMutatingNeedsHeader(t *testing.T) {
 		{http.MethodPut, "/api/config", `{"udpPort":1}`},
 		{http.MethodPost, "/api/apps", `{"id":"notes"}`},
 		{http.MethodDelete, "/api/apps/todo", `{"confirm":"todo"}`},
+		{http.MethodPut, "/api/apps/todo", `{"quota":2097152}`},
+		{http.MethodPost, "/api/apps/todo/open", ""},
 		{http.MethodDelete, "/api/devices/Q2xhdWRlUm9ja3Mx", ""},
 		{http.MethodOptions, "/api/pairing", ""},
 		{http.MethodPost, "/api/server/stop", `{"removeAutostart":true}`},
@@ -442,7 +473,7 @@ func TestGuardMutatingNeedsHeader(t *testing.T) {
 			t.Errorf("%s %s without the header: status %d, want 403", tc.method, tc.path, w.Code)
 		}
 	}
-	if len(f.configCalls)+len(f.added)+len(f.deleted)+len(f.removed)+len(f.calls)+len(f.dataDirs)+len(f.linkCodes)+f.unlinks+f.invites+len(f.resumed) != 0 || f.issued != 1 {
+	if len(f.configCalls)+len(f.added)+len(f.deleted)+len(f.removed)+len(f.calls)+len(f.dataDirs)+len(f.linkCodes)+f.unlinks+f.invites+len(f.resumed)+len(f.quotas)+len(f.opened) != 0 || f.issued != 1 {
 		t.Errorf("refused requests reached the backend: %+v", f)
 	}
 }
@@ -581,12 +612,12 @@ func TestCheckDataDir(t *testing.T) {
 	f := newFake()
 	f.check = DataDirCheck{
 		Path: "/Users/a/New", Verdict: "move", Message: "",
-		Current: []AppData{{ID: "todo", Size: 12, Versions: 3}}, Target: []AppData{},
+		Current: []AppData{{ID: "todo", Size: 12}}, Target: []AppData{},
 	}
 	h := newTestHandler(f)
 	w := serve(h, withMarker(request(http.MethodGet, "/api/data-dir?path=%2FUsers%2Fa%2FNew", "")))
 	wantStatus(t, w, http.StatusOK)
-	wantJSONBody(t, w, `{"path":"/Users/a/New","verdict":"move","message":"","current":[{"id":"todo","size":12,"versions":3}],"target":[]}`)
+	wantJSONBody(t, w, `{"path":"/Users/a/New","verdict":"move","message":"","current":[{"id":"todo","size":12}],"target":[]}`)
 	if !slices.Equal(f.checked, []string{"/Users/a/New"}) {
 		t.Errorf("checked %v", f.checked)
 	}
@@ -763,7 +794,9 @@ func TestAddAppValidation(t *testing.T) {
 	wantError(t, post(`{"id":"todo"}`), http.StatusBadRequest, "exists")
 	// A range the backend refuses maps to invalid too.
 	wantError(t, post(`{"id":"notes","quota":1}`), http.StatusBadRequest, "invalid")
-	wantError(t, post(`{"id":"notes","maxBytes":1024}`), http.StatusBadRequest, "invalid")
+	// The fields of the store before the files plan are unknown now.
+	wantError(t, post(`{"id":"notes","maxBytes":2097152}`), http.StatusBadRequest, "invalid")
+	wantError(t, post(`{"id":"notes","history":5}`), http.StatusBadRequest, "invalid")
 	wantError(t, post(`{"id":`), http.StatusBadRequest, "invalid")
 	wantError(t, post(`{"id":"notes","colour":"red"}`), http.StatusBadRequest, "invalid")
 	wantError(t, post(`{"id":"notes"} {"id":"more"}`), http.StatusBadRequest, "invalid")
@@ -772,10 +805,8 @@ func TestAddAppValidation(t *testing.T) {
 		t.Fatalf("refused adds reached the backend: %+v", f.added)
 	}
 
-	// The page's form still sends maxBytes, which is the quota, and history,
-	// which is ignored (until stage 4 of the files plan).
-	wantStatus(t, post(`{"id":"notes","name":"Notes","history":5,"maxBytes":2097152}`), http.StatusCreated)
-	wantStatus(t, post(`{"id":"files","quota":3145728,"maxBytes":2097152}`), http.StatusCreated)
+	wantStatus(t, post(`{"id":"notes","name":"Notes","quota":2097152}`), http.StatusCreated)
+	wantStatus(t, post(`{"id":"files","quota":3145728}`), http.StatusCreated)
 	// "Add it?" posts only the id; the registry fills in the defaults.
 	wantStatus(t, post(`{"id":"from-phone"}`), http.StatusCreated)
 	want := []apps.App{{ID: "notes", Name: "Notes", Quota: 2 << 20}, {ID: "files", Quota: 3 << 20}, {ID: "from-phone"}}
@@ -817,45 +848,70 @@ func TestDeleteAppNeedsConfirm(t *testing.T) {
 	wantError(t, del("/api/apps/notes", `{"confirm":"notes"}`), http.StatusInternalServerError, "internal")
 }
 
-func TestDocumentDownload(t *testing.T) {
+// PUT /api/apps/{id} changes the quota, and nothing else: the backend's
+// refusals map to their codes, and a subordinate's to 409 followsMain.
+func TestSetAppQuota(t *testing.T) {
 	f := newFake()
-	f.apps = append(f.apps, AppInfo{App: apps.App{ID: "empty"}})
 	h := newTestHandler(f)
-
-	w := serve(h, request(http.MethodGet, "/api/apps/todo/document", ""))
-	wantStatus(t, w, http.StatusOK)
-	if got := w.Body.String(); got != `{"items":[]}` {
-		t.Errorf("body = %q", got)
-	}
-	want := fmt.Sprintf(`attachment; filename="todo-%s.json"`, testNow.Format("2006-01-02"))
-	if got := w.Header().Get("Content-Disposition"); got != want {
-		t.Errorf("Content-Disposition = %q, want %q", got, want)
-	}
-	if got := w.Header().Get("Content-Type"); got != "application/json" {
-		t.Errorf("Content-Type = %q", got)
-	}
-	if got := w.Header().Get("Cache-Control"); got != "no-store" {
-		t.Errorf("Cache-Control = %q", got)
+	put := func(path, body string) *httptest.ResponseRecorder {
+		return serve(h, request(http.MethodPut, path, body))
 	}
 
-	wantError(t, serve(h, request(http.MethodGet, "/api/apps/empty/document", "")), http.StatusNotFound, "notFound")
-	wantError(t, serve(h, request(http.MethodGet, "/api/apps/none/document", "")), http.StatusNotFound, "notFound")
-	wantError(t, serve(h, request(http.MethodGet, "/api/apps/Bad/document", "")), http.StatusNotFound, "notFound")
+	wantStatus(t, put("/api/apps/todo", `{"quota":2097152}`), http.StatusNoContent)
+	wantStatus(t, put("/api/apps/todo", `{"quota":0}`), http.StatusNoContent)
+	if want := []string{"todo=2097152", "todo=0"}; !slices.Equal(f.quotas, want) {
+		t.Errorf("quotas = %v, want %v", f.quotas, want)
+	}
+
+	f.quotas = nil
+	wantError(t, put("/api/apps/todo", `{}`), http.StatusBadRequest, "invalid")
+	wantError(t, put("/api/apps/todo", `{"quota":"big"}`), http.StatusBadRequest, "invalid")
+	wantError(t, put("/api/apps/todo", `{"quota":1,"name":"x"}`), http.StatusBadRequest, "invalid")
+	wantError(t, put("/api/apps/todo", ""), http.StatusBadRequest, "invalid")
+	wantError(t, put("/api/apps/todo", `{"quota":1}`), http.StatusBadRequest, "invalid")
+	wantError(t, put("/api/apps/none", `{"quota":2097152}`), http.StatusNotFound, "notFound")
+	wantError(t, put("/api/apps/Bad", `{"quota":2097152}`), http.StatusNotFound, "notFound")
+	if len(f.quotas) != 0 {
+		t.Errorf("refused changes reached the backend: %v", f.quotas)
+	}
+
+	f.quotaErr = fmt.Errorf("set the quota: %w", ErrFollowsMain)
+	w := put("/api/apps/todo", `{"quota":2097152}`)
+	wantError(t, w, http.StatusConflict, "followsMain")
+	if !strings.Contains(w.Body.String(), "main") {
+		t.Errorf("the reason is missing: %s", w.Body.String())
+	}
+	f.quotaErr = errors.New("write apps.json: disk full")
+	wantError(t, put("/api/apps/todo", `{"quota":2097152}`), http.StatusInternalServerError, "internal")
 }
 
-// The download is named with the local date, which here is a day after the
-// UTC one.
-func TestDocumentDownloadUsesTheLocalDate(t *testing.T) {
-	saved := time.Local
-	time.Local = time.FixedZone("UTC+10", 10*60*60)
-	t.Cleanup(func() { time.Local = saved })
-	evening := time.Date(2026, 11, 9, 20, 0, 0, 0, time.UTC) // 06:00 on the 10th, local
-	h := newHandler(newFake(), func() int { return testPort }, func() time.Time { return evening }, testUI)
-	w := serve(h, request(http.MethodGet, "/api/apps/todo/document", ""))
-	wantStatus(t, w, http.StatusOK)
-	if got, want := w.Header().Get("Content-Disposition"), `attachment; filename="todo-2026-11-10.json"`; got != want {
-		t.Errorf("Content-Disposition = %q, want %q", got, want)
+// POST /api/apps/{id}/open asks the backend to open the app's folder; an
+// app it does not serve is 404, a failure to open is internal.
+func TestOpenAppFolder(t *testing.T) {
+	f := newFake()
+	h := newTestHandler(f)
+	open := func(path string) *httptest.ResponseRecorder {
+		return serve(h, request(http.MethodPost, path, ""))
 	}
+
+	wantStatus(t, open("/api/apps/todo/open"), http.StatusNoContent)
+	if !slices.Equal(f.opened, []string{"todo"}) {
+		t.Errorf("opened = %v, want [todo]", f.opened)
+	}
+	wantError(t, open("/api/apps/none/open"), http.StatusNotFound, "notFound")
+	wantError(t, open("/api/apps/Bad/open"), http.StatusNotFound, "notFound")
+	wantError(t, open("/api/apps/..%2F..%2Fx/open"), http.StatusNotFound, "notFound")
+	if w := serve(h, request(http.MethodGet, "/api/apps/todo/open", "")); w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET .../open = %d, want 405", w.Code)
+	}
+	// The download of the store before the files plan is gone.
+	wantError(t, serve(h, request(http.MethodGet, "/api/apps/todo/document", "")), http.StatusNotFound, "notFound")
+	if !slices.Equal(f.opened, []string{"todo"}) {
+		t.Errorf("opened = %v after the refusals, want [todo]", f.opened)
+	}
+
+	f.openErr = errors.New("opening a folder is not supported on plan9")
+	wantError(t, open("/api/apps/todo/open"), http.StatusInternalServerError, "internal")
 }
 
 func TestConfig(t *testing.T) {
@@ -963,7 +1019,7 @@ func TestJSONShape(t *testing.T) {
 		}
 	}
 	for path, want := range map[string][]string{
-		"/api/apps":             {"devices", "files", "id", "modified", "name", "quota", "size", "versions"},
+		"/api/apps":             {"devices", "diverged", "files", "folder", "id", "modified", "name", "quota", "size"},
 		"/api/devices":          {"app", "connected", "id", "lastSeen", "name", "pairedAt"},
 		"/api/pairing/refusals": {"app", "at", "device"},
 	} {
@@ -986,6 +1042,19 @@ func TestJSONShape(t *testing.T) {
 	}
 	if got := getList("/api/apps")[0]["modified"]; got != "2026-11-08T10:00:00Z" {
 		t.Errorf("modified = %v, want RFC 3339", got)
+	}
+	if got, ok := getList("/api/apps")[0]["diverged"].([]any); !ok || len(got) != 0 {
+		t.Errorf("diverged with none = %#v, want []", got)
+	}
+	// A divergence names the other server; a sync the quota holds says so.
+	f.apps[0].Diverged = []Divergence{{ServerID: "Lp7tOp0123ab", Name: "Laptop", Since: "2026-11-08T10:00:00Z"}}
+	f.apps[0].Failing = "quota"
+	app := getList("/api/apps")[0]
+	if got, want := keysOf(t, app["diverged"].([]any)[0].(map[string]any)), []string{"name", "serverId", "since"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("a divergence's keys = %v, want %v", got, want)
+	}
+	if app["failing"] != "quota" {
+		t.Errorf("failing = %v, want quota", app["failing"])
 	}
 
 	// Empty lists are [] rather than null, and so are missing addresses.
@@ -1097,8 +1166,8 @@ func readBoot(t *testing.T, page string) pageBoot {
 func TestPageBoot(t *testing.T) {
 	page, csp := getPage(t, newTestHandler(newFake()))
 	boot := readBoot(t, page)
-	if boot.MaxBytes != apps.DefaultQuota {
-		t.Errorf("boot default quota = %d; want %d", boot.MaxBytes, apps.DefaultQuota)
+	if boot.Quota != apps.DefaultQuota {
+		t.Errorf("boot default quota = %d; want %d", boot.Quota, apps.DefaultQuota)
 	}
 	if len(boot.Nonce) < 16 {
 		t.Fatalf("nonce %q is too short", boot.Nonce)
@@ -1151,7 +1220,7 @@ func TestClientIndexIsThePageTemplate(t *testing.T) {
 	if bytes.Contains(src, []byte(" style=")) || bytes.Contains(src, []byte("<style")) {
 		t.Error("index.html has inline styles, which the CSP blocks")
 	}
-	h := newHandler(newFake(), func() int { return testPort }, time.Now, fstest.MapFS{"index.html": {Data: src}})
+	h := newHandler(newFake(), func() int { return testPort }, fstest.MapFS{"index.html": {Data: src}})
 	page, _ := getPage(t, h)
 	readBoot(t, page)
 }
@@ -1159,7 +1228,7 @@ func TestClientIndexIsThePageTemplate(t *testing.T) {
 // A binary built without the page still serves its API, and says how to
 // build the page.
 func TestPageNotBuilt(t *testing.T) {
-	h := newHandler(newFake(), func() int { return testPort }, time.Now, fstest.MapFS{})
+	h := newHandler(newFake(), func() int { return testPort }, fstest.MapFS{})
 	w := serve(h, request(http.MethodGet, "/", ""))
 	wantStatus(t, w, http.StatusServiceUnavailable)
 	if !strings.Contains(w.Body.String(), "pnpm --dir client-wss build") {

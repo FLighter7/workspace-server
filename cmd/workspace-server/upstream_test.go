@@ -67,8 +67,8 @@ func TestTwoServersLinkPullAndPush(t *testing.T) {
 	}
 
 	waitUntil(t, "the pull", func() bool {
-		code, doc := sub.send(t, http.MethodGet, "/api/apps/todo/document", "")
-		return code == http.StatusOK && doc == `{"v":1}`
+		doc, ok := sub.document(t, "todo")
+		return ok && doc == `{"v":1}`
 	})
 	waitUntil(t, "notes on the subordinate", func() bool {
 		_, list := sub.send(t, http.MethodGet, "/api/apps", "")
@@ -84,6 +84,26 @@ func TestTwoServersLinkPullAndPush(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(subDir, "upstream.json")); err != nil {
 		t.Errorf("upstream.json: %v", err)
 	}
+
+	// The quota is the main's: the subordinate's page refuses to change it,
+	// and takes the one set on the main's page.
+	if code, resp := sub.send(t, http.MethodPut, "/api/apps/todo", `{"quota":3145728}`); code != http.StatusConflict || !strings.Contains(resp, `"followsMain"`) {
+		t.Errorf("PUT a quota on the subordinate = %d %s, want 409 followsMain", code, resp)
+	}
+	if code, resp := main.send(t, http.MethodPut, "/api/apps/todo", `{"quota":3145728}`); code != http.StatusNoContent {
+		t.Fatalf("PUT a quota on the main = %d %s", code, resp)
+	}
+	waitUntil(t, "the main's new quota on the subordinate", func() bool {
+		_, list := sub.send(t, http.MethodGet, "/api/apps", "")
+		var apps []web.AppInfo
+		_ = json.Unmarshal([]byte(list), &apps)
+		for _, a := range apps {
+			if a.ID == "todo" {
+				return a.Quota == 3<<20
+			}
+		}
+		return false
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), linkWait)
 	defer cancel()
@@ -129,8 +149,8 @@ func TestTwoServersLinkPullAndPush(t *testing.T) {
 		t.Fatalf("put on the subordinate: %v", err)
 	}
 	waitUntil(t, "the push to the main", func() bool {
-		code, doc := main.send(t, http.MethodGet, "/api/apps/todo/document", "")
-		return code == http.StatusOK && doc == `{"v":2}`
+		doc, ok := main.document(t, "todo")
+		return ok && doc == `{"v":2}`
 	})
 
 	again, _ := json.Marshal(map[string]string{"code": pairing.EncodeCode(c)})
@@ -295,6 +315,16 @@ func TestTwoServersDivergeAndADeviceChooses(t *testing.T) {
 	if code, resp := sub.send(t, http.MethodPost, "/api/upstream/promote", `{}`); code != http.StatusConflict || !strings.Contains(resp, `"diverged"`) {
 		t.Errorf("a planned switch while diverged = %d %s, want 409 diverged", code, resp)
 	}
+	// Each page marks the app, naming the other server: the subordinate's
+	// the main, the main's the subordinate, once it has told the main.
+	mainStatus, subStatus := main.status(t), sub.status(t)
+	if got := appDivergence(t, sub, "todo"); len(got) != 1 || got[0].ServerID != mainStatus.ServerID || got[0].Name != mainStatus.Name || got[0].Since == "" {
+		t.Errorf("the subordinate's page lists todo's divergence as %+v, want the main %s", got, mainStatus.ServerID)
+	}
+	waitUntil(t, "the main's page to mark todo", func() bool {
+		got := appDivergence(t, main, "todo")
+		return len(got) == 1 && got[0].ServerID == subStatus.ServerID && got[0].Name == subStatus.Name
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), linkWait)
 	defer cancel()
@@ -329,6 +359,30 @@ func TestTwoServersDivergeAndADeviceChooses(t *testing.T) {
 		return errors.Is(errMain, os.ErrNotExist) && string(data) == `{"laptop":1}`
 	})
 	waitUntil(t, "the divergence to end", func() bool { return len(sub.upstream(t).Diverged) == 0 })
+	waitUntil(t, "the pages to drop the mark", func() bool {
+		return len(appDivergence(t, sub, "todo")) == 0 && len(appDivergence(t, main, "todo")) == 0
+	})
+}
+
+// appDivergence is what the server's GET /api/apps says of app's
+// divergences.
+func appDivergence(t *testing.T, ts *testServer, app string) []web.Divergence {
+	t.Helper()
+	code, list := ts.send(t, http.MethodGet, "/api/apps", "")
+	var apps []web.AppInfo
+	if code != http.StatusOK || json.Unmarshal([]byte(list), &apps) != nil {
+		t.Fatalf("GET /api/apps = %d %s", code, list)
+	}
+	for _, a := range apps {
+		if a.ID == app {
+			if a.Diverged == nil {
+				t.Fatalf("GET /api/apps gives %s no diverged list: %s", app, list)
+			}
+			return a.Diverged
+		}
+	}
+	t.Fatalf("GET /api/apps lists no %s: %s", app, list)
+	return nil
 }
 
 // pairWith pairs a device of todo with the server whose code c is, and

@@ -14,7 +14,12 @@
 
 				<FactList>
 					<template v-for="(fact, index) in wipe.facts" :key="index">
-						<AppDataFacts v-if="fact.kind === 'apps'" :apps="fact.apps" :download="fact.download" />
+						<AppDataFacts
+							v-if="fact.kind === 'apps'"
+							:apps="fact.apps"
+							:open="fact.open"
+							@open="openFolder"
+						/>
 						<FactItem v-else-if="fact.kind === 'path'" :label="t(fact.label)">
 							<code>{{ fact.path }}</code>
 						</FactItem>
@@ -44,6 +49,7 @@
 <script setup lang="ts">
 import { ref, useId, useTemplateRef, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
+import { serverApi } from '@/api/client';
 import { errorMessage, type Message } from '@/composables/messages';
 import { useFormat } from '@/composables/useFormat';
 import { useReturnFocus } from '@/composables/useReturnFocus';
@@ -51,7 +57,7 @@ import AppDataFacts from './AppDataFacts.vue';
 import FactItem from './FactItem.vue';
 import FactList from './FactList.vue';
 import StatusLine from './StatusLine.vue';
-import type { Wipe } from './wipe';
+import type { AppFactItem, Wipe } from './wipe';
 
 const props = defineProps<{ wipe: Wipe | null }>();
 const open = defineModel<boolean>({ required: true });
@@ -75,6 +81,16 @@ watch(open, (isOpen) => {
 
 function focusCancel(): void {
 	cancel.value?.$el.focus();
+}
+
+/** "Open folder" beside an app, to copy its files before they go. */
+async function openFolder(app: AppFactItem): Promise<void> {
+	try {
+		await serverApi.openFolder(app.id);
+		message.value = { key: 'folderOpened', values: { app: app.name || app.id } };
+	} catch (error) {
+		message.value = errorMessage(error);
+	}
 }
 
 async function run(): Promise<void> {

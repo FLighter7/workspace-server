@@ -44,7 +44,7 @@ test.beforeAll(async () => {
 		})
 		.toBe(true);
 	await expect
-		.poll(async () => sub?.api('GET', '/api/apps/todo/document').catch(() => null), {
+		.poll(() => sub?.document('todo'), {
 			timeout: 20_000,
 		})
 		.toEqual({ v: 1 });
@@ -88,8 +88,8 @@ test('an app the write guard stopped resumes with one button, at once, and stops
 	test.setTimeout(120_000);
 	const { main, sub } = servers();
 	const heldBack = await tripGuard(10);
-	expect(await sub.api('GET', '/api/apps/todo/document')).toEqual(JSON.parse(heldBack));
-	expect(await main.api('GET', '/api/apps/todo/document')).not.toEqual(JSON.parse(heldBack));
+	expect(sub.document('todo')).toEqual(JSON.parse(heldBack));
+	expect(main.document('todo')).not.toEqual(JSON.parse(heldBack));
 
 	const page = await openPage(browser, sub.base, '#server');
 	const section = upstream(page);
@@ -108,9 +108,7 @@ test('an app the write guard stopped resumes with one button, at once, and stops
 	await expect(section.getByRole('heading', { level: 2, name: 'Upstream server' })).toBeFocused();
 	await expect(fact(page, 'Stopped apps')).toHaveCount(0);
 	await expect(fact(page, 'Apps synced')).toHaveText('todo');
-	await expect
-		.poll(async () => main.api('GET', '/api/apps/todo/document'), { timeout: 20_000 })
-		.toEqual(JSON.parse(heldBack));
+	await expect.poll(() => main.document('todo'), { timeout: 20_000 }).toEqual(JSON.parse(heldBack));
 
 	// The guard stays: with the push at the resume, nine more fill a fresh
 	// minute, and the next stops todo again; the page offers Resume again.

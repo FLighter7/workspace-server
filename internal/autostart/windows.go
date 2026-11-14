@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+
+	"golang.org/x/sys/windows"
 )
 
 // Install creates the logon task that runs binary on the server folder dir
@@ -92,4 +94,22 @@ func Uninstall() (removed bool, err error) {
 
 func browserCommand(url string) *exec.Cmd {
 	return exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+}
+
+// openFolder opens path in Explorer through the shell itself
+// (ShellExecuteW, the "open" verb on a folder), with no command line in
+// between that could take the path apart.
+func openFolder(path string) error {
+	verb, err := windows.UTF16PtrFromString("open")
+	if err != nil {
+		return err
+	}
+	file, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	if err := windows.ShellExecute(0, verb, file, nil, nil, windows.SW_SHOWNORMAL); err != nil {
+		return fmt.Errorf("open the folder %s: %w", path, err)
+	}
+	return nil
 }

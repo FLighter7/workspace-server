@@ -10,16 +10,18 @@ import { startPolling } from '../usePolling';
 describe('formatBytes', () => {
 	it.each([
 		[0, 'en', '0 bytes'],
-		[999, 'en', '999 bytes'],
-		[1500, 'en', '1.5 kB'],
-		[67_108_864, 'en', '67.1 MB'],
-		[2_000_000_000_000, 'en', '2,000 GB'],
+		[1023, 'en', '1,023 bytes'],
+		[1536, 'en', '1.5 kB'],
+		[52_428_800, 'en', '50 MB'],
+		[2_147_483_648, 'en', '2 GB'],
+		[1_099_511_627_776, 'en', '1 TB'],
+		[3 * 1_099_511_627_776, 'en', '3 TB'],
 	])('%d in %s is %s', (bytes, lang, want) => {
 		expect(formatBytes(bytes, lang)).toBe(want);
 	});
 
 	it('writes the unit in the language', () => {
-		expect(formatBytes(1500, 'ru')).toMatch(/^1,5\sкБ$/);
+		expect(formatBytes(1536, 'ru')).toMatch(/^1,5\sкБ$/);
 	});
 });
 
@@ -42,6 +44,7 @@ describe('errorMessage', () => {
 		});
 		expect(errorKey(new ApiError('changed', ''))).toBe('errDataChanged');
 		expect(errorKey(new ApiError('network', ''))).toBe('errNetwork');
+		expect(errorKey(new ApiError('followsMain', ''))).toBe('errFollowsMain');
 	});
 
 	it('reads an unknown code, or no ApiError at all, as internal', () => {

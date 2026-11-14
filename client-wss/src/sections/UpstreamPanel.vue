@@ -79,6 +79,20 @@
 						</li>
 					</ul>
 				</FactItem>
+				<FactItem v-if="diverged.length" :label="t('divergedApps')">
+					<ul :class="$style.apps">
+						<li v-for="app in diverged" :key="app">
+							<code>{{ app }}</code>
+						</li>
+					</ul>
+				</FactItem>
+				<FactItem v-if="failing.length" :label="t('failingApps')">
+					<ul :class="$style.apps">
+						<li v-for="app in failing" :key="app">
+							<code>{{ app }}</code>
+						</li>
+					</ul>
+				</FactItem>
 				<FactItem :label="t('admittedDevices')">
 					{{ format.number(upstream.devices ?? 0) }}
 				</FactItem>
@@ -86,6 +100,8 @@
 			<p v-if="stopped.length" :class="$style.note">
 				{{ t(upstream.halted ? 'stoppedAppsHaltedText' : 'stoppedAppsText') }}
 			</p>
+			<p v-if="diverged.length" :class="$style.note">{{ t('divergedAppsText') }}</p>
+			<p v-if="failing.length" :class="$style.note">{{ t('failingAppsText') }}</p>
 			<p v-if="upstream.halted" :class="[$style.note, $style.error]">
 				{{ t(haltedKey(upstream.reason)) }}
 			</p>
@@ -180,8 +196,9 @@ import InviteDialog from './InviteDialog.vue';
  * subordinate. On a main, linking it by the main's pairing code, pasted or
  * scanned, and the servers it waits for after it took the role of main
  * over; on a subordinate, the link's state, resuming an app the write guard
- * stopped, pairing this computer's browser through the main, making this
- * server the main, and unlinking.
+ * stopped, the apps that wait for a device's choice or that the quota holds,
+ * pairing this computer's browser through the main, making this server the
+ * main, and unlinking.
  */
 const { t } = useI18n();
 const format = useFormat();
@@ -198,6 +215,15 @@ const inviteOpen = ref(false);
 const heading = useTemplateRef<HTMLElement>('heading');
 
 const stopped = computed(() => upstream.value?.stopped ?? []);
+/** The apps whose files diverged from the main's, waiting for a device's choice. */
+const diverged = computed(() => upstream.value?.diverged ?? []);
+/** The apps whose sync with the main the quota holds. */
+const failing = computed(() =>
+	Object.entries(upstream.value?.failing ?? {})
+		.filter(([, reason]) => reason === 'quota')
+		.map(([app]) => app)
+		.sort(),
+);
 const waiting = computed(() => upstream.value?.waiting ?? []);
 /** The main stepped down to another one, which this server looks for. */
 const lookingForMain = computed(

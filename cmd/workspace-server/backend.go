@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,7 +14,6 @@ import (
 	"github.com/FLighter7/workspace-server/internal/hub"
 	"github.com/FLighter7/workspace-server/internal/pairing"
 	"github.com/FLighter7/workspace-server/internal/rtc"
-	"github.com/FLighter7/workspace-server/internal/store"
 	"github.com/FLighter7/workspace-server/internal/upstream"
 	"github.com/FLighter7/workspace-server/internal/web"
 )
@@ -148,10 +148,17 @@ func (s *server) Apps() []web.AppInfo {
 	for _, d := range s.devices.List() {
 		counts[d.App]++
 	}
+	link := s.link.Status()
 	list := s.apps.List()
 	out := make([]web.AppInfo, 0, len(list))
 	for _, a := range list {
-		info := web.AppInfo{App: a, Devices: counts[a.ID]}
+		info := web.AppInfo{
+			App:      a,
+			Devices:  counts[a.ID],
+			Folder:   s.appFolder(a.ID),
+			Diverged: s.divergences(a.ID, link),
+			Failing:  link.Failing[a.ID],
+		}
 		// An app whose folder cannot be read shows as empty; the hub
 		// reports the error to its devices.
 		if st, err := s.store.Stats(a.ID); err == nil {
@@ -164,6 +171,60 @@ func (s *server) Apps() []web.AppInfo {
 		out = append(out, info)
 	}
 	return out
+}
+
+// appFolder is the folder of app id's files, under the apps root of the
+// data folder in effect.
+func (s *server) appFolder(id string) string {
+	return filepath.Join(s.dataWSS, storeDir, id)
+}
+
+// divergences names the other server of each divergence of app that waits
+// for a device's choice, as the hub lists them to the app's devices: on a
+// main, its subordinates; on a subordinate, the hub lists this server
+// itself, which the page names by the main it diverged from.
+func (s *server) divergences(app string, link upstream.Status) []web.Divergence {
+	list := s.hub.Divergences(app)
+	out := make([]web.Divergence, 0, len(list))
+	for _, d := range list {
+		div := web.Divergence{ServerID: d.ServerID, Name: d.Name, Since: d.Since}
+		if d.ServerID == s.id.ServerID {
+			div.ServerID, div.Name = link.ServerID, link.Name
+		}
+		out = append(out, div)
+	}
+	return out
+}
+
+// SetQuota sets the app's quota on a main, and tells its subordinates, which
+// take it with the app list. A subordinate refuses: it takes its main's.
+func (s *server) SetQuota(id string, quota int64) error {
+	if s.link.Role() == upstream.RoleSubordinate {
+		return web.ErrFollowsMain
+	}
+	changed, err := s.apps.SetQuota(id, quota)
+	if err != nil {
+		return err
+	}
+	if changed {
+		app, _ := s.apps.Get(id)
+		s.logf("app %q: the quota is now %d bytes", id, app.Quota)
+		s.hub.AppsChanged()
+	}
+	return nil
+}
+
+// OpenFolder shows the app's folder in the system's file manager, making the
+// folder first when the app has no files yet. Only that folder is opened.
+func (s *server) OpenFolder(id string) error {
+	if _, ok := s.apps.Get(id); !ok {
+		return fmt.Errorf("%w: %q", apps.ErrNotFound, id)
+	}
+	dir := s.appFolder(id)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return s.openFolder(dir)
 }
 
 func (s *server) AddApp(a apps.App) error {
@@ -279,19 +340,6 @@ func (s *server) ResumeUpstream(app string) error {
 func (s *server) InviteUpstream(ctx context.Context) (string, time.Time, error) {
 	inv, err := s.link.Invite(ctx)
 	return inv.Code, inv.ExpiresAt, err
-}
-
-// Document returns the document data.json at the app's root, the one todo
-// keeps, for the page's download. Stage 4 of the files plan removes the
-// download.
-func (s *server) Document(id string) ([]byte, bool) {
-	f, _, err := s.store.OpenLatest(id, store.Key{ID: "data", Type: "json"})
-	if err != nil {
-		return nil, false
-	}
-	defer f.Close()
-	body, err := io.ReadAll(f)
-	return body, err == nil
 }
 
 func (s *server) Devices() []web.DeviceInfo {

@@ -383,11 +383,36 @@ func OpenPage(httpPort int, wait time.Duration) (answered, opened bool) {
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	cmd := browserCommand(PageURL(httpPort))
-	if cmd == nil || cmd.Start() != nil {
-		return true, false
+	return true, startOpener(browserCommand(PageURL(httpPort))) == nil
+}
+
+// OpenFolder shows the folder path in the system's file manager: Explorer,
+// Finder, or what xdg-open picks. path must be an absolute path of a folder
+// that exists; nothing else is opened, so no file is ever run. It does not
+// wait for the file manager.
+func OpenFolder(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("open the folder %q: not an absolute path", path)
 	}
-	// Reap the opener when it exits, so it leaves no zombie behind.
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("open the folder: %w", err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("open the folder %s: not a folder", path)
+	}
+	return openFolder(path)
+}
+
+// startOpener starts cmd, an opener such as browserCommand's, and reaps it
+// when it exits, so it leaves no zombie behind.
+func startOpener(cmd *exec.Cmd) error {
+	if cmd == nil {
+		return errors.New("no opener on this system")
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
 	go func() { _ = cmd.Wait() }()
-	return true, true
+	return nil
 }

@@ -559,6 +559,9 @@ type server struct {
 	// replace them.
 	lanAddrs  func() ([]net.IP, error)
 	lanIfaces func() ([]netaddr.Interface, error)
+	// openFolder shows a folder in the system's file manager
+	// (autostart.OpenFolder); tests replace it.
+	openFolder func(path string) error
 
 	mu          sync.Mutex
 	cfg         config.Config // in effect: fileCfg with the flags' ports
@@ -576,11 +579,12 @@ var _ web.Backend = (*server)(nil)
 func newServer(opts serverOptions, logger *log.Logger) (*server, error) {
 	dir := opts.Dir
 	s := &server{
-		cfgPath:   filepath.Join(dir, configFile),
-		logger:    logger,
-		pageLog:   log.New(logger.Writer(), "web: ", logger.Flags()|log.Lmsgprefix),
-		lanAddrs:  netaddr.LANIPv4,
-		lanIfaces: netaddr.LANInterfaces,
+		cfgPath:    filepath.Join(dir, configFile),
+		logger:     logger,
+		pageLog:    log.New(logger.Writer(), "web: ", logger.Flags()|log.Lmsgprefix),
+		lanAddrs:   netaddr.LANIPv4,
+		lanIfaces:  netaddr.LANInterfaces,
+		openFolder: autostart.OpenFolder,
 	}
 
 	id, err := identity.LoadOrCreate(filepath.Join(dir, identityFile))

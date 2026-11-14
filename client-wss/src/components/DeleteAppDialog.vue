@@ -14,10 +14,12 @@
 					<p class="mb-4">{{ t('deleteText') }}</p>
 
 					<FactList>
-						<FactItem :label="t('size')">
-							{{ app.modified ? format.bytes(app.size) : t('noDocument') }}
+						<FactItem :label="t('files')">
+							{{ app.files > 0 ? format.number(app.files) : t('noFiles') }}
 						</FactItem>
-						<FactItem :label="t('versions')">{{ format.number(app.versions) }}</FactItem>
+						<FactItem v-if="app.files > 0" :label="t('used')">
+							{{ format.bytes(app.size) }}
+						</FactItem>
 						<FactItem :label="t('deleteDevices')">
 							<ul v-if="devices.length" :class="s.plain">
 								<li v-for="device in devices" :key="device.id">
@@ -28,10 +30,16 @@
 						</FactItem>
 					</FactList>
 
-					<p class="my-4">
-						<a v-if="app.modified" :href="documentUrl(app.id)" download>{{ t('download') }}</a>
-						<template v-else>{{ t('noDocument') }}</template>
-					</p>
+					<div v-if="app.files > 0" class="my-4">
+						<p class="mb-2">{{ t('deleteCopy') }}</p>
+						<VBtn
+							:aria-label="t('openFolderLabel', { app: app.name })"
+							:loading="opening"
+							@click="openFolder"
+						>
+							{{ t('openFolder') }}
+						</VBtn>
+					</div>
 
 					<!-- The control is the VTextField below, whose input carries inputId: the rule cannot see into it. -->
 					<!-- eslint-disable-next-line vuejs-accessibility/label-has-for -->
@@ -69,7 +77,7 @@
 <script setup lang="ts">
 import { ref, useId, useTemplateRef, watch } from 'vue';
 import { I18nT, useI18n } from 'vue-i18n';
-import { documentUrl, serverApi } from '@/api/client';
+import { serverApi } from '@/api/client';
 import type { AppInfo, DeviceInfo } from '@/api/types';
 import { errorMessage, type Message } from '@/composables/messages';
 import { useFormat } from '@/composables/useFormat';
@@ -94,6 +102,7 @@ const inputId = useId();
 const input = useTemplateRef<{ focus: () => void }>('input');
 const typed = ref('');
 const busy = ref(false);
+const opening = ref(false);
 const message = ref<Message | null>(null);
 
 useReturnFocus(open);
@@ -108,6 +117,20 @@ watch(open, (isOpen) => {
 
 function focusInput(): void {
 	input.value?.focus();
+}
+
+/** "Open folder", to copy the files elsewhere before they go. */
+async function openFolder(): Promise<void> {
+	if (!props.app || opening.value) return;
+	opening.value = true;
+	try {
+		await serverApi.openFolder(props.app.id);
+		message.value = { key: 'folderOpened', values: { app: props.app.name } };
+	} catch (error) {
+		message.value = errorMessage(error);
+	} finally {
+		opening.value = false;
+	}
 }
 
 async function remove(): Promise<void> {

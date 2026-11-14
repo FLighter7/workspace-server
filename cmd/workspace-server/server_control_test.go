@@ -280,8 +280,8 @@ func TestMoveDataToANewFolder(t *testing.T) {
 	if st.LastError != "" {
 		t.Errorf("lastError %q", st.LastError)
 	}
-	if code, body := ts.send(t, http.MethodGet, "/api/apps/todo/document", ""); code != http.StatusOK || body != `{"a":1}` {
-		t.Errorf("the document after the move: %d %q", code, body)
+	if body, ok := ts.document(t, "todo"); !ok || body != `{"a":1}` {
+		t.Errorf("the document after the move: %v %q", ok, body)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "WSS-Data")); !errors.Is(err, os.ErrNotExist) {
 		t.Error("the old WSS-Data folder is still there")
@@ -307,7 +307,7 @@ func TestMoveDataBackToTheServerFolderStoresNoPath(t *testing.T) {
 	if got := readConfig(t, dir).DataDir; got != "" {
 		t.Errorf("config.json dataDir %q, want empty for the server folder", got)
 	}
-	if code, _ := ts.send(t, http.MethodGet, "/api/apps/todo/document", ""); code != http.StatusOK {
+	if _, ok := ts.document(t, "todo"); !ok {
 		t.Error("the document did not come back")
 	}
 }
@@ -327,8 +327,8 @@ func TestAdoptDataListsItsApps(t *testing.T) {
 	if !strings.Contains(body, `"id":"notes"`) || !strings.Contains(body, `"id":"todo"`) {
 		t.Errorf("apps after adopting: %s, want notes added to todo", body)
 	}
-	if code, body := ts.send(t, http.MethodGet, "/api/apps/notes/document", ""); code != http.StatusOK || body != `{"n":1}` {
-		t.Errorf("the adopted document: %d %q", code, body)
+	if body, ok := ts.document(t, "notes"); !ok || body != `{"n":1}` {
+		t.Errorf("the adopted document: %v %q", ok, body)
 	}
 }
 
@@ -374,7 +374,7 @@ func TestMoveDataFailureKeepsTheOldFolder(t *testing.T) {
 	if st.DataDir != filepath.Join(dir, "WSS-Data") || !strings.Contains(st.LastError, "disk full") {
 		t.Errorf("after a failed move: dataDir %q, lastError %q", st.DataDir, st.LastError)
 	}
-	if code, _ := ts.send(t, http.MethodGet, "/api/apps/todo/document", ""); code != http.StatusOK {
+	if _, ok := ts.document(t, "todo"); !ok {
 		t.Error("the document is gone")
 	}
 	if readConfig(t, dir).DataDir != "" {

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -50,6 +49,8 @@ const (
 	codeNotConnected = "notConnected"
 	// codeNotStopped: the write guard has not stopped the app to resume.
 	codeNotStopped = "notStopped"
+	// codeFollowsMain: a subordinate takes the apps' quotas from its main.
+	codeFollowsMain = "followsMain"
 )
 
 const (
@@ -68,8 +69,7 @@ const (
 )
 
 type api struct {
-	b   Backend
-	now func() time.Time
+	b Backend
 }
 
 type errorBody struct {
@@ -240,18 +240,20 @@ func (a *api) listApps(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []AppInfo{}
 	}
+	for i := range list {
+		if list[i].Diverged == nil {
+			list[i].Diverged = []Divergence{}
+		}
+	}
 	writeJSON(w, http.StatusOK, list)
 }
 
-// addAppRequest is an app to add. The page still sends the fields of the
-// store before the files plan: maxBytes stands for the quota and history is
-// ignored, until stage 4 reworks the page's form.
+// addAppRequest is an app to add: a zero quota is the default, a blank
+// name the id.
 type addAppRequest struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Quota    int64  `json:"quota"`
-	MaxBytes int64  `json:"maxBytes"`
-	History  int    `json:"history"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Quota int64  `json:"quota"`
 }
 
 func (a *api) addApp(w http.ResponseWriter, r *http.Request) {
@@ -260,9 +262,6 @@ func (a *api) addApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	app := apps.App{ID: req.ID, Name: req.Name, Quota: req.Quota}
-	if app.Quota == 0 {
-		app.Quota = req.MaxBytes
-	}
 	if !apps.ValidID(app.ID) {
 		writeError(w, http.StatusBadRequest, codeInvalid, fmt.Sprintf("id %q must match ^[a-z0-9-]{1,64}$", app.ID))
 		return
@@ -308,24 +307,58 @@ func (a *api) deleteApp(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// document sends the app's current document as a download named after the
-// app and the day the copy was taken, in the server's local time.
-func (a *api) document(w http.ResponseWriter, r *http.Request) {
+// setAppRequest is the body of PUT /api/apps/{id}: the app's quota in
+// bytes, zero for the default. It is the only field that changes.
+type setAppRequest struct {
+	Quota *int64 `json:"quota"`
+}
+
+// setApp changes an app's quota. A main's subordinates take it with the app
+// list; a subordinate refuses, since it takes its main's.
+func (a *api) setApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !apps.ValidID(id) {
 		notFound(w, "app")
 		return
 	}
-	data, ok := a.b.Document(id)
-	if !ok {
-		notFound(w, "document")
+	var req setAppRequest
+	if !readJSON(w, r, &req) {
 		return
 	}
-	h := w.Header()
-	h.Set("Content-Type", "application/json")
-	h.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-%s.json"`, id, a.now().Local().Format("2006-01-02")))
-	h.Set("Content-Length", strconv.Itoa(len(data)))
-	w.Write(data)
+	if req.Quota == nil {
+		writeError(w, http.StatusBadRequest, codeInvalid, "quota is missing")
+		return
+	}
+	switch err := a.b.SetQuota(id, *req.Quota); {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, apps.ErrNotFound):
+		notFound(w, "app")
+	case errors.Is(err, ErrFollowsMain):
+		writeError(w, http.StatusConflict, codeFollowsMain, err.Error())
+	case errors.Is(err, apps.ErrInvalid):
+		writeError(w, http.StatusBadRequest, codeInvalid, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+	}
+}
+
+// openApp shows the app's folder in the system's file manager, on the
+// computer the server runs on, which is the one the page is open on.
+func (a *api) openApp(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !apps.ValidID(id) {
+		notFound(w, "app")
+		return
+	}
+	switch err := a.b.OpenFolder(id); {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, apps.ErrNotFound):
+		notFound(w, "app")
+	default:
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+	}
 }
 
 func (a *api) listDevices(w http.ResponseWriter, r *http.Request) {

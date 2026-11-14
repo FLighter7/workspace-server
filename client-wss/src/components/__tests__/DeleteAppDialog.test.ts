@@ -8,12 +8,13 @@ import DeleteAppDialog from '../DeleteAppDialog.vue';
 const app: AppInfo = {
 	id: 'notes',
 	name: 'Notes',
-	history: 10,
-	maxBytes: 1024,
+	quota: 52_428_800,
+	files: 3,
 	size: 2048,
 	modified: '2026-11-10T12:00:00Z',
-	versions: 3,
 	devices: 1,
+	folder: '/data/WSS-Data/apps/notes',
+	diverged: [],
 };
 
 afterEach(() => {
@@ -46,16 +47,23 @@ const confirmButton = (): HTMLButtonElement =>
 const input = (): HTMLInputElement => document.querySelector('input') as HTMLInputElement;
 
 describe('DeleteAppDialog', () => {
-	it('shows what goes, with the download, and asks for the id', async () => {
+	it('shows what goes, offers to open the folder first, and asks for the id', async () => {
+		const openFolder = vi.spyOn(serverApi, 'openFolder').mockResolvedValue(null);
 		open();
 		await settle();
 		const text = document.body.textContent ?? '';
 		expect(text).toContain('Delete Notes?');
+		expect(text).toContain('all its files');
 		expect(text).toContain('Phone');
-		expect(document.querySelector('a[download]')?.getAttribute('href')).toBe(
-			'/api/apps/notes/document',
-		);
+		expect(text).toContain('2 kB');
+		expect(text).toContain('To keep a copy, open the app');
 		expect(text).toContain('To confirm, type notes');
+		expect(document.querySelector('a[download]')).toBeNull();
+
+		(document.querySelector('button[aria-label="Open folder of Notes"]') as HTMLElement).click();
+		await settle();
+		expect(openFolder).toHaveBeenCalledWith('notes');
+		expect(document.body.textContent).toContain('The folder of Notes opens in the file manager.');
 	});
 
 	it('deletes only once the typed id matches', async () => {

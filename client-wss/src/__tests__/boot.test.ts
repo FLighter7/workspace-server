@@ -16,10 +16,9 @@ function page(block: string | null): Document {
 
 describe('readBoot', () => {
 	it('reads what the server wrote', () => {
-		expect(readBoot(page('{"nonce":"abc","history":5,"maxBytes":2048}'))).toEqual({
+		expect(readBoot(page('{"nonce":"abc","quota":2097152}'))).toEqual({
 			nonce: 'abc',
-			history: 5,
-			maxBytes: 2048,
+			quota: 2_097_152,
 		});
 	});
 
@@ -29,9 +28,7 @@ describe('readBoot', () => {
 	});
 
 	it('takes only fields of the right type', () => {
-		expect(readBoot(page('{"nonce":1,"history":"5","maxBytes":2048}'))).toEqual({
-			...DEV_BOOT,
-			maxBytes: 2048,
-		});
+		expect(readBoot(page('{"nonce":1,"quota":2048}'))).toEqual({ ...DEV_BOOT, quota: 2048 });
+		expect(readBoot(page('{"nonce":"n","quota":"50"}'))).toEqual({ ...DEV_BOOT, nonce: 'n' });
 	});
 });

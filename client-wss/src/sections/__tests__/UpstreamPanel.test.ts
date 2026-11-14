@@ -235,7 +235,7 @@ describe('UpstreamPanel making this server the main', () => {
 		await settle();
 		button('Make it the main', dialog()).click();
 		await settle();
-		expect(text()).toContain('The documents are not yet the same on this server and the main.');
+		expect(text()).toContain('The files are not yet the same on this server and the main.');
 	});
 
 	it('says when an app diverged from the main', async () => {
@@ -347,6 +347,24 @@ describe('UpstreamPanel on a subordinate', () => {
 		resumeButton('todo')?.click();
 		await settle();
 		expect(text()).toContain('The main removed this server. Unlink it;');
+	});
+
+	it('lists the apps waiting for a choice and those the quota holds, saying what to do', async () => {
+		upstream.mockResolvedValue({
+			...linked,
+			apps: ['notes'],
+			diverged: ['todo'],
+			failing: { photos: 'quota', other: 'something' },
+		});
+		mountPage(Page);
+		await settle();
+		expect(text()).toContain('Waiting for a choice');
+		expect(text()).toContain('until you choose on a device which copy to keep');
+		expect(text()).toContain('Held by the quota');
+		expect(text()).toContain("Raise the quota on the main's page");
+		const listed = [...document.querySelectorAll('dd code')].map((c) => c.textContent);
+		// The main's id, then the apps synced, waiting and held.
+		expect(listed).toEqual(['MainServer01', 'notes', 'todo', 'photos']);
 	});
 
 	it('says that a main out of reach is retried', async () => {

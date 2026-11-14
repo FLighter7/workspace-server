@@ -44,7 +44,7 @@ test.beforeAll(async () => {
 		})
 		.toBe(true);
 	await expect
-		.poll(async () => laptop?.api('GET', '/api/apps/todo/document').catch(() => null), {
+		.poll(() => laptop?.document('todo'), {
 			timeout: 20_000,
 		})
 		.toEqual({ v: 1 });
@@ -87,7 +87,7 @@ test('the laptop becomes the main from its page, after a question; the desk foll
 
 	await make.click();
 	const dialog = page.getByRole('dialog', { name: 'Make this server the main?' });
-	await expect(dialog).toContainText('The documents are made the same on both servers first.');
+	await expect(dialog).toContainText('The files are made the same on both servers first.');
 	await expect(dialog).toContainText('Devices follow by themselves, without pairing again.');
 	await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
 	await dialog.getByRole('button', { name: 'Cancel' }).click();
@@ -102,7 +102,7 @@ test('the laptop becomes the main from its page, after a question; the desk foll
 	await expect(section.getByRole('heading', { level: 2, name: 'Upstream server' })).toBeFocused();
 	await expect(section).toContainText('This server is a main');
 	await expect.poll(() => follows(desk, laptop, 1), { timeout: 20_000 }).toBe(true);
-	expect(await desk.api('GET', '/api/apps/todo/document')).toEqual({ v: 1 });
+	expect(desk.document('todo')).toEqual({ v: 1 });
 
 	// The desk's page shows the laptop as its main now.
 	const deskPage = await openPage(browser, desk.base, '#server');

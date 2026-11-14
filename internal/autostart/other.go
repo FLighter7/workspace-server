@@ -23,3 +23,7 @@ func errUnsupported() error {
 }
 
 func browserCommand(url string) *exec.Cmd { return nil }
+
+func openFolder(path string) error {
+	return fmt.Errorf("opening a folder is not supported on %s", runtime.GOOS)
+}

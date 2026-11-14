@@ -6,7 +6,7 @@ export type AppFactItem = AppData & { name?: string; modified?: string | null };
 
 /** One fact in the wipe dialog: what the action moves or deletes. */
 export type WipeFact =
-	| { kind: 'apps'; apps: AppFactItem[]; download: boolean }
+	| { kind: 'apps'; apps: AppFactItem[]; open: boolean }
 	| { kind: 'path'; label: MessageKey; path: string }
 	| { kind: 'count'; label: MessageKey; value: number };
 

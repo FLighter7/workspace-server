@@ -102,7 +102,7 @@ describe('ServerSection: changing the data folder', () => {
 		const setDataDir = vi.spyOn(serverApi, 'setDataDir');
 		mountPage(ServerSection);
 		await settle();
-		await changeTo(check('adopt', { target: [{ id: 'todo', size: 1500, versions: 2 }] }));
+		await changeTo(check('adopt', { target: [{ id: 'todo', size: 1500 }] }));
 
 		const dialog = document.querySelector('[role="dialog"]');
 		expect(dialog?.textContent).toContain('Use the data in this folder?');
@@ -125,7 +125,7 @@ describe('ServerSection: changing the data folder', () => {
 		const setDataDir = vi.spyOn(serverApi, 'setDataDir');
 		mountPage(ServerSection);
 		await settle();
-		await changeTo(check('move', { current: [{ id: 'todo', size: 10, versions: 0 }] }));
+		await changeTo(check('move', { current: [{ id: 'todo', size: 10 }] }));
 
 		expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Move the data?');
 		expect(setDataDir).not.toHaveBeenCalled();

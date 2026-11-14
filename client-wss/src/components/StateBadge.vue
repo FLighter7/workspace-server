@@ -22,6 +22,10 @@
 	color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
 }
 
+.warning {
+	color: rgb(var(--v-theme-warning));
+}
+
 .error {
 	color: rgb(var(--v-theme-error));
 }
@@ -32,5 +36,5 @@
 </template>
 
 <script setup lang="ts">
-defineProps<{ tone: 'on' | 'off' | 'error' }>();
+defineProps<{ tone: 'on' | 'off' | 'warning' | 'error' }>();
 </script>

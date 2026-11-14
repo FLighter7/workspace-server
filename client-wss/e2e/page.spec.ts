@@ -80,12 +80,18 @@ test('an app is added and deleted', async ({ browser }) => {
 	).toBeVisible();
 	await page.getByLabel('ID', { exact: true }).fill('notes');
 	await page.getByLabel('Name', { exact: true }).fill('My notes');
+	// The quota in MB, 50 by default; nothing about versions any more.
+	await expect(page.getByLabel('Quota, in MB')).toHaveValue('50');
+	await page.getByLabel('Quota, in MB').fill('2');
+	await expect(page.getByText(/version/i)).toHaveCount(0);
 	await page.getByRole('button', { name: 'Add', exact: true }).click();
 	await expect(page.getByRole('status').filter({ hasText: 'Added.' })).toBeVisible();
 	const card = page.getByRole('listitem').filter({
 		has: page.getByRole('heading', { name: 'My notes notes' }),
 	});
 	await expect(card).toBeVisible();
+	await expect(card).toContainText('0 bytes of 2 MB');
+	await expect(card).toContainText('No files yet');
 
 	await card.getByRole('button', { name: 'Delete', exact: true }).click();
 	const dialog = page.getByRole('dialog', { name: 'Delete My notes?' });

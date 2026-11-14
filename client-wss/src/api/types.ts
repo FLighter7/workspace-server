@@ -36,11 +36,10 @@ export interface ConfigChange {
 export type DataDirVerdict =
 	'same' | 'create' | 'move' | 'switch' | 'adopt' | 'conflict' | 'unavailable';
 
-/** An app's data in a data folder. */
+/** An app's data in a data folder: the bytes of its files. */
 export interface AppData {
 	id: string;
 	size: number;
-	versions: number;
 }
 
 /** GET /api/data-dir: what changing the data folder to path would do. */
@@ -58,22 +57,38 @@ export interface DataDirCheck {
 export interface AppInfo {
 	id: string;
 	name: string;
-	history: number;
-	maxBytes: number;
-	/** Bytes of the current document; 0 when there is none. */
+	/** The most bytes the app's files may take together. */
+	quota: number;
+	/** The app's files. */
+	files: number;
+	/** Bytes of the app's files, against its quota. */
 	size: number;
-	/** The last write; null when there is no document. */
+	/** The last write; null when there was none. */
 	modified: string | null;
-	versions: number;
 	devices: number;
+	/** The app's folder, which POST /api/apps/{id}/open opens. */
+	folder: string;
+	/**
+	 * The other server of each divergence that waits for a device's choice: on
+	 * a main, each subordinate whose copy diverged; on a subordinate, its main.
+	 */
+	diverged: Divergence[];
+	/** On a subordinate, why the app's sync with the main keeps failing: "quota". */
+	failing?: string;
 }
 
-/** POST /api/apps. */
+/** The other server of a divergence, and since when (RFC 3339). */
+export interface Divergence {
+	serverId: string;
+	name: string;
+	since: string;
+}
+
+/** POST /api/apps; a missing quota is the default. */
 export interface NewApp {
 	id: string;
 	name?: string;
-	history?: number;
-	maxBytes?: number;
+	quota?: number;
 }
 
 /** GET /api/devices: one paired device. */
@@ -134,6 +149,10 @@ export interface UpstreamStatus {
 	apps: string[];
 	/** The apps the write guard stopped until they are resumed or the server starts again. */
 	stopped?: string[];
+	/** The apps whose files diverged from the main's and wait for a device's choice. */
+	diverged?: string[];
+	/** Per app, why its sync with the main keeps failing: "quota". */
+	failing?: Record<string, string>;
 	/** The main's devices this server admits. */
 	devices?: number;
 	/** The servers linked to this one: a main with any does not link. */

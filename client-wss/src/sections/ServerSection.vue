@@ -302,7 +302,7 @@ async function changeDataDir(): Promise<void> {
 				text: 'adoptText',
 				ok: 'adoptOk',
 				danger: false,
-				facts: [folder, { kind: 'apps', apps: check.target, download: false }],
+				facts: [folder, { kind: 'apps', apps: check.target, open: false }],
 				action: apply,
 			});
 			return;
@@ -314,7 +314,7 @@ async function changeDataDir(): Promise<void> {
 					text: 'moveText',
 					ok: 'moveOk',
 					danger: false,
-					facts: [folder, { kind: 'apps', apps: check.current, download: false }],
+					facts: [folder, { kind: 'apps', apps: check.current, open: false }],
 					action: apply,
 				});
 				return;
@@ -346,7 +346,7 @@ async function wipeFacts(withFolders: boolean): Promise<{ status: Status; facts:
 		serverApi.devices(),
 	]);
 	const facts: WipeFact[] = [
-		{ kind: 'apps', apps, download: true },
+		{ kind: 'apps', apps, open: true },
 		{ kind: 'count', label: 'devicesFact', value: devices.length },
 	];
 	if (withFolders) {

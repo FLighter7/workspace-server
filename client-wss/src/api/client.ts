@@ -75,9 +75,6 @@ export async function request<T>(method: string, path: string, body?: unknown): 
 
 const app = (id: string): string => `/api/apps/${encodeURIComponent(id)}`;
 
-/** Where the app's current document downloads from. */
-export const documentUrl = (id: string): string => `${app(id)}/document`;
-
 export const serverApi = {
 	status: () => request<Status>('GET', '/api/status'),
 	setConfig: (change: ConfigChange) => request<null>('PUT', '/api/config', change),
@@ -93,6 +90,10 @@ export const serverApi = {
 	apps: () => request<AppInfo[]>('GET', '/api/apps'),
 	addApp: (newApp: NewApp) => request<null>('POST', '/api/apps', newApp),
 	deleteApp: (id: string, confirm: string) => request<null>('DELETE', app(id), { confirm }),
+	/** Sets the app's quota in bytes; a subordinate refuses with "followsMain". */
+	setQuota: (id: string, quota: number) => request<null>('PUT', app(id), { quota }),
+	/** Opens the app's folder in the file manager of the computer the server runs on. */
+	openFolder: (id: string) => request<null>('POST', `${app(id)}/open`),
 
 	devices: () => request<DeviceInfo[]>('GET', '/api/devices'),
 	removeDevice: (id: string) => request<null>('DELETE', `/api/devices/${encodeURIComponent(id)}`),

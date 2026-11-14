@@ -55,12 +55,9 @@ type DataDirCheck struct {
 }
 
 // AppData is an app's data in a data folder: the bytes of its files.
-// Versions is always 0 since the store keeps no history; the page still
-// reads it until stage 4 of the files plan reworks the page.
 type AppData struct {
-	ID       string `json:"id"`
-	Size     int64  `json:"size"`
-	Versions int    `json:"versions"`
+	ID   string `json:"id"`
+	Size int64  `json:"size"`
 }
 
 // SetDataDir's errors, which the page shows differently.
@@ -84,6 +81,9 @@ var (
 	// ErrNotConnected: the server is linked to this one but not connected
 	// now.
 	ErrNotConnected = errors.New("that server is not connected to this one now")
+	// ErrFollowsMain: a subordinate takes the apps' quotas from its main,
+	// so they are changed on the main's page.
+	ErrFollowsMain = errors.New("this server is linked to a main server, which sets the apps' quotas: change it on the main's page")
 )
 
 // AppInfo is a served app and the state of its data.
@@ -92,8 +92,24 @@ type AppInfo struct {
 	Files    int        `json:"files"`    // the app's documents
 	Size     int64      `json:"size"`     // bytes of the app's documents, against its quota
 	Modified *time.Time `json:"modified"` // the last change; nil when there was none
-	Versions int        `json:"versions"` // always 0: no history; the page drops it in stage 4
 	Devices  int        `json:"devices"`  // devices paired with the app
+	Folder   string     `json:"folder"`   // the app's folder, which POST /api/apps/{id}/open opens
+	// Diverged lists the other server of each divergence of the app that
+	// waits for a device's choice: on a main, each subordinate whose copy
+	// diverged from this one's; on a subordinate, its main. Never nil.
+	Diverged []Divergence `json:"diverged"`
+	// Failing says why the app's sync with the main keeps failing, on a
+	// subordinate: "quota" when its files would take this server or the
+	// main past the app's quota. "" when it does not.
+	Failing string `json:"failing,omitempty"`
+}
+
+// Divergence names the other server of a divergence, as the page shows it:
+// since is when it began (RFC 3339 UTC, as the protocol carries it).
+type Divergence struct {
+	ServerID string `json:"serverId"`
+	Name     string `json:"name"`
+	Since    string `json:"since"`
 }
 
 // DeviceInfo is one paired device. A server-kind device (a subordinate
@@ -141,9 +157,14 @@ type Backend interface {
 	// DeleteApp removes the app, its folder and its devices, closing their
 	// sessions. An unknown app is an error wrapping apps.ErrNotFound.
 	DeleteApp(id string) error
-	// Document returns the app's current document, or false when there is
-	// none.
-	Document(id string) ([]byte, bool)
+	// SetQuota sets the app's quota; zero is the default. Its errors wrap
+	// apps.ErrNotFound, apps.ErrInvalid (out of range) or ErrFollowsMain
+	// (on a subordinate, which takes the main's), or are internal.
+	SetQuota(id string, quota int64) error
+	// OpenFolder shows the app's folder in the system's file manager,
+	// creating it if it is missing. It runs nothing else. An unknown app is
+	// an error wrapping apps.ErrNotFound; any other error is internal.
+	OpenFolder(id string) error
 	Devices() []DeviceInfo
 	// RemoveDevice removes the device and closes its session. It reports
 	// false when there is no such device.
@@ -233,13 +254,13 @@ func builtPage() fs.FS {
 // page is served on; it is read on every request, since the port can change
 // while the server runs.
 func NewHandler(b Backend, port func() int) http.Handler {
-	return newHandler(b, port, time.Now, builtPage())
+	return newHandler(b, port, builtPage())
 }
 
 // newHandler serves the page from ui: index.html at its root, the files it
 // loads under assets/.
-func newHandler(b Backend, port func() int, now func() time.Time, ui fs.FS) http.Handler {
-	a := &api{b: b, now: now}
+func newHandler(b Backend, port func() int, ui fs.FS) http.Handler {
+	a := &api{b: b}
 	p := newPage(ui)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", p.serve)
@@ -248,8 +269,9 @@ func newHandler(b Backend, port func() int, now func() time.Time, ui fs.FS) http
 	mux.HandleFunc("PUT /api/config", a.setConfig)
 	mux.HandleFunc("GET /api/apps", a.listApps)
 	mux.HandleFunc("POST /api/apps", a.addApp)
+	mux.HandleFunc("PUT /api/apps/{id}", a.setApp)
 	mux.HandleFunc("DELETE /api/apps/{id}", a.deleteApp)
-	mux.HandleFunc("GET /api/apps/{id}/document", a.document)
+	mux.HandleFunc("POST /api/apps/{id}/open", a.openApp)
 	mux.HandleFunc("GET /api/devices", a.listDevices)
 	mux.HandleFunc("DELETE /api/devices/{id}", a.removeDevice)
 	mux.HandleFunc("POST /api/pairing", a.issuePairing)
@@ -331,9 +353,8 @@ type pageBoot struct {
 	// Nonce lets Vuetify's theme stylesheet past the CSP; a new one on every
 	// request.
 	Nonce string `json:"nonce"`
-	// MaxBytes is the add form's default quota, under the page's old name
-	// until stage 4 of the files plan reworks the form.
-	MaxBytes int64 `json:"maxBytes"`
+	// Quota is the add form's default quota, apps.DefaultQuota.
+	Quota int64 `json:"quota"`
 }
 
 // pageData is what index.html's template reads: {{.Boot}} in a
@@ -387,7 +408,7 @@ func (p *page) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	var buf bytes.Buffer
 	err = p.tmpl.Execute(&buf, pageData{Boot: pageBoot{
-		Nonce: nonce, MaxBytes: apps.DefaultQuota,
+		Nonce: nonce, Quota: apps.DefaultQuota,
 	}})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, codeInternal, "page: "+err.Error())

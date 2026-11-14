@@ -158,13 +158,13 @@ export class Server {
 		return code;
 	}
 
-	/** The app's document as text, `null` when there is none. */
+	/** The app's document `data.json` as text, read from the server's data folder; `null` when there is none. */
 	async document(app: string): Promise<string | null> {
-		const response = await fetch(`http://127.0.0.1:${this.httpPort}/api/apps/${app}/document`, {
-			headers: { 'X-Workspace-Server': '1' },
-		});
-
-		return response.ok ? response.text() : null;
+		try {
+			return readFileSync(join(this.dir, 'WSS-Data', 'apps', app, 'data.json'), 'utf8');
+		} catch {
+			return null;
+		}
 	}
 }
 

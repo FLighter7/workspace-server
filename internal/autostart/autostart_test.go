@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -502,5 +503,21 @@ func TestTaskInList(t *testing.T) {
 				t.Errorf("taskInList = %v, want %v for\n%s", got, c.want, c.list)
 			}
 		})
+	}
+}
+
+// OpenFolder opens only an absolute path of a folder that exists: a relative
+// path, a file or a missing path never reaches the file manager. (Opening a
+// real folder would open a window, so no test does.)
+func TestOpenFolderRefusesAnythingButAFolder(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "run.cmd")
+	if err := os.WriteFile(file, []byte("echo hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"apps", filepath.Join("..", "apps"), file, filepath.Join(dir, "missing"), ""} {
+		if err := OpenFolder(path); err == nil {
+			t.Errorf("OpenFolder(%q) succeeded", path)
+		}
 	}
 }
