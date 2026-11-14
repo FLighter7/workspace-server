@@ -201,6 +201,22 @@ export class Server {
 		return createHash('sha256').update(lines.sort().join('')).digest('hex');
 	}
 
+	/**
+	 * The main this server, as a subordinate, last agreed the app's set with
+	 * (its `.wss/link.json` holds a base agreed with that server id); `null`
+	 * before a first link sync of the app with any main.
+	 */
+	agreedWith(app: string): string | null {
+		try {
+			const link = JSON.parse(
+				readFileSync(join(this.dir, 'WSS-Data', 'apps', app, '.wss', 'link.json'), 'utf8'),
+			) as { serverId?: string; base?: unknown };
+			return link.base && typeof link.serverId === 'string' ? link.serverId : null;
+		} catch {
+			return null;
+		}
+	}
+
 	/** A file of the app's set, `<path>/<id>.<type>`, as bytes; `null` when there is none. */
 	file(app: string, name: string): Buffer | null {
 		try {

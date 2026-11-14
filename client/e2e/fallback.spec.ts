@@ -141,6 +141,8 @@ test('edits on both sides while the two servers cannot meet converge', async () 
 		.toEqual([{ serverId: laptopId, name: 'Laptop', since: expect.any(String), mainName: 'Desk' }]);
 	expect(await b.evaluate((id) => window.device.resolve(id, 'main'), laptopId)).toBe('resolved');
 	expect(await b.evaluate(() => window.device.state.diverged)).toEqual([]);
+	// The engine's answer on the main reached the laptop, which carried it out.
+	await expect.poll(() => divergedOn(laptop), { timeout: 20_000 }).toEqual([]);
 	await reconnect(a);
 	const all = ['a', 'away', 'b', 'desk-side', 'laptop-side'];
 	await expect.poll(() => notesOn(main), { timeout: 30_000 }).toEqual(all);

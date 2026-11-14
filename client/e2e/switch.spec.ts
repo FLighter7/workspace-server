@@ -147,6 +147,11 @@ test('and after a forced switch, with the old main gone for good', async () => {
 		.poll(async () => (await pairingOf(a)).serverId, { timeout: 60_000 })
 		.toBe(await serverIdOf(tablet));
 	expect((await pairingOf(a)).term).toBe(2);
+	// The desk's first link with the tablet compares the two copies of the
+	// app; a write that reached the tablet before it would make them differ,
+	// a divergence for a device to settle. Write once they agreed.
+	const tabletId = await serverIdOf(tablet);
+	await expect.poll(() => desk.agreedWith('todo'), { timeout: 30_000 }).toBe(tabletId);
 	await add(a, 'after-forced');
 	for (const server of [tablet, desk]) {
 		await expect
