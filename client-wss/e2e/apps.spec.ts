@@ -130,7 +130,7 @@ test("the quota is changed on the main's page, and the laptop follows it, read-o
 	const change = card.getByRole('button', { name: 'Change the quota of Todo' });
 	await change.click();
 	const dialog = desk.getByRole('dialog', { name: 'The quota of Todo' });
-	const field = dialog.getByLabel('Quota, in MB');
+	const field = dialog.getByLabel('Quota', { exact: true });
 	await expect(field).toBeFocused();
 	await expect(field).toHaveValue('50');
 	await field.fill('0');
@@ -167,7 +167,7 @@ test("the quota is changed on the main's page, and the laptop follows it, read-o
 	await expect(subCard.getByRole('button', { name: /Change the quota/ })).toHaveCount(0);
 	// A new app takes a quota of its own, until the main serves it too.
 	await laptop.getByRole('button', { name: 'Add an app' }).click();
-	await expect(laptop.getByLabel('Quota, in MB')).toHaveValue('50');
+	await expect(laptop.getByLabel('Quota', { exact: true })).toHaveValue('50');
 	await expect(laptop.getByText("the main's quota replaces it")).toBeVisible();
 	await expectNoCspViolations(laptop);
 	await laptop.context().close();

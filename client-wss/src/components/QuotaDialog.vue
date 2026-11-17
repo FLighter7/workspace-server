@@ -20,6 +20,7 @@
 						type="number"
 						inputmode="numeric"
 						:label="t('quotaField')"
+						:suffix="t('quotaUnit')"
 						:hint="t('quotaHint')"
 						persistent-hint
 						:rules="[quotaRule]"

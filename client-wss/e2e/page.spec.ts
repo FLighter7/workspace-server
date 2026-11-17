@@ -87,8 +87,8 @@ test('an app is added and deleted', async ({ browser }) => {
 	await idField.fill('notes');
 	await page.getByLabel('Name', { exact: true }).fill('My notes');
 	// The quota in MB, 50 by default; nothing about versions any more.
-	await expect(page.getByLabel('Quota, in MB')).toHaveValue('50');
-	await page.getByLabel('Quota, in MB').fill('2');
+	await expect(page.getByLabel('Quota', { exact: true })).toHaveValue('50');
+	await page.getByLabel('Quota', { exact: true }).fill('2');
 	await expect(page.getByText(/version/i)).toHaveCount(0);
 	await form.getByRole('button', { name: 'Add', exact: true }).click();
 	await expect(form).toBeHidden();

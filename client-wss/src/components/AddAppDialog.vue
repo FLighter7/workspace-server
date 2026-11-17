@@ -46,6 +46,7 @@
 						type="number"
 						inputmode="numeric"
 						:label="t('quotaField')"
+						:suffix="t('quotaUnit')"
 						:hint="t(linked ? 'quotaAddLinkedHint' : 'quotaAddHint')"
 						persistent-hint
 						:rules="[quotaRule]"
