@@ -226,6 +226,34 @@ describe('AppsSection on a main', () => {
 		expect(addApp).not.toHaveBeenCalled();
 	});
 
+	it('does not let a character an ID cannot hold into its field', async () => {
+		mountPage(AppsSection);
+		await settle();
+		await openAddDialog();
+		const id = document.querySelector('form input') as HTMLInputElement;
+		const type = (data: string): InputEvent => {
+			const event = new InputEvent('beforeinput', {
+				data,
+				inputType: 'insertText',
+				bubbles: true,
+				cancelable: true,
+			});
+			id.dispatchEvent(event);
+			return event;
+		};
+
+		expect(type('a').defaultPrevented).toBe(false);
+		expect(type('A').defaultPrevented).toBe(true);
+		expect(type('_').defaultPrevented).toBe(true);
+		expect(type(' ').defaultPrevented).toBe(true);
+
+		// A pasted text keeps what an ID can hold.
+		id.value = '';
+		expect(type('My_App 2').defaultPrevented).toBe(true);
+		await settle();
+		expect(id.value).toBe('ypp2');
+	});
+
 	it('adds an app with its quota in bytes', async () => {
 		const addApp = vi.spyOn(serverApi, 'addApp').mockResolvedValue(null);
 		mountPage(AppsSection);

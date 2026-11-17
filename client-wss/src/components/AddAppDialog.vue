@@ -18,11 +18,12 @@
 						:label="t('appId')"
 						:hint="t('appIdHint')"
 						persistent-hint
-						maxlength="64"
+						:maxlength="ID_MAX_LENGTH"
 						:rules="[idRule]"
 						autocomplete="off"
 						autocapitalize="none"
 						spellcheck="false"
+						@beforeinput="keepIdTyped"
 					/>
 					<VTextField
 						v-model="name"
@@ -58,7 +59,7 @@ import { nextTick, ref, useId, useTemplateRef, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import type { VForm } from 'vuetify/components';
 import { serverApi } from '@/api/client';
-import { ID_PATTERN, RESERVED_ID } from '@/api/ids';
+import { ID_MAX_LENGTH, ID_PATTERN, keepIdChars, RESERVED_ID } from '@/api/ids';
 import type { NewApp } from '@/api/types';
 import { boot } from '@/boot';
 import { errorMessage, type Message } from '@/composables/messages';
@@ -105,6 +106,27 @@ watch(open, async (isOpen) => {
 
 function focusInput(): void {
 	input.value?.focus();
+}
+
+/**
+ * Typing, pasting or dropping into the ID field: a character an ID cannot hold
+ * never lands in it. A pasted text keeps what an ID can hold, up to the room
+ * left; the rules below still catch what gets in some other way (autofill).
+ */
+function keepIdTyped(event: InputEvent): void {
+	if (!event.inputType.startsWith('insert')) return;
+	const text = event.data ?? event.dataTransfer?.getData('text/plain') ?? '';
+	const kept = keepIdChars(text);
+	if (kept === text) return;
+
+	event.preventDefault();
+	const field = event.target as HTMLInputElement;
+	const start = field.selectionStart ?? field.value.length;
+	const end = field.selectionEnd ?? start;
+	const room = ID_MAX_LENGTH - (field.value.length - (end - start));
+	if (kept === '' || room <= 0) return;
+	field.setRangeText(kept.slice(0, room), start, end, 'end');
+	field.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
 /** The id being typed, against the pattern and the ids in use; the server checks again. */

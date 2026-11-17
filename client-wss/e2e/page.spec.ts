@@ -78,11 +78,12 @@ test('an app is added and deleted', async ({ browser }) => {
 	await expect(form.getByLabel('ID', { exact: true })).toBeFocused();
 	await page.getByLabel('ID', { exact: true }).fill('todo');
 	await expect(page.getByText('An app with this ID already exists.')).toBeVisible();
-	await page.getByLabel('ID', { exact: true }).fill('Bad ID');
-	await expect(
-		page.getByText('Use only lowercase Latin letters, digits and hyphens, 1 to 64 of them.'),
-	).toBeVisible();
-	await page.getByLabel('ID', { exact: true }).fill('notes');
+	// A character an ID cannot hold never lands in the field.
+	const idField = page.getByLabel('ID', { exact: true });
+	await idField.fill('');
+	await idField.pressSequentially('Ab_c 1-d');
+	await expect(idField).toHaveValue('bc1-d');
+	await idField.fill('notes');
 	await page.getByLabel('Name', { exact: true }).fill('My notes');
 	// The quota in MB, 50 by default; nothing about versions any more.
 	await expect(page.getByLabel('Quota, in MB')).toHaveValue('50');
