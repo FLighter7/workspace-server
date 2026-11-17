@@ -226,7 +226,7 @@ describe('AppsSection on a main', () => {
 		expect(addApp).not.toHaveBeenCalled();
 	});
 
-	it('does not let a character an ID cannot hold into its field', async () => {
+	it('lowercases what goes into the ID field, and keeps out what an ID cannot hold', async () => {
 		mountPage(AppsSection);
 		await settle();
 		await openAddDialog();
@@ -243,15 +243,20 @@ describe('AppsSection on a main', () => {
 		};
 
 		expect(type('a').defaultPrevented).toBe(false);
-		expect(type('A').defaultPrevented).toBe(true);
 		expect(type('_').defaultPrevented).toBe(true);
 		expect(type(' ').defaultPrevented).toBe(true);
+		expect(id.value).toBe('');
+
+		// A capital letter lands as a small one.
+		expect(type('A').defaultPrevented).toBe(true);
+		await settle();
+		expect(id.value).toBe('a');
 
 		// A pasted text keeps what an ID can hold.
 		id.value = '';
 		expect(type('My_App 2').defaultPrevented).toBe(true);
 		await settle();
-		expect(id.value).toBe('ypp2');
+		expect(id.value).toBe('myapp2');
 	});
 
 	it('adds an app with its quota in bytes', async () => {

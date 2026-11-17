@@ -5,8 +5,9 @@ export const ID_PATTERN = /^[a-z0-9-]{1,64}$/;
 const ID_CHARS = /[a-z0-9-]/g;
 export const ID_MAX_LENGTH = 64;
 
-/** What is left of a text when every character an app id cannot hold is dropped. */
-export const keepIdChars = (text: string): string => text.match(ID_CHARS)?.join('') ?? '';
+/** A text as an app id can hold it: in lowercase, with every character it cannot hold dropped. */
+export const keepIdChars = (text: string): string =>
+	text.toLowerCase().match(ID_CHARS)?.join('') ?? '';
 
 /** Windows' reserved device names, which cannot name the app's folder: internal/fsutil, WindowsDevice. */
 export const RESERVED_ID = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/;

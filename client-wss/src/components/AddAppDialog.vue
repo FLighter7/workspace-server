@@ -109,9 +109,10 @@ function focusInput(): void {
 }
 
 /**
- * Typing, pasting or dropping into the ID field: a character an ID cannot hold
- * never lands in it. A pasted text keeps what an ID can hold, up to the room
- * left; the rules below still catch what gets in some other way (autofill).
+ * Typing, pasting or dropping into the ID field: a capital letter lands as a
+ * small one, and a character an ID cannot hold never lands in it. A pasted
+ * text keeps what an ID can hold, up to the room left; the rules below still
+ * catch what gets in some other way (autofill).
  */
 function keepIdTyped(event: InputEvent): void {
 	if (!event.inputType.startsWith('insert')) return;

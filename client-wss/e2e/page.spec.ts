@@ -78,11 +78,11 @@ test('an app is added and deleted', async ({ browser }) => {
 	await expect(form.getByLabel('ID', { exact: true })).toBeFocused();
 	await page.getByLabel('ID', { exact: true }).fill('todo');
 	await expect(page.getByText('An app with this ID already exists.')).toBeVisible();
-	// A character an ID cannot hold never lands in the field.
+	// A capital letter lands as a small one; a character an ID cannot hold never lands.
 	const idField = page.getByLabel('ID', { exact: true });
 	await idField.fill('');
 	await idField.pressSequentially('Ab_c 1-d');
-	await expect(idField).toHaveValue('bc1-d');
+	await expect(idField).toHaveValue('abc1-d');
 	await idField.fill('notes');
 	await page.getByLabel('Name', { exact: true }).fill('My notes');
 	// The quota in MB, 50 by default; nothing about versions any more.
