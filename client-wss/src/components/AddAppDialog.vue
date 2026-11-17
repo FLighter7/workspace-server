@@ -15,16 +15,25 @@
 					<VTextField
 						ref="input"
 						v-model="id"
-						:label="t('appId')"
 						:hint="t('appIdHint')"
 						persistent-hint
 						:maxlength="ID_MAX_LENGTH"
 						:rules="[idRule]"
+						required
+						aria-labelledby=""
 						autocomplete="off"
 						autocapitalize="none"
 						spellcheck="false"
 						@beforeinput="keepIdTyped"
-					/>
+					>
+						<!-- The asterisk is for the eye; a screen reader hears "required" from the input. Vuetify
+							names the input by the label's id, whose content a screen reader reads whole, asterisk
+							included; an empty aria-labelledby leaves the name to the label element, which skips it. -->
+						<template #label>
+							{{ t('appId') }}
+							<span aria-hidden="true" class="text-error">*</span>
+						</template>
+					</VTextField>
 					<VTextField
 						v-model="name"
 						:label="t('appName')"

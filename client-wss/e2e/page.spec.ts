@@ -75,11 +75,12 @@ test('an app is added and deleted', async ({ browser }) => {
 	const addButton = page.getByRole('button', { name: 'Add an app' });
 	await addButton.click();
 	const form = page.getByRole('dialog', { name: 'Add an app' });
-	await expect(form.getByLabel('ID', { exact: true })).toBeFocused();
-	await page.getByLabel('ID', { exact: true }).fill('todo');
+	const idField = form.getByRole('textbox', { name: 'ID', exact: true });
+	await expect(idField).toBeFocused();
+	await expect(idField).toHaveAttribute('required', '');
+	await idField.fill('todo');
 	await expect(page.getByText('An app with this ID already exists.')).toBeVisible();
 	// A capital letter lands as a small one; a character an ID cannot hold never lands.
-	const idField = page.getByLabel('ID', { exact: true });
 	await idField.fill('');
 	await idField.pressSequentially('Ab_c 1-d');
 	await expect(idField).toHaveValue('abc1-d');
