@@ -47,7 +47,7 @@
 						inputmode="numeric"
 						:label="t('quotaField')"
 						:suffix="t('quotaUnit')"
-						:hint="t(linked ? 'quotaAddLinkedHint' : 'quotaAddHint')"
+						:hint="t(linked ? 'quotaAddLinkedHint' : 'quotaAddHint', { max: n(maxMb) })"
 						persistent-hint
 						:rules="[quotaRule]"
 					/>
@@ -65,7 +65,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref, useId, useTemplateRef, watch } from 'vue';
+import { nextTick, onMounted, ref, useId, useTemplateRef, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import type { VForm } from 'vuetify/components';
 import { serverApi } from '@/api/client';
@@ -74,7 +74,8 @@ import type { NewApp } from '@/api/types';
 import { boot } from '@/boot';
 import { errorMessage, type Message } from '@/composables/messages';
 import { useRules } from '@/composables/rules';
-import { MAX_QUOTA_MB, MB, MIN_QUOTA_MB } from '@/composables/useFormat';
+import { MB, MIN_QUOTA_MB } from '@/composables/useFormat';
+import { useQuotaMax } from '@/composables/useQuotaMax';
 import { useReturnFocus } from '@/composables/useReturnFocus';
 import StatusLine from './StatusLine.vue';
 
@@ -88,8 +89,12 @@ const props = defineProps<{ ids: string[]; linked: boolean }>();
 const open = defineModel<boolean>({ required: true });
 const emit = defineEmits<{ added: [] }>();
 
-const { t } = useI18n();
-const quotaRule = useRules().wholeNumber(MIN_QUOTA_MB, MAX_QUOTA_MB);
+const { t, n } = useI18n();
+const { maxMb, refresh } = useQuotaMax();
+const rules = useRules();
+/** The quota against the room the disk has, which is read again on each opening. */
+const quotaRule = (value: string): true | string =>
+	rules.wholeNumber(MIN_QUOTA_MB, maxMb.value)(value);
 const defaultQuota = String(Math.round(boot.quota / MB));
 const titleId = useId();
 const form = useTemplateRef<VForm>('form');
@@ -101,6 +106,7 @@ const busy = ref(false);
 const message = ref<Message | null>(null);
 
 useReturnFocus(open);
+onMounted(() => void refresh());
 
 // An empty form on each opening: what was typed and cancelled is not kept.
 watch(open, async (isOpen) => {
@@ -110,6 +116,7 @@ watch(open, async (isOpen) => {
 	quota.value = defaultQuota;
 	busy.value = false;
 	message.value = null;
+	void refresh();
 	await nextTick();
 	form.value?.resetValidation();
 });

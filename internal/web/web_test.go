@@ -1011,7 +1011,7 @@ func TestJSONShape(t *testing.T) {
 	}
 
 	for path, want := range map[string][]string{
-		"/api/status":   {"addresses", "dataDir", "httpPort", "lastError", "listening", "mainServer", "mdnsName", "mdnsRunning", "name", "program", "role", "serverDir", "serverId", "term", "udpPort"},
+		"/api/status":   {"addresses", "dataDir", "dataFree", "httpPort", "lastError", "listening", "mainServer", "mdnsName", "mdnsRunning", "name", "program", "role", "serverDir", "serverId", "term", "udpPort"},
 		"/api/upstream": {"apps", "connected", "halted", "linked", "subordinates", "term"},
 	} {
 		if got := keysOf(t, getObject(path)); !reflect.DeepEqual(got, want) {

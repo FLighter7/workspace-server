@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FLighter7/workspace-server/internal/apps"
+	"github.com/FLighter7/workspace-server/internal/fsutil"
 	"github.com/FLighter7/workspace-server/internal/hub"
 	"github.com/FLighter7/workspace-server/internal/pairing"
 	"github.com/FLighter7/workspace-server/internal/rtc"
@@ -24,6 +25,10 @@ func (s *server) Status() web.Status {
 	program, _ := binaryPath()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var dataFree *int64
+	if free, err := fsutil.FreeSpace(s.dataWSS); err == nil {
+		dataFree = &free
+	}
 	return web.Status{
 		Name:        s.cfg.Name,
 		ServerID:    s.id.ServerID,
@@ -36,6 +41,7 @@ func (s *server) Status() web.Status {
 		Program:     program,
 		ServerDir:   s.serverDir,
 		DataDir:     s.dataWSS,
+		DataFree:    dataFree,
 		MainServer:  isMainServer(s.serverDir),
 		LastError:   s.lastErr,
 		Role:        s.link.Role(),

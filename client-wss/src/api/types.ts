@@ -14,6 +14,8 @@ export interface Status {
 	program: string;
 	serverDir: string;
 	dataDir: string;
+	/** Bytes still free on the data folder's volume; null when the system does not say. */
+	dataFree: number | null;
 	/** The default server folder: it owns autostart and the program file. */
 	mainServer: boolean;
 	/** Why the last reset or data move failed; "" when none did. */

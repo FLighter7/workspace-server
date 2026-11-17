@@ -59,6 +59,7 @@ let upstream: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
 	apps = vi.spyOn(serverApi, 'apps').mockResolvedValue([todo, notes]);
 	upstream = vi.spyOn(serverApi, 'upstream').mockResolvedValue(asMain);
+	vi.spyOn(serverApi, 'status').mockResolvedValue({ dataFree: null } as never);
 });
 
 afterEach(() => {
@@ -257,6 +258,26 @@ describe('AppsSection on a main', () => {
 		expect(type('My_App 2').defaultPrevented).toBe(true);
 		await settle();
 		expect(id.value).toBe('myapp2');
+	});
+
+	it('caps the size at the free space of the disk, and refuses more', async () => {
+		vi.mocked(serverApi.status).mockResolvedValue({ dataFree: 120 * MB } as never);
+		const addApp = vi.spyOn(serverApi, 'addApp').mockResolvedValue(null);
+		mountPage(AppsSection);
+		await settle();
+		await openAddDialog();
+		expect(text()).toContain('From 1 to 120 MB (no more than the disk has free)');
+
+		const [id, , quota] = [...document.querySelectorAll('form input')] as HTMLInputElement[];
+		id.value = 'photos';
+		id.dispatchEvent(new Event('input'));
+		quota.value = '121';
+		quota.dispatchEvent(new Event('input'));
+		await settle();
+		id.closest('form')?.dispatchEvent(new Event('submit'));
+		await settle();
+		expect(addApp).not.toHaveBeenCalled();
+		expect(text()).toContain('Enter a whole number from 1 to 120.');
 	});
 
 	it('adds an app with its quota in bytes', async () => {

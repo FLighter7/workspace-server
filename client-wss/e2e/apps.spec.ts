@@ -130,12 +130,13 @@ test("the quota is changed on the main's page, and the laptop follows it, read-o
 	const change = card.getByRole('button', { name: 'Change the quota of Todo' });
 	await change.click();
 	const dialog = desk.getByRole('dialog', { name: 'The quota of Todo' });
-	const field = dialog.getByLabel('Quota', { exact: true });
+	const field = dialog.getByLabel('Maximum storage size', { exact: true });
 	await expect(field).toBeFocused();
 	await expect(field).toHaveValue('50');
 	await field.fill('0');
 	await dialog.getByRole('button', { name: 'Save' }).click();
-	await expect(dialog).toContainText('Enter a whole number from 1 to 1,048,576.');
+	// The top is what the disk has free, which is the machine's.
+	await expect(dialog).toContainText(/Enter a whole number from 1 to [\d,]+\./);
 	await field.fill('3');
 	await desk.screenshot({ path: join(SHOTS, 'apps-quota-dialog.png') });
 	await dialog.getByRole('button', { name: 'Save' }).click();
@@ -167,7 +168,7 @@ test("the quota is changed on the main's page, and the laptop follows it, read-o
 	await expect(subCard.getByRole('button', { name: /Change the quota/ })).toHaveCount(0);
 	// A new app takes a quota of its own, until the main serves it too.
 	await laptop.getByRole('button', { name: 'Add an app' }).click();
-	await expect(laptop.getByLabel('Quota', { exact: true })).toHaveValue('50');
+	await expect(laptop.getByLabel('Maximum storage size', { exact: true })).toHaveValue('50');
 	await expect(laptop.getByText("the main's quota replaces it")).toBeVisible();
 	await expectNoCspViolations(laptop);
 	await laptop.context().close();

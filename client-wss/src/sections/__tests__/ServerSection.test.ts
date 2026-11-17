@@ -17,6 +17,7 @@ const status: Status = {
 	program: 'C:\\ws\\workspace-server.exe',
 	serverDir: 'C:\\ws',
 	dataDir: 'C:\\ws\\WSS-Data',
+	dataFree: 10 * 1024 ** 3,
 	mainServer: true,
 	lastError: '',
 	role: 'main',

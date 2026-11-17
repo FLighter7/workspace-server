@@ -21,7 +21,7 @@
 						inputmode="numeric"
 						:label="t('quotaField')"
 						:suffix="t('quotaUnit')"
-						:hint="t('quotaHint')"
+						:hint="t('quotaHint', { max: n(maxMb) })"
 						persistent-hint
 						:rules="[quotaRule]"
 					/>
@@ -41,14 +41,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, useId, useTemplateRef, watch } from 'vue';
+import { onMounted, ref, useId, useTemplateRef, watch } from 'vue';
 import { I18nT, useI18n } from 'vue-i18n';
 import type { VForm } from 'vuetify/components';
 import { serverApi } from '@/api/client';
 import type { AppInfo } from '@/api/types';
 import { errorMessage, type Message } from '@/composables/messages';
 import { useRules } from '@/composables/rules';
-import { MAX_QUOTA_MB, MB, MIN_QUOTA_MB, useFormat } from '@/composables/useFormat';
+import { MB, MIN_QUOTA_MB, useFormat } from '@/composables/useFormat';
+import { useQuotaMax } from '@/composables/useQuotaMax';
 import { useReturnFocus } from '@/composables/useReturnFocus';
 import StatusLine from './StatusLine.vue';
 
@@ -56,9 +57,13 @@ const props = defineProps<{ app: AppInfo | null }>();
 const open = defineModel<boolean>({ required: true });
 const emit = defineEmits<{ saved: [quota: number] }>();
 
-const { t } = useI18n();
+const { t, n } = useI18n();
 const format = useFormat();
-const quotaRule = useRules().wholeNumber(MIN_QUOTA_MB, MAX_QUOTA_MB);
+const { maxMb, refresh } = useQuotaMax();
+const rules = useRules();
+/** The quota against the room the disk has, which is read again on each opening. */
+const quotaRule = (value: string): true | string =>
+	rules.wholeNumber(MIN_QUOTA_MB, maxMb.value)(value);
 const titleId = useId();
 const form = useTemplateRef<VForm>('form');
 const input = useTemplateRef<{ focus: () => void }>('input');
@@ -69,6 +74,7 @@ const busy = ref(false);
 const message = ref<Message | null>(null);
 
 useReturnFocus(open);
+onMounted(() => void refresh());
 
 // Filled once on opening: the list behind the dialog is polled, and a new
 // copy of the app must not undo what is being typed.
@@ -78,6 +84,7 @@ watch(open, (isOpen) => {
 	shown.value = megabytes.value;
 	busy.value = false;
 	message.value = null;
+	void refresh(props.app?.size ?? 0);
 });
 
 function focusInput(): void {
