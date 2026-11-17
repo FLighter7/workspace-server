@@ -95,7 +95,7 @@ describe('DevicesSection on a main', () => {
 		expect(text()).toContain('Lp7tOp0123ab');
 		expect(text()).toContain('192.168.1.30');
 		expect(text()).toContain('47801');
-		expect(button('Pair a device')).toBeDefined();
+		expect(button('Pair')).toBeDefined();
 	});
 
 	it('says what removing a server does', async () => {
@@ -167,7 +167,7 @@ describe('DevicesSection on a subordinate', () => {
 		const issue = vi.spyOn(serverApi, 'issuePairing');
 		mountPage(Page);
 		await settle();
-		expect(button('Pair a device')).toBeUndefined();
+		expect(button('Pair')).toBeUndefined();
 		expect(text()).toContain('This server is linked to the main server Desk');
 		expect(button("Pair this computer's browser")).toBeDefined();
 		expect(issue).not.toHaveBeenCalled();

@@ -1,41 +1,34 @@
 <template>
-	<VBtn :icon="themeIcon" variant="text" :aria-label="t('toggleTheme')" @click="open = true" />
+	<VMenu location="bottom end">
+		<template #activator="{ props: activator }">
+			<VBtn v-bind="activator" :icon="themeIcon" variant="text" :aria-label="t('toggleTheme')" />
+		</template>
 
-	<VDialog v-model="open" max-width="360" :aria-labelledby="titleId">
-		<VCard variant="elevated">
-			<VCardTitle :id="titleId" tag="h2">{{ t('theme') }}</VCardTitle>
-
-			<VList>
-				<VListItem
-					v-for="option in options"
-					:key="option.value"
-					:active="preferences.theme === option.value"
-					:aria-current="preferences.theme === option.value ? 'true' : undefined"
-					color="primary"
-					:prepend-icon="option.icon"
-					:title="t(option.label)"
-					:append-icon="preferences.theme === option.value ? mdiCheck : undefined"
-					@click="select(option.value)"
-				/>
-			</VList>
-		</VCard>
-	</VDialog>
+		<VList role="menu" :aria-label="t('theme')" min-width="200">
+			<VListItem
+				v-for="option in options"
+				:key="option.value"
+				:active="preferences.theme === option.value"
+				role="menuitemradio"
+				:aria-checked="preferences.theme === option.value"
+				color="primary"
+				:prepend-icon="option.icon"
+				:title="t(option.label)"
+				:append-icon="preferences.theme === option.value ? mdiCheck : undefined"
+				@click="setTheme(option.value)"
+			/>
+		</VList>
+	</VMenu>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, useId } from 'vue';
+import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { mdiCheck, mdiThemeLightDark, mdiWeatherNight, mdiWeatherSunny } from '@mdi/js';
 import type { MessageKey } from '@/i18n';
 import { preferences, setTheme, type ThemePreference } from '@/preferences';
-import { useReturnFocus } from '@/composables/useReturnFocus';
 
 const { t } = useI18n();
-
-const open = ref(false);
-const titleId = useId();
-
-useReturnFocus(open);
 
 const options: Array<{ value: ThemePreference; label: MessageKey; icon: string }> = [
 	{ value: 'system', label: 'themeSystem', icon: mdiThemeLightDark },
@@ -48,8 +41,5 @@ const themeIcon = computed(
 );
 
 // The choice is applied by useAppTheme, which follows the preference itself.
-function select(value: ThemePreference): void {
-	setTheme(value);
-	open.value = false;
-}
+// The menu closes by itself when an item is clicked, and hands the focus back to its button.
 </script>

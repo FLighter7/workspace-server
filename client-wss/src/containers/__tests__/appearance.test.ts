@@ -49,7 +49,7 @@ describe('the header menus', () => {
 
 		buttonLabelled('Choose language').click();
 		await settle();
-		expect(item('English').getAttribute('aria-current')).toBe('true');
+		expect(item('English').getAttribute('aria-checked')).toBe('true');
 
 		item('Polski').click();
 		await settle();
@@ -68,7 +68,7 @@ describe('the header menus', () => {
 
 		buttonLabelled('Choose theme').click();
 		await settle();
-		expect(item('System').getAttribute('aria-current')).toBe('true');
+		expect(item('System').getAttribute('aria-checked')).toBe('true');
 
 		item('Dark').click();
 		await settle();

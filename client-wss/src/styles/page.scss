@@ -5,18 +5,14 @@
 	--v-font-heading: var(--v-font-body);
 }
 
-// The scrollbar's room stays reserved, so a long section, a short one and an
+// The window itself never scrolls: the main area does (`VMain scrollable`), and
+// its scrollbar's room stays reserved, so a long section, a short one and an
 // open dialog lay the page out at the same width; reserved on both edges, the
-// centred column stays in the window's middle.
-html {
+// centred column stays in the window's middle. The room lies inside the page,
+// not beside it, so a dialog's scrim covers it with the rest. Vuetify's lock
+// of the window's scroll then has no scrollbar to pad for.
+.v-main__scroller {
 	scrollbar-gutter: stable both-edges;
-}
-
-// Vuetify locks the page's scroll under a dialog and sets this, inline, to the
-// scrollbar's width, by which the page and the app bar are then padded; with
-// the room already kept, that padding would shift them a second time.
-html.v-overlay-scroll-blocked {
-	--v-scrollbar-offset: 0px !important;
 }
 
 code {

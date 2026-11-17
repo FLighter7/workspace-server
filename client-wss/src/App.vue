@@ -4,14 +4,14 @@
 	padding-inline-start: 1rem;
 	font-weight: 600;
 	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
 }
 
 // The sections are links, not tabs: each has its own address (#server, …).
+// They share the bar's one row with the name and the menus, and take what is left.
 .nav {
 	display: flex;
-	width: 100%;
+	flex: 1 1 0;
+	min-width: 0;
 	height: 100%;
 	overflow-x: auto;
 	scrollbar-width: none;
@@ -50,30 +50,27 @@
 	<VApp>
 		<VAppBar border="b">
 			<p :class="$style.brand">Workspace Server</p>
-			<VSpacer />
+			<nav v-if="!stopped" ref="nav" :class="$style.nav" :aria-label="t('sections')">
+				<VBtn
+					v-for="name in SECTIONS"
+					:key="name"
+					:href="`#${name}`"
+					:class="[$style.tab, section === name && $style.current]"
+					:aria-current="section === name ? 'page' : undefined"
+					variant="text"
+					rounded="0"
+				>
+					{{ t(SECTION_TITLES[name]) }}
+				</VBtn>
+			</nav>
+			<VSpacer v-else />
 			<template #append>
 				<ThemeMenu />
 				<LocaleMenu />
 			</template>
-
-			<template v-if="!stopped" #extension>
-				<nav ref="nav" :class="$style.nav" :aria-label="t('sections')">
-					<VBtn
-						v-for="name in SECTIONS"
-						:key="name"
-						:href="`#${name}`"
-						:class="[$style.tab, section === name && $style.current]"
-						:aria-current="section === name ? 'page' : undefined"
-						variant="text"
-						rounded="0"
-					>
-						{{ t(SECTION_TITLES[name]) }}
-					</VBtn>
-				</nav>
-			</template>
 		</VAppBar>
 
-		<VMain>
+		<VMain scrollable>
 			<div :class="$style.main">
 				<StoppedPanel v-if="stopped" :text="stopped" />
 				<ServerSection v-else-if="section === 'server'" />

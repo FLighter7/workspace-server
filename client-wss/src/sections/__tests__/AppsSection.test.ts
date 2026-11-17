@@ -79,6 +79,12 @@ const card = (name: string): HTMLElement =>
 
 const dialog = (): HTMLElement => document.querySelector('[role="dialog"]') as HTMLElement;
 
+/** The button at the top of the page, which opens the form for a new app. */
+async function openAddDialog(): Promise<void> {
+	byLabel('Add an app')?.click();
+	await settle();
+}
+
 describe('AppsSection on a main', () => {
 	it("shows each app's files, the space they take of the quota, its folder and the totals", async () => {
 		mountPage(AppsSection);
@@ -184,6 +190,7 @@ describe('AppsSection on a main', () => {
 		await settle();
 		expect(text()).toContain('The server cannot be reached.');
 
+		await openAddDialog();
 		const id = document.querySelector('form input') as HTMLInputElement;
 		id.value = 'photos';
 		id.dispatchEvent(new Event('input'));
@@ -208,6 +215,7 @@ describe('AppsSection on a main', () => {
 		const addApp = vi.spyOn(serverApi, 'addApp').mockResolvedValue(null);
 		mountPage(AppsSection);
 		await settle();
+		await openAddDialog();
 		const id = document.querySelector('form input') as HTMLInputElement;
 		id.value = 'con';
 		id.dispatchEvent(new Event('input'));
@@ -222,6 +230,7 @@ describe('AppsSection on a main', () => {
 		const addApp = vi.spyOn(serverApi, 'addApp').mockResolvedValue(null);
 		mountPage(AppsSection);
 		await settle();
+		await openAddDialog();
 		const inputs = [...document.querySelectorAll('form input')] as HTMLInputElement[];
 		const [id, , quota] = inputs;
 		expect(quota.value).toBe('50');
@@ -254,6 +263,7 @@ describe('AppsSection on a subordinate', () => {
 		expect(byLabel('Change the quota of Notes')).not.toBeNull();
 		expect(card('Notes').textContent).not.toContain('sets the quota');
 		// A new app takes a quota, which the main's replaces if it serves the app too.
+		await openAddDialog();
 		expect([...document.querySelectorAll('form input')]).toHaveLength(3);
 		expect(text()).toContain(
 			"If the main server serves an app with this ID too, the main's quota replaces it.",

@@ -1,8 +1,18 @@
+<style lang="scss" module>
+.center {
+	justify-content: center;
+}
+
+.action {
+	min-width: 150px;
+}
+</style>
+
 <template>
 	<section aria-labelledby="devices-h">
-		<h1 id="devices-h" tabindex="-1" :class="['text-headline-small', s.title]">
-			{{ t('tabDevices') }}
-		</h1>
+		<!-- Not drawn: the header's tab names the page. It stays for a screen reader, and as the
+			focus's fallback when a removed device's button leaves. -->
+		<h1 id="devices-h" tabindex="-1" class="d-sr-only">{{ t('tabDevices') }}</h1>
 		<!-- A subordinate pairs nothing: devices pair with its main, and a
 		     browser on this computer gets a code from the main through it. -->
 		<div v-if="mainName !== null" class="mb-4">
@@ -13,14 +23,29 @@
 					</template>
 				</I18nT>
 			</p>
-			<div :class="s.actions">
-				<VBtn color="primary" variant="flat" @click="inviteOpen = true">
+			<div :class="[s.actions, $style.center]">
+				<VBtn
+					:class="$style.action"
+					color="primary"
+					variant="flat"
+					:prepend-icon="mdiPlus"
+					@click="inviteOpen = true"
+				>
 					{{ t('inviteButton') }}
 				</VBtn>
 			</div>
 		</div>
-		<div v-else-if="upstreamLoaded" :class="[s.actions, 'mb-4']">
-			<VBtn color="primary" variant="flat" @click="pairOpen = true">{{ t('pairDevice') }}</VBtn>
+		<div v-else-if="upstreamLoaded" :class="[s.actions, $style.center, 'mb-4']">
+			<VBtn
+				:class="$style.action"
+				:aria-label="t('pairDevice')"
+				color="primary"
+				variant="flat"
+				:prepend-icon="mdiPlus"
+				@click="pairOpen = true"
+			>
+				{{ t('pair') }}
+			</VBtn>
 		</div>
 		<StatusLine :message="message" />
 		<p v-if="loaded && devices.length === 0" class="text-medium-emphasis">{{ t('noDevices') }}</p>
@@ -105,6 +130,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { I18nT, useI18n } from 'vue-i18n';
+import { mdiPlus } from '@mdi/js';
 import { serverApi } from '@/api/client';
 import type { AppInfo, DeviceInfo } from '@/api/types';
 import FactItem from '@/components/FactItem.vue';

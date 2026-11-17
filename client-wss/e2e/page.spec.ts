@@ -72,6 +72,10 @@ test('an app is added and deleted', async ({ browser }) => {
 
 	// A new server serves todo already.
 	await expect(page.getByRole('heading', { level: 2, name: 'Todo todo' })).toBeVisible();
+	const addButton = page.getByRole('button', { name: 'Add an app' });
+	await addButton.click();
+	const form = page.getByRole('dialog', { name: 'Add an app' });
+	await expect(form.getByLabel('ID', { exact: true })).toBeFocused();
 	await page.getByLabel('ID', { exact: true }).fill('todo');
 	await expect(page.getByText('An app with this ID already exists.')).toBeVisible();
 	await page.getByLabel('ID', { exact: true }).fill('Bad ID');
@@ -84,8 +88,10 @@ test('an app is added and deleted', async ({ browser }) => {
 	await expect(page.getByLabel('Quota, in MB')).toHaveValue('50');
 	await page.getByLabel('Quota, in MB').fill('2');
 	await expect(page.getByText(/version/i)).toHaveCount(0);
-	await page.getByRole('button', { name: 'Add', exact: true }).click();
-	await expect(page.getByRole('status').filter({ hasText: 'Added.' })).toBeVisible();
+	await form.getByRole('button', { name: 'Add', exact: true }).click();
+	await expect(form).toBeHidden();
+	await expect(page.getByRole('status').filter({ hasText: 'Added' })).toBeVisible();
+	await expect(addButton).toBeFocused();
 	const card = page.getByRole('listitem').filter({
 		has: page.getByRole('heading', { name: 'My notes notes' }),
 	});
@@ -101,7 +107,7 @@ test('an app is added and deleted', async ({ browser }) => {
 	await dialog.getByLabel('To confirm, type notes').fill('notes');
 	await confirm.click();
 	await expect(dialog).toBeHidden();
-	await expect(page.getByRole('status').filter({ hasText: 'Deleted.' })).toBeVisible();
+	await expect(page.getByRole('status').filter({ hasText: 'Deleted' })).toBeVisible();
 	await expect(card).toBeHidden();
 	// The focus does not fall to the page's body with the card's button gone.
 	await expect(page.locator('body')).not.toBeFocused();
@@ -150,7 +156,7 @@ test('the language follows the browser and then the choice, which a reload keeps
 
 	const page = await openPage(browser);
 	await page.getByRole('button', { name: 'Choose language' }).click();
-	await page.getByRole('dialog', { name: 'Language' }).getByText('Polski').click();
+	await page.getByRole('menu', { name: 'Language' }).getByText('Polski').click();
 	await expect(nav(page).getByText('Urządzenia')).toBeVisible();
 	await expect(page.locator('html')).toHaveAttribute('lang', 'pl');
 
@@ -168,7 +174,7 @@ test('the theme follows the system and then the choice, which a reload keeps', a
 	await expect(app).toHaveClass(/v-theme--dark/);
 
 	await page.getByRole('button', { name: 'Choose theme' }).click();
-	await page.getByRole('dialog', { name: 'Theme' }).getByText('Light').click();
+	await page.getByRole('menu', { name: 'Theme' }).getByText('Light').click();
 	await expect(app).toHaveClass(/v-theme--light/);
 
 	await page.reload();

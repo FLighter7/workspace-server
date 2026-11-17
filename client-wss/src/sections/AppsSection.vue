@@ -1,4 +1,11 @@
 <style lang="scss" module>
+.add {
+	display: flex;
+	min-width: 150px;
+	margin-inline: auto;
+	margin-block-end: 1rem;
+}
+
 .totals {
 	margin-block-end: 1rem;
 }
@@ -31,7 +38,19 @@
 
 <template>
 	<section aria-labelledby="apps-h">
-		<h1 id="apps-h" tabindex="-1" :class="['text-headline-small', s.title]">{{ t('tabApps') }}</h1>
+		<!-- Not drawn: the header's tab names the page. It stays for a screen reader, and as the
+			focus's fallback when a deleted app's button leaves. -->
+		<h1 id="apps-h" tabindex="-1" class="d-sr-only">{{ t('tabApps') }}</h1>
+		<VBtn
+			:class="$style.add"
+			:aria-label="t('addApp')"
+			color="primary"
+			variant="flat"
+			:prepend-icon="mdiPlus"
+			@click="addOpen = true"
+		>
+			{{ t('add') }}
+		</VBtn>
 		<StatusLine :message="appsMessage" />
 		<p v-if="loaded && apps.length === 0" class="text-medium-emphasis">{{ t('noApps') }}</p>
 
@@ -122,41 +141,16 @@
 			</ItemCard>
 		</ul>
 
-		<h2 :class="['text-title-large', s.subtitle]">{{ t('addApp') }}</h2>
-		<VForm ref="addForm" :class="s.form" @submit.prevent="addApp">
-			<VTextField
-				v-model="newId"
-				:label="t('appId')"
-				:hint="t('appIdHint')"
-				persistent-hint
-				maxlength="64"
-				:rules="[idRule]"
-				autocomplete="off"
-				autocapitalize="none"
-				spellcheck="false"
-			/>
-			<VTextField
-				v-model="newName"
-				:label="t('appName')"
-				:hint="t('appNameHint')"
-				persistent-hint
-				autocomplete="off"
-			/>
-			<VTextField
-				v-model="newQuota"
-				type="number"
-				inputmode="numeric"
-				:label="t('quotaField')"
-				:hint="t(linked ? 'quotaAddLinkedHint' : 'quotaAddHint')"
-				persistent-hint
-				:rules="[quotaRule]"
-			/>
-			<div :class="s.actions">
-				<VBtn type="submit" color="primary" variant="flat">{{ t('add') }}</VBtn>
-			</div>
-			<StatusLine :message="addMessage" />
-		</VForm>
-
+		<!-- What was done to an app, said once and gone: the list shows the rest. -->
+		<VSnackbar v-model="toastOpen" color="success" location="bottom end">{{
+			toast ? t(toast) : ''
+		}}</VSnackbar>
+		<AddAppDialog
+			v-model="addOpen"
+			:ids="apps.map((app) => app.id)"
+			:linked="linked"
+			@added="onAdded"
+		/>
 		<DeleteAppDialog
 			v-model="deleteOpen"
 			:app="deleting"
@@ -168,13 +162,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, useTemplateRef } from 'vue';
+import { computed, ref } from 'vue';
 import { I18nT, useI18n } from 'vue-i18n';
-import type { VForm } from 'vuetify/components';
+import { mdiPlus } from '@mdi/js';
 import { serverApi } from '@/api/client';
-import { ID_PATTERN, RESERVED_ID } from '@/api/ids';
-import type { AppInfo, DeviceInfo, NewApp, UpstreamStatus } from '@/api/types';
-import { boot } from '@/boot';
+import type { AppInfo, DeviceInfo, UpstreamStatus } from '@/api/types';
+import AddAppDialog from '@/components/AddAppDialog.vue';
 import DeleteAppDialog from '@/components/DeleteAppDialog.vue';
 import FactItem from '@/components/FactItem.vue';
 import FactList from '@/components/FactList.vue';
@@ -182,9 +175,8 @@ import ItemCard from '@/components/ItemCard.vue';
 import QuotaDialog from '@/components/QuotaDialog.vue';
 import StateBadge from '@/components/StateBadge.vue';
 import StatusLine from '@/components/StatusLine.vue';
-import { errorMessage, info, type Message } from '@/composables/messages';
-import { useRules } from '@/composables/rules';
-import { MAX_QUOTA_MB, MB, MIN_QUOTA_MB, useFormat } from '@/composables/useFormat';
+import { errorMessage, type Message } from '@/composables/messages';
+import { useFormat } from '@/composables/useFormat';
 import { usePolling } from '@/composables/usePolling';
 import { rescueFocus } from '@/composables/useReturnFocus';
 import s from '@/styles/section.module.scss';
@@ -200,19 +192,16 @@ import s from '@/styles/section.module.scss';
  */
 const { t } = useI18n();
 const format = useFormat();
-const quotaRule = useRules().wholeNumber(MIN_QUOTA_MB, MAX_QUOTA_MB);
-const defaultQuota = String(Math.round(boot.quota / MB));
 
 const apps = ref<AppInfo[]>([]);
 const upstream = ref<UpstreamStatus | null>(null);
 const loaded = ref(false);
 const appsMessage = ref<Message | null>(null);
-const addMessage = ref<Message | null>(null);
 
-const addForm = useTemplateRef<VForm>('addForm');
-const newId = ref('');
-const newName = ref('');
-const newQuota = ref(defaultQuota);
+const addOpen = ref(false);
+/** The outcome of adding or deleting an app, shown in a snackbar. */
+const toast = ref<'added' | 'deleted' | null>(null);
+const toastOpen = ref(false);
 
 const deleteOpen = ref(false);
 const deleting = ref<AppInfo | null>(null);
@@ -278,36 +267,13 @@ function hasMarks(app: AppInfo): boolean {
 	return app.diverged.length > 0 || app.failing === 'quota' || app.size >= app.quota;
 }
 
-/** The id being typed, against the pattern and the ids in use; the server checks again. */
-function idRule(id: string): true | string {
-	if (id === '') return t('fieldRequired');
-	if (!ID_PATTERN.test(id)) return t('idInvalid');
-	if (RESERVED_ID.test(id)) return t('idReserved');
-	if (apps.value.some((app) => app.id === id)) return t('errExists');
-	return true;
+function say(outcome: 'added' | 'deleted'): void {
+	toast.value = outcome;
+	toastOpen.value = true;
 }
 
-async function addApp(): Promise<void> {
-	if (!(await addForm.value?.validate())?.valid) return;
-
-	// On a subordinate, the main's quota replaces this one once the main
-	// lists the app too; the field's hint says so.
-	const app: NewApp = { id: newId.value, quota: Number(newQuota.value) * MB };
-	const name = newName.value.trim();
-	if (name) app.name = name;
-
-	try {
-		await serverApi.addApp(app);
-	} catch (error) {
-		addMessage.value = errorMessage(error);
-		return;
-	}
-
-	newId.value = '';
-	newName.value = '';
-	newQuota.value = defaultQuota;
-	addForm.value?.resetValidation();
-	addMessage.value = info('added');
+async function onAdded(): Promise<void> {
+	say('added');
 	await loadApps();
 }
 
@@ -356,7 +322,7 @@ async function openDelete(app: AppInfo): Promise<void> {
 }
 
 async function onDeleted(): Promise<void> {
-	appsMessage.value = info('deleted');
+	say('deleted');
 	await loadApps();
 	await rescueFocus();
 }
