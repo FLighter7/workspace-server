@@ -22,9 +22,12 @@ import (
 const (
 	// DefaultQuota is an app's quota when apps.json gives none: 50 MiB.
 	DefaultQuota = int64(50 << 20)
-	// MinQuota and MaxQuota bound an app's quota: 1 MiB to 1 TiB.
+	// MinQuota and MaxQuota bound an app's quota: 1 MiB to 8 PiB. The top is no
+	// limit of any disk: it is the most a JSON number holds exactly, which the web
+	// page and the apps of a device read the quota as. What the disk has free is
+	// for the page to show, and so is the least it offers (10 MB).
 	MinQuota = int64(1 << 20)
-	MaxQuota = int64(1 << 40)
+	MaxQuota = int64(1 << 53)
 
 	maxIDLen = 64
 )

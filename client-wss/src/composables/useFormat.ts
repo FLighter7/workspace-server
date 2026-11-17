@@ -5,9 +5,10 @@ const UNITS = ['byte', 'kilobyte', 'megabyte', 'gigabyte', 'terabyte'] as const;
 /** One MB as the page counts it, and as the quota field takes it: 1024 × 1024 bytes. */
 export const MB = 1024 * 1024;
 
-/** The quota's range in the page's MB, as internal/apps bounds it: 1 MB to 1 TB. */
-export const MIN_QUOTA_MB = 1;
-export const MAX_QUOTA_MB = 1024 * 1024;
+/** The least quota the page offers, in MB; the server takes down to 1 MB. */
+export const MIN_QUOTA_MB = 10;
+/** The most the page can count exactly, in MB: 2^53 bytes, as far as the server bounds it. */
+export const MAX_QUOTA_MB = Math.floor(Number.MAX_SAFE_INTEGER / MB);
 
 /**
  * A size in binary units, as Windows shows them and as the quota is set

@@ -117,7 +117,7 @@ test("the quota is changed on the main's page, and the laptop follows it, read-o
 	const { main, sub } = servers();
 
 	// The laptop's API refuses: its quotas are the main's.
-	await expect(sub.api('PUT', '/api/apps/todo', { quota: 3 * MB })).rejects.toThrow(
+	await expect(sub.api('PUT', '/api/apps/todo', { quota: 30 * MB })).rejects.toThrow(
 		/409.*followsMain/,
 	);
 
@@ -136,16 +136,16 @@ test("the quota is changed on the main's page, and the laptop follows it, read-o
 	await field.fill('0');
 	await dialog.getByRole('button', { name: 'Save' }).click();
 	// The top is what the disk has free, which is the machine's.
-	await expect(dialog).toContainText(/Enter a whole number from 1 to [\d,]+\./);
-	await field.fill('3');
+	await expect(dialog).toContainText(/Enter a whole number from 10 to [\d,]+\./);
+	await field.fill('30');
 	await desk.screenshot({ path: join(SHOTS, 'apps-quota-dialog.png') });
 	await dialog.getByRole('button', { name: 'Save' }).click();
 	await expect(dialog).toBeHidden();
-	await expect(said(desk)).toHaveText('The quota of Todo is now 3 MB.');
+	await expect(said(desk)).toHaveText('The quota of Todo is now 30 MB.');
 	await expect(change).toBeFocused();
-	await expect(card).toContainText('of 3 MB');
+	await expect(card).toContainText('of 30 MB');
 	const mainApps = await main.api<App[]>('GET', '/api/apps');
-	expect(mainApps.find((app) => app.id === 'todo')?.quota).toBe(3 * MB);
+	expect(mainApps.find((app) => app.id === 'todo')?.quota).toBe(30 * MB);
 	await expectNoCspViolations(desk);
 	await desk.context().close();
 
@@ -155,13 +155,13 @@ test("the quota is changed on the main's page, and the laptop follows it, read-o
 				(await sub.api<App[]>('GET', '/api/apps')).find((app) => app.id === 'todo')?.quota,
 			{ timeout: 20_000 },
 		)
-		.toBe(3 * MB);
+		.toBe(30 * MB);
 	// An app only the laptop serves keeps a quota of its own.
 	await sub.api('POST', '/api/apps', { id: 'photos', name: 'Photos' });
 	const laptop = await openPage(browser, sub.base, '#apps');
 	const subCard = todoCard(laptop);
 	await expect(laptop.getByRole('button', { name: 'Change the quota of Photos' })).toBeVisible();
-	await expect(subCard).toContainText('of 3 MB');
+	await expect(subCard).toContainText('of 30 MB');
 	await expect(subCard).toContainText(
 		"The main server, Desk, sets the quota: change it on the main's page.",
 	);

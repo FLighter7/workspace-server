@@ -139,7 +139,7 @@ describe('AppsSection on a main', () => {
 		dialog().querySelector('form')?.dispatchEvent(new Event('submit'));
 		await settle();
 		expect(setQuota).not.toHaveBeenCalled();
-		expect(dialog().textContent).toContain('Enter a whole number from 1 to 1,048,576.');
+		expect(dialog().textContent).toContain('Enter a whole number, 10 or more.');
 
 		field.value = '200';
 		field.dispatchEvent(new Event('input'));
@@ -260,13 +260,32 @@ describe('AppsSection on a main', () => {
 		expect(id.value).toBe('myapp2');
 	});
 
+	it('names the least alone while the disk says nothing, and refuses less', async () => {
+		const addApp = vi.spyOn(serverApi, 'addApp').mockResolvedValue(null);
+		mountPage(AppsSection);
+		await settle();
+		await openAddDialog();
+		expect(text()).toContain('At least 10 MB; you can change it later.');
+
+		const [id, , quota] = [...document.querySelectorAll('form input')] as HTMLInputElement[];
+		id.value = 'photos';
+		id.dispatchEvent(new Event('input'));
+		quota.value = '9';
+		quota.dispatchEvent(new Event('input'));
+		await settle();
+		id.closest('form')?.dispatchEvent(new Event('submit'));
+		await settle();
+		expect(addApp).not.toHaveBeenCalled();
+		expect(text()).toContain('Enter a whole number, 10 or more.');
+	});
+
 	it('caps the size at the free space of the disk, and refuses more', async () => {
 		vi.mocked(serverApi.status).mockResolvedValue({ dataFree: 120 * MB } as never);
 		const addApp = vi.spyOn(serverApi, 'addApp').mockResolvedValue(null);
 		mountPage(AppsSection);
 		await settle();
 		await openAddDialog();
-		expect(text()).toContain('From 1 to 120 MB (no more than the disk has free)');
+		expect(text()).toContain('From 10 to 120 MB (no more than the disk has free)');
 
 		const [id, , quota] = [...document.querySelectorAll('form input')] as HTMLInputElement[];
 		id.value = 'photos';
@@ -277,7 +296,7 @@ describe('AppsSection on a main', () => {
 		id.closest('form')?.dispatchEvent(new Event('submit'));
 		await settle();
 		expect(addApp).not.toHaveBeenCalled();
-		expect(text()).toContain('Enter a whole number from 1 to 120.');
+		expect(text()).toContain('Enter a whole number from 10 to 120.');
 	});
 
 	it('adds an app with its quota in bytes', async () => {
@@ -290,12 +309,12 @@ describe('AppsSection on a main', () => {
 		expect(quota.value).toBe('50');
 		id.value = 'photos';
 		id.dispatchEvent(new Event('input'));
-		quota.value = '2';
+		quota.value = '20';
 		quota.dispatchEvent(new Event('input'));
 		await settle();
 		id.closest('form')?.dispatchEvent(new Event('submit'));
 		await settle();
-		expect(addApp).toHaveBeenCalledWith({ id: 'photos', quota: 2 * MB });
+		expect(addApp).toHaveBeenCalledWith({ id: 'photos', quota: 20 * MB });
 	});
 });
 

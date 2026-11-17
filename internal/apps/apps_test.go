@@ -69,7 +69,7 @@ func TestAddValidates(t *testing.T) {
 		"uppercase id": {ID: "Notes"},
 		"traversal id": {ID: "../x"},
 		"quota low":    {ID: "n", Quota: 1<<20 - 1},
-		"quota high":   {ID: "n", Quota: 1<<40 + 1},
+		"quota high":   {ID: "n", Quota: MaxQuota + 1},
 		"quota neg":    {ID: "n", Quota: -5},
 		"id and quota": {ID: "N", Quota: 1},
 	}
@@ -88,7 +88,7 @@ func TestAddValidates(t *testing.T) {
 	// Range edges are accepted.
 	for _, a := range []App{
 		{ID: "lo", Quota: 1 << 20},
-		{ID: "hi", Quota: 1 << 40},
+		{ID: "hi", Quota: MaxQuota},
 	} {
 		if err := r.Add(a); err != nil {
 			t.Errorf("Add(%+v) = %v, want nil", a, err)
@@ -265,7 +265,7 @@ func TestReloadRejectsInvalidEntries(t *testing.T) {
 	cases := map[string]string{
 		"bad id":     `{"apps":[{"id":"Bad"}]}`,
 		"duplicate":  `{"apps":[{"id":"a"},{"id":"a"}]}`,
-		"quota high": `{"apps":[{"id":"a","quota":1099511627777}]}`,
+		"quota high": `{"apps":[{"id":"a","quota":9007199254740993}]}`,
 		"negative":   `{"apps":[{"id":"a","quota":-1}]}`,
 		"quota low":  `{"apps":[{"id":"a","quota":10}]}`,
 	}

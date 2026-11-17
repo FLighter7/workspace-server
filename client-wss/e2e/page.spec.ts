@@ -88,7 +88,7 @@ test('an app is added and deleted', async ({ browser }) => {
 	await page.getByLabel('Name', { exact: true }).fill('My notes');
 	// The quota in MB, 50 by default; nothing about versions any more.
 	await expect(page.getByLabel('Maximum storage size', { exact: true })).toHaveValue('50');
-	await page.getByLabel('Maximum storage size', { exact: true }).fill('2');
+	await page.getByLabel('Maximum storage size', { exact: true }).fill('20');
 	await expect(page.getByText(/version/i)).toHaveCount(0);
 	await form.getByRole('button', { name: 'Add', exact: true }).click();
 	await expect(form).toBeHidden();
@@ -98,7 +98,7 @@ test('an app is added and deleted', async ({ browser }) => {
 		has: page.getByRole('heading', { name: 'My notes notes' }),
 	});
 	await expect(card).toBeVisible();
-	await expect(card).toContainText('0 bytes of 2 MB');
+	await expect(card).toContainText('0 bytes of 20 MB');
 	await expect(card).toContainText('No files yet');
 
 	await card.getByRole('button', { name: 'Delete', exact: true }).click();

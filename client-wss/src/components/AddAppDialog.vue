@@ -47,7 +47,7 @@
 						inputmode="numeric"
 						:label="t('quotaField')"
 						:suffix="t('quotaUnit')"
-						:hint="t(linked ? 'quotaAddLinkedHint' : 'quotaAddHint', { max: n(maxMb) })"
+						:hint="t(linked ? 'quotaAddLinkedHint' : 'quotaAddHint', { range })"
 						persistent-hint
 						:rules="[quotaRule]"
 					/>
@@ -89,12 +89,12 @@ const props = defineProps<{ ids: string[]; linked: boolean }>();
 const open = defineModel<boolean>({ required: true });
 const emit = defineEmits<{ added: [] }>();
 
-const { t, n } = useI18n();
-const { maxMb, refresh } = useQuotaMax();
+const { t } = useI18n();
+const { maxMb, known, range, refresh } = useQuotaMax();
 const rules = useRules();
 /** The quota against the room the disk has, which is read again on each opening. */
 const quotaRule = (value: string): true | string =>
-	rules.wholeNumber(MIN_QUOTA_MB, maxMb.value)(value);
+	rules.wholeNumber(MIN_QUOTA_MB, maxMb.value, known.value)(value);
 const defaultQuota = String(Math.round(boot.quota / MB));
 const titleId = useId();
 const form = useTemplateRef<VForm>('form');
