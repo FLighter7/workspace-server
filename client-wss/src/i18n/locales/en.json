@@ -52,7 +52,7 @@
 	"delete": "Delete",
 	"addApp": "Add an app",
 	"appId": "ID",
-	"appIdHint": "Lowercase Latin letters, digits and hyphens, up to 64. It cannot be changed later.",
+	"appIdHint": "It must match the ID the app itself uses, for example todo for the Todo app. Lowercase Latin letters, digits and hyphens, up to 64. It cannot be changed later.",
 	"appName": "Name",
 	"appNameHint": "Shown on this page. If empty, the ID is used.",
 	"add": "Add",
