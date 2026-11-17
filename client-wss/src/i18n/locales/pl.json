@@ -52,7 +52,7 @@
 	"delete": "Usuń",
 	"addApp": "Dodaj aplikację",
 	"appId": "ID",
-	"appIdHint": "Musi być taki sam jak ID, którego używa sama aplikacja, na przykład todo dla aplikacji Todo. Małe litery łacińskie, cyfry i myślniki, najwyżej 64. Później nie można go zmienić.",
+	"appIdHint": "Musi być taki sam jak ID, którego używa sama aplikacja.",
 	"appName": "Nazwa",
 	"appNameHint": "Wyświetlana na tej stronie. Jeśli jest pusta, użyty zostanie identyfikator.",
 	"add": "Dodaj",
