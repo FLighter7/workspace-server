@@ -41,7 +41,7 @@
 	"quotaRange": "Od {min} do {max} MB (nie więcej, niż jest wolne na dysku)",
 	"quotaRangeMin": "Co najmniej {min} MB",
 	"quotaHint": "Ile miejsca pliki aplikacji mogą zajmować razem na tym serwerze. {range}. Gdy zajmą tyle, urządzenia nie mogą dodać więcej; zmniejszenie rozmiaru niczego nie usuwa.",
-	"quotaAddHint": "{range}; można go później zmienić.",
+	"quotaAddHint": "{range}. Można go później zmienić.",
 	"quotaAddLinkedHint": "{range}. Jeśli serwer główny też obsługuje aplikację o tym identyfikatorze, zastępuje go limit serwera głównego.",
 	"quotaSaved": "Limit {app} wynosi teraz {quota}.",
 	"quotaFollowsMain": "Limit ustala serwer główny, {name}: zmień go na stronie serwera głównego.",

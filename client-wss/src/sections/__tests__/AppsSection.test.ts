@@ -265,7 +265,7 @@ describe('AppsSection on a main', () => {
 		mountPage(AppsSection);
 		await settle();
 		await openAddDialog();
-		expect(text()).toContain('At least 10 MB; you can change it later.');
+		expect(text()).toContain('At least 10 MB. You can change it later.');
 
 		const [id, , quota] = [...document.querySelectorAll('form input')] as HTMLInputElement[];
 		id.value = 'photos';
