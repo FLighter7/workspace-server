@@ -13,7 +13,7 @@ const WINDOWS_EDGE =
 describe('deviceName', () => {
 	it('names an iPhone with Safari', () => {
 		expect(deviceName(IPHONE_SAFARI, false)).toBe('iPhone Safari');
-		expect(deviceName(IPHONE_SAFARI, true)).toBe('iPhone Safari (app)');
+		expect(deviceName(IPHONE_SAFARI, true)).toBe('iPhone Safari (PWA)');
 	});
 
 	it('names an iPhone with Chrome', () => {

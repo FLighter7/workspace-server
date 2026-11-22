@@ -22,12 +22,12 @@ function browserKind(userAgent: string): string {
 /**
  * The name this device gives itself when it pairs, shown on the server's
  * page so the user can tell their devices apart: "iPhone Safari", or
- * "iPhone Safari (app)" when installed to the Home Screen.
+ * "iPhone Safari (PWA)" when installed as an app (a PWA, or on the iOS Home Screen).
  */
 export function deviceName(userAgent: string, standalone: boolean): string {
 	const name = `${deviceKind(userAgent)} ${browserKind(userAgent)}`;
 
-	return standalone ? `${name} (app)` : name;
+	return standalone ? `${name} (PWA)` : name;
 }
 
 /** Whether the page runs as an installed app: a PWA window, or added to the iOS Home Screen. */
