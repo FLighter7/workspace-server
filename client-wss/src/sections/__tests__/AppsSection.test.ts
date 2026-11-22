@@ -130,7 +130,7 @@ async function openAddDialog(): Promise<void> {
 }
 
 describe('AppsSection on a main', () => {
-	it("shows the space each app's files take of the quota, its folder and the total", async () => {
+	it("shows the space each app's files take of the quota and its folder, and no total over the cards", async () => {
 		mountPage(AppsSection);
 		await settle();
 
@@ -149,8 +149,8 @@ describe('AppsSection on a main', () => {
 		// The number of files is not shown: it says nothing the space does not.
 		expect(fact('Todo', 'Files')).toBeUndefined();
 
-		expect(text()).toContain('Space used by all apps5 MB');
-		expect(text()).not.toContain('Files of all apps');
+		// The Add button and the cards, nothing else: no total over them.
+		expect(text()).not.toContain('all apps');
 		expect(text()).not.toContain('version');
 	});
 
@@ -448,6 +448,15 @@ describe('AppsSection on a main', () => {
 		expect(text()).not.toContain('opens in the file manager');
 	});
 
+	it('offers no Open folder for an app that has no folder yet', async () => {
+		apps.mockResolvedValue([todo, { ...notes, folder: '' }]);
+		mountPage(AppsSection);
+		await settle();
+		expect(folderButton('Notes')).toBeNull();
+		expect(byLabel('Delete Notes')).toBeTruthy();
+		expect(folderButton('Todo')).toBeTruthy();
+	});
+
 	it('says in the snackbar why the folder did not open, and nothing in the section', async () => {
 		vi.spyOn(serverApi, 'openFolder').mockRejectedValue(new ApiError('notFound', 'no such app'));
 		mountPage(AppsSection);
@@ -604,7 +613,5 @@ describe('AppsSection on a subordinate', () => {
 		expect(text()).toContain("The app's files here and on Desk differ.");
 		expect(text()).toContain('Held by the quota');
 		expect(text()).toContain("Raise the quota on the main's page, or remove files in the app");
-		// One app: no totals.
-		expect(text()).not.toContain('Space used by all apps');
 	});
 });

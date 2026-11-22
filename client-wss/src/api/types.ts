@@ -68,7 +68,7 @@ export interface AppInfo {
 	/** The last write; null when there was none. */
 	modified: string | null;
 	devices: number;
-	/** The app's folder, which POST /api/apps/{id}/open opens. */
+	/** The app's folder, which POST /api/apps/{id}/open opens; "" while there is none (nothing written yet). */
 	folder: string;
 	/**
 	 * The other server of each divergence that waits for a device's choice: on

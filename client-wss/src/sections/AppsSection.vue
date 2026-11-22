@@ -5,10 +5,6 @@
 	margin-inline: auto;
 	margin-block-end: 1rem;
 }
-
-.totals {
-	margin-block-end: 1rem;
-}
 </style>
 
 <template>
@@ -28,10 +24,6 @@
 		</VBtn>
 		<StatusLine :message="appsMessage" />
 		<p v-if="loaded && apps.length === 0" class="text-medium-emphasis">{{ t('noApps') }}</p>
-
-		<FactList v-if="apps.length > 1" :class="$style.totals">
-			<FactItem :label="t('allUsed')">{{ format.bytes(totalSize) }}</FactItem>
-		</FactList>
 
 		<ul :class="s.cards">
 			<AppCard
@@ -81,8 +73,6 @@ import AddAppDialog from '@/components/AddAppDialog.vue';
 import AppCard from '@/components/AppCard.vue';
 import AppDevicesDialog from '@/components/AppDevicesDialog.vue';
 import DeleteAppDialog from '@/components/DeleteAppDialog.vue';
-import FactItem from '@/components/FactItem.vue';
-import FactList from '@/components/FactList.vue';
 import QuotaDialog from '@/components/QuotaDialog.vue';
 import StatusLine from '@/components/StatusLine.vue';
 import { errorMessage, info, type Message } from '@/composables/messages';
@@ -93,8 +83,9 @@ import { rescueFocus } from '@/composables/useReturnFocus';
 import s from '@/styles/section.module.scss';
 
 /**
- * The apps this server serves, one card each (AppCard): its files, the space
- * they take of its quota, its folder, and what needs the user (a divergence
+ * The Add button and the apps this server serves, nothing else (no total over
+ * the cards). One card each (AppCard): its files, the space they take of its
+ * quota, its folder, and what needs the user (a divergence
  * to choose on a device, a sync the quota holds). This section does what the
  * cards ask: changing the quota (not for an app a subordinate follows its main
  * for: the main sets that one), opening the folder, listing the app's devices
@@ -137,7 +128,6 @@ const listingDevices = computed(() =>
  */
 const linked = computed(() => upstream.value?.linked === true);
 const mainName = computed(() => upstream.value?.name ?? '');
-const totalSize = computed(() => apps.value.reduce((sum, app) => sum + app.size, 0));
 
 /**
  * The apps, and the link for the main's name. The link is read on its own:

@@ -50,7 +50,6 @@
 	"divergedText": "Pliki aplikacji tutaj i na {name} się różnią. Aplikacja nie synchronizuje się między tymi dwoma serwerami, dopóki nie wybierzesz, którą kopię zachować: otwórz aplikację na dowolnym z jej urządzeń, a ona zapyta.",
 	"failingMark": "Wstrzymane przez limit",
 	"failingText": "Aplikacja nie może się zsynchronizować z serwerem głównym: jej pliki przekroczyłyby limit tutaj lub na serwerze głównym. Zwiększ limit na stronie serwera głównego albo usuń pliki w aplikacji na urządzeniu. Ten serwer próbuje dalej.",
-	"allUsed": "Miejsce zajęte przez wszystkie aplikacje",
 	"delete": "Usuń",
 	"deleteLabel": "Usuń {app}",
 	"addApp": "Dodaj aplikację",

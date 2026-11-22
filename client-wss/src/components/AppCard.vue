@@ -158,6 +158,7 @@
 					<code :class="[$style.id, 'text-medium-emphasis']">{{ app.id }}</code>
 					<div :class="$style.actions">
 						<VBtn
+							v-if="app.folder"
 							class="text-medium-emphasis"
 							:icon="mdiFolderOpenOutline"
 							variant="text"
@@ -275,7 +276,8 @@ import UsageBar from './UsageBar.vue';
  * last write and the number of devices, two tiles, the second of which opens
  * the app's devices; and what needs the user (a divergence, a sync the quota
  * holds, a full quota). The folder's path is the Open folder button's name and
- * its tooltip. What to do about any of it is the parent's: the card only says
+ * its tooltip; an app with no folder yet has no Open folder, and Delete stands
+ * alone. What to do about any of it is the parent's: the card only says
  * so and asks.
  */
 const props = defineProps<{

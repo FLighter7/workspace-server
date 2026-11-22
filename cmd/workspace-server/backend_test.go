@@ -11,16 +11,23 @@ import (
 	"github.com/FLighter7/workspace-server/internal/apps"
 )
 
-// The Apps tab's facts: each app's folder under the apps root, no
-// divergence and no failing sync on a main.
+// The Apps tab's facts: each app's folder under the apps root, none while
+// it has no folder yet, no divergence and no failing sync on a main.
 func TestAppsListTheFolderAndNoDivergence(t *testing.T) {
 	s, dir := newTestServer(t, io.Discard)
 	list := s.Apps()
 	if len(list) != 1 || list[0].ID != "todo" {
 		t.Fatalf("Apps() = %+v, want todo alone", list)
 	}
-	todo := list[0]
-	if want := filepath.Join(dir, "WSS-Data", "apps", "todo"); todo.Folder != want {
+	if list[0].Folder != "" {
+		t.Errorf("folder = %q with no folder on disk, want none", list[0].Folder)
+	}
+	want := filepath.Join(dir, "WSS-Data", "apps", "todo")
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	todo := s.Apps()[0]
+	if todo.Folder != want {
 		t.Errorf("folder = %q, want %q", todo.Folder, want)
 	}
 	if todo.Diverged == nil || len(todo.Diverged) != 0 || todo.Failing != "" {

@@ -94,7 +94,7 @@ type AppInfo struct {
 	Size     int64      `json:"size"`     // bytes of the app's documents, against its quota
 	Modified *time.Time `json:"modified"` // the last change; nil when there was none
 	Devices  int        `json:"devices"`  // devices paired with the app
-	Folder   string     `json:"folder"`   // the app's folder, which POST /api/apps/{id}/open opens
+	Folder   string     `json:"folder"`   // the app's folder, which POST /api/apps/{id}/open opens; "" while there is none
 	// Diverged lists the other server of each divergence of the app that
 	// waits for a device's choice: on a main, each subordinate whose copy
 	// diverged from this one's; on a subordinate, its main. Never nil.

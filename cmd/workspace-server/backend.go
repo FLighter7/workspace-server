@@ -161,12 +161,16 @@ func (s *server) Apps() []web.AppInfo {
 		info := web.AppInfo{
 			App:      a,
 			Devices:  counts[a.ID],
-			Folder:   s.appFolder(a.ID),
 			Diverged: s.divergences(a.ID, link),
 			Failing:  link.Failing[a.ID],
 			// On a subordinate, an app the main lists: the main sets its
 			// quota.
 			FollowsMain: s.link.Follows(a.ID),
+		}
+		// An app that has no folder yet (nothing ever written) has nothing
+		// to open, so the page offers no Open folder.
+		if dir := s.appFolder(a.ID); isDir(dir) {
+			info.Folder = dir
 		}
 		// An app whose folder cannot be read shows as empty; the hub
 		// reports the error to its devices.

@@ -50,7 +50,6 @@
 	"divergedText": "The app's files here and on {name} differ. The app does not sync between the two servers until you choose which copy to keep: open the app on any of its devices, and it asks.",
 	"failingMark": "Held by the quota",
 	"failingText": "The app cannot sync with the main server: its files would go over the quota here or on the main. Raise the quota on the main's page, or remove files in the app on a device. This server keeps trying.",
-	"allUsed": "Space used by all apps",
 	"delete": "Delete",
 	"deleteLabel": "Delete {app}",
 	"addApp": "Add an app",
