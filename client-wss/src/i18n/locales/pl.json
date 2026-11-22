@@ -150,7 +150,7 @@
 	"errNotFound": "Nie znaleziono: być może zostało już usunięte.",
 	"errForbidden": "Serwer odrzucił żądanie. Otwórz stronę pod jej własnym adresem.",
 	"errInternal": "Coś poszło nie tak na serwerze.",
-	"errNetwork": "Nie można połączyć się z serwerem. Czy jest uruchomiony?",
+	"errNetwork": "Błąd połączenia z serwerem. Sprawdź, czy jest uruchomiony.",
 	"toggleTheme": "Wybierz motyw",
 	"toggleLanguage": "Wybierz język",
 	"theme": "Motyw",

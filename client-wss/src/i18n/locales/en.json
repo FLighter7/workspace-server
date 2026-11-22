@@ -150,7 +150,7 @@
 	"errNotFound": "Not found: it may have been removed already.",
 	"errForbidden": "The server refused the request. Open the page at its own address.",
 	"errInternal": "Something went wrong on the server.",
-	"errNetwork": "The server cannot be reached. Is it running?",
+	"errNetwork": "Connection to the server failed. Check whether it is running.",
 	"toggleTheme": "Choose theme",
 	"toggleLanguage": "Choose language",
 	"theme": "Theme",
