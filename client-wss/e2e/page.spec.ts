@@ -100,9 +100,6 @@ test('an app is added and deleted', async ({ browser }) => {
 	await expect(card).toBeVisible();
 	await expect(card).toContainText('notes');
 	await expect(card).toContainText('0 bytes of 20 MB');
-	// The files are on the unfolded part of the card.
-	await expect(card.getByText('No files yet')).toBeHidden();
-	await card.getByRole('button', { name: 'Show details of My notes' }).click();
 	await expect(card.getByText('No files yet')).toBeVisible();
 
 	await card.getByRole('button', { name: 'Delete', exact: true }).click();

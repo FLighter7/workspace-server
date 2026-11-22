@@ -33,8 +33,6 @@
 	"openFolder": "Otwórz folder",
 	"openFolderLabel": "Otwórz folder {app}",
 	"openFolderPath": "Otwórz folder {app}: {path}",
-	"showDetails": "Pokaż szczegóły {app}",
-	"hideDetails": "Ukryj szczegóły {app}",
 	"folderOpened": "Folder {app} otwiera się w menedżerze plików.",
 	"changeQuota": "Zmień",
 	"changeQuotaLabel": "Zmień limit {app}",

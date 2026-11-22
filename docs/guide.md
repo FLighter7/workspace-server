@@ -117,8 +117,8 @@ On the first start the server creates its folder and an entry for the `todo` app
   - lists, for each app, its paired devices: when each paired, when it was last seen, and whether it is connected now; servers linked to this one are listed first, under **Linked servers**;
   - **Remove** disconnects a device and ends its access.
 - **Apps** (Приложения):
-  - lists each app as a card of three lines: its ID; its name, with **Delete**; and the space its files take of its quota (a bar, then the sizes in MB, GB or TB, whichever fits), with **Change**. The arrow at the top right of the card unfolds the rest: the data folder, the last write, the number of its files and of its devices. With more than one app, the totals of all of them come first;
-  - the data folder, in the unfolded card, opens in Explorer, Finder or your file manager when you click it, on the computer the server runs on (the page is open only there); the window may open behind the browser;
+  - lists each app as a card of three lines: its ID; its name, with **Delete**; and the space its files take of its quota (a bar, then the sizes in MB, GB or TB, whichever fits), with **Change**. Below them the card shows the data folder, the last write, the number of its files and of its devices. With more than one app, the totals of all of them come first;
+  - the data folder in the card opens in Explorer, Finder or your file manager when you click it, on the computer the server runs on (the page is open only there); the window may open behind the browser;
   - **Change** (Изменить) sets how much space the app's files may take together on this server, in MB, from 10 MB up to the free space of the disk; 50 MB by default. Once the files reach it, devices cannot add more until you raise it or remove files in the app; lowering it deletes nothing. On a server linked to a main, an app the main serves too has no such button: the main sets its quota, and the linked server follows it; an app only the linked server serves keeps its own;
   - **Diverged: choose on a device** marks an app whose copies here and on another server, which it names, differ: the app does not sync between the two until you choose on a device which copy to keep (see "When the two copies differ");
   - **Held by the quota**, on a server linked to a main, marks an app that cannot sync with the main because its files would go over the quota here or on the main: raise the quota on the main's page, or remove files in the app on a device. The server keeps trying;
@@ -210,7 +210,7 @@ Run `delete`, or press **Delete the server and all data** on the web page, or, o
 - If you chose your own data folder, only the server's data in it is deleted: its `WSS-Data` folder goes only if nothing else is left in it, and the folder you chose only if it is then empty.
 - **This deletes the server's copy of every app's data and all pairings.**
   - The devices keep their own copies; turn sync off in each app.
-  - To keep an app's files, unfold its card on the Apps page, click the data folder, and copy the files elsewhere first.
+  - To keep an app's files, click the data folder in its card on the Apps page, and copy the files elsewhere first.
 - `delete --yes` deletes without asking.
 - **Left behind:**
   - Firewall entries. Windows keeps the rule created on the first run; removing it needs administrator rights: Windows Security → Firewall & network protection → Allow an app through firewall. On macOS the entry is in System Settings → Network → Firewall → Options.
@@ -256,7 +256,7 @@ WSS-Data/apps/<id>/.wss/            the server's own records for the app, not th
   - If the folder is on a disk that is not connected when the server starts, the server does not start. `server.log` in the server folder says why.
 - **Each app's data** is stored exactly as the app sent it, as plain files.
   - A change replaces a file; no previous versions are kept. A `history/` folder left by an earlier version of the server is not used any more, and can be deleted.
-  - The data folder in an app's unfolded card on the Apps page opens the app's folder when you click it. The files there are plain files, readable by any program; the `.wss` folder beside them is the server's own.
+  - The data folder in an app's card on the Apps page opens the app's folder when you click it. The files there are plain files, readable by any program; the `.wss` folder beside them is the server's own.
   - Each app's files may take up to 50 MB together by default (1 MB here is 1024 × 1024 bytes, as Windows counts): the app's quota. Choose another when you add the app, or change it later on the Apps page.
 - **Writes are atomic:** a crash or power loss leaves either the old file or the new one, never half of one.
 - **`apps.json`** can be edited by hand while the server runs. The change takes effect within a few seconds.

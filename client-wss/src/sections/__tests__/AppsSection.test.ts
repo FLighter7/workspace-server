@@ -111,37 +111,32 @@ describe('AppsSection on a main', () => {
 		expect(text()).not.toContain('version');
 	});
 
-	it('folds a card to the ID, the name with Delete, and the space with Change; the toggle unfolds the rest', async () => {
+	it('lays a card out as the ID, the name with Delete, the space with Change, then the facts', async () => {
 		mountPage(AppsSection);
 		await settle();
 
 		const todoCard = card('Todo');
 		const items = [
-			...todoCard.querySelectorAll('code, h2, button, [role="progressbar"][aria-hidden="false"]'),
+			...todoCard.querySelectorAll(
+				'code, h2, button, [role="progressbar"][aria-hidden="false"], dt',
+			),
 		].map((el) => el.getAttribute('aria-label') ?? el.textContent?.trim());
-		// The ID, then the name and Delete, then the bar with Change: the rest is behind the toggle.
-		expect(items.slice(0, 5)).toEqual([
+		expect(items).toEqual([
 			'todo',
-			'Show details of Todo',
 			'Todo',
 			'Delete',
 			'Space used of the quota of Todo',
+			'Change the quota of Todo',
+			// The facts: the folder (a button, named with its path), the last write, the files, the devices.
+			'Data folder',
+			'Open folder of Todo: C:\\ws\\WSS-Data\\apps\\todo',
+			'C:\\ws\\WSS-Data\\apps\\todo',
+			'Last write',
+			'Files',
+			'Devices',
 		]);
-		const toggle = byLabel('Show details of Todo') as HTMLButtonElement;
-		const details = document.getElementById(toggle.getAttribute('aria-controls') ?? '');
-		expect(toggle.getAttribute('aria-expanded')).toBe('false');
-		expect(details?.style.display).toBe('none');
-		// Unfolded: the folder, the last write, the files and the devices, in that order.
-		toggle.click();
-		await settle();
-		expect(byLabel('Hide details of Todo')?.getAttribute('aria-expanded')).toBe('true');
-		expect(details?.style.display).not.toBe('none');
-		expect(
-			[...(details?.querySelectorAll('dt') ?? [])].map((dt) => dt.textContent?.trim()),
-		).toEqual(['Data folder', 'Last write', 'Files', 'Devices']);
-		byLabel('Hide details of Todo')?.click();
-		await settle();
-		expect(byLabel('Show details of Todo')).not.toBeNull();
+		// Nothing is folded away: there is no toggle.
+		expect(todoCard.querySelector('[aria-expanded]')).toBeNull();
 	});
 
 	it('counts the space in the unit that fits: MB, GB, TB', async () => {

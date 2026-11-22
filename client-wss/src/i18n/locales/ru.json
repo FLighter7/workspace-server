@@ -33,8 +33,6 @@
 	"openFolder": "Открыть папку",
 	"openFolderLabel": "Открыть папку {app}",
 	"openFolderPath": "Открыть папку {app}: {path}",
-	"showDetails": "Показать подробности {app}",
-	"hideDetails": "Скрыть подробности {app}",
 	"folderOpened": "Папка {app} открывается в файловом менеджере.",
 	"changeQuota": "Изменить",
 	"changeQuotaLabel": "Изменить квоту {app}",

@@ -1,15 +1,14 @@
 <style lang="scss" module>
-.top,
+.id {
+	display: block;
+	overflow-wrap: anywhere;
+}
+
 .row {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
 	gap: 0.5rem 1rem;
-}
-
-.id {
-	min-width: 0;
-	overflow-wrap: anywhere;
 }
 
 .name {
@@ -49,7 +48,7 @@
 	}
 }
 
-.details {
+.facts {
 	margin-block-start: 0.75rem;
 }
 
@@ -78,7 +77,6 @@
 }
 
 // What needs the user: a divergence, a sync the quota holds, a full quota.
-// It stays in view while the card is folded.
 .marks {
 	display: grid;
 	gap: 0.75rem;
@@ -103,18 +101,7 @@
 		<!-- Flat, so the card is the colour of the header (the theme's surface): tonal always tints it. -->
 		<VCard variant="flat">
 			<VCardText>
-				<div :class="$style.top">
-					<code :class="[$style.id, 'text-medium-emphasis']">{{ app.id }}</code>
-					<VBtn
-						:icon="expanded ? mdiChevronUp : mdiChevronDown"
-						size="small"
-						variant="text"
-						:aria-label="t(expanded ? 'hideDetails' : 'showDetails', { app: app.name })"
-						:aria-expanded="expanded"
-						:aria-controls="detailsId"
-						@click="expanded = !expanded"
-					/>
-				</div>
+				<code :class="[$style.id, 'text-medium-emphasis']">{{ app.id }}</code>
 
 				<div :class="$style.row">
 					<h2 :class="['text-title-medium', $style.name]">
@@ -145,6 +132,27 @@
 					</VBtn>
 				</div>
 
+				<FactList :class="$style.facts">
+					<FactItem :label="t('folder')">
+						<button
+							type="button"
+							:class="$style.folder"
+							:disabled="opening"
+							:aria-label="t('openFolderPath', { app: app.name, path: app.folder })"
+							@click="emit('openFolder')"
+						>
+							<code>{{ app.folder }}</code>
+						</button>
+					</FactItem>
+					<FactItem :label="t('modified')">
+						{{ app.modified ? format.time(app.modified) : t('notYet') }}
+					</FactItem>
+					<FactItem :label="t('files')">
+						{{ app.files > 0 ? format.number(app.files) : t('noFiles') }}
+					</FactItem>
+					<FactItem :label="t('tabDevices')">{{ format.number(app.devices) }}</FactItem>
+				</FactList>
+
 				<div v-if="hasMarks" :class="$style.marks">
 					<div v-for="other in app.diverged" :key="other.serverId">
 						<StateBadge tone="warning">{{ t('divergedMark') }}</StateBadge>
@@ -160,51 +168,25 @@
 					</div>
 					<p v-if="app.size >= app.quota" :class="$style.error">{{ t('quotaFull') }}</p>
 				</div>
-
-				<VExpandTransition>
-					<div v-show="expanded" :id="detailsId" :class="$style.details">
-						<FactList>
-							<FactItem :label="t('folder')">
-								<button
-									type="button"
-									:class="$style.folder"
-									:disabled="opening"
-									:aria-label="t('openFolderPath', { app: app.name, path: app.folder })"
-									@click="emit('openFolder')"
-								>
-									<code>{{ app.folder }}</code>
-								</button>
-							</FactItem>
-							<FactItem :label="t('modified')">
-								{{ app.modified ? format.time(app.modified) : t('notYet') }}
-							</FactItem>
-							<FactItem :label="t('files')">
-								{{ app.files > 0 ? format.number(app.files) : t('noFiles') }}
-							</FactItem>
-							<FactItem :label="t('tabDevices')">{{ format.number(app.devices) }}</FactItem>
-						</FactList>
-						<I18nT
-							v-if="app.followsMain"
-							keypath="quotaFollowsMain"
-							tag="p"
-							scope="global"
-							:class="[$style.note, 'text-medium-emphasis']"
-						>
-							<template #name>
-								<bdi>{{ mainName }}</bdi>
-							</template>
-						</I18nT>
-					</div>
-				</VExpandTransition>
+				<I18nT
+					v-if="app.followsMain"
+					keypath="quotaFollowsMain"
+					tag="p"
+					scope="global"
+					:class="[$style.note, 'text-medium-emphasis']"
+				>
+					<template #name>
+						<bdi>{{ mainName }}</bdi>
+					</template>
+				</I18nT>
 			</VCardText>
 		</VCard>
 	</li>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, useId } from 'vue';
+import { computed } from 'vue';
 import { I18nT, useI18n } from 'vue-i18n';
-import { mdiChevronDown, mdiChevronUp } from '@mdi/js';
 import type { AppInfo } from '@/api/types';
 import { useFormat } from '@/composables/useFormat';
 import FactItem from './FactItem.vue';
@@ -212,12 +194,12 @@ import FactList from './FactList.vue';
 import StateBadge from './StateBadge.vue';
 
 /**
- * One app of the list. Folded, it shows three lines: the ID; the name, with
- * Delete; the space the files take of the quota (a bar, the sizes in the unit
- * that fits, and Change at the right, under Delete). Unfolded, it adds the data folder (a button that
- * opens it), the last write, the number of files and of devices. What needs
- * the user (a divergence, a sync the quota holds, a full quota) shows folded
- * as well; what to do about it is the parent's: the card only says so.
+ * One app of the list: the ID; the name, with Delete; the space the files take
+ * of the quota (a bar, the sizes in the unit that fits, and Change at the
+ * right, under Delete); the data folder (a button that opens it), the last
+ * write, the number of files and of devices; and what needs the user (a
+ * divergence, a sync the quota holds, a full quota). What to do about any of it
+ * is the parent's: the card only says so and asks.
  */
 const props = defineProps<{
 	app: AppInfo;
@@ -230,9 +212,6 @@ const emit = defineEmits<{ delete: []; quota: []; openFolder: [] }>();
 
 const { t } = useI18n();
 const format = useFormat();
-const detailsId = useId();
-/** Folded when the card appears; the list is polled, and the card keeps its state. */
-const expanded = ref(false);
 
 const usedText = computed(() =>
 	t('usedOf', { used: format.bytes(props.app.size), quota: format.bytes(props.app.quota) }),

@@ -33,8 +33,6 @@
 	"openFolder": "Open folder",
 	"openFolderLabel": "Open folder of {app}",
 	"openFolderPath": "Open folder of {app}: {path}",
-	"showDetails": "Show details of {app}",
-	"hideDetails": "Hide details of {app}",
 	"folderOpened": "The folder of {app} opens in the file manager.",
 	"changeQuota": "Change",
 	"changeQuotaLabel": "Change the quota of {app}",
