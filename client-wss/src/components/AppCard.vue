@@ -18,18 +18,35 @@
 	overflow-wrap: anywhere;
 }
 
-// The bar takes half the card's width; the text and the button follow it, and
-// wrap below it where a phone leaves no room.
+// The bar takes half the card's width, the text follows it, and Change sits at
+// the right edge, under Delete. A phone leaves no room for all three on a line:
+// there the bar takes a line of its own, and the text and Change sit under it.
 .usage {
 	display: flex;
-	flex-wrap: wrap;
 	align-items: center;
 	gap: 0.25rem 0.75rem;
-}
 
-.bar {
-	flex: 0 0 50%;
-	width: auto;
+	.bar {
+		flex: 0 1 50%;
+		width: auto;
+	}
+
+	.used {
+		min-width: 0;
+	}
+
+	.change {
+		flex: none;
+		margin-inline-start: auto;
+	}
+
+	@media (max-width: 30rem) {
+		flex-wrap: wrap;
+
+		.bar {
+			flex: 1 0 100%;
+		}
+	}
 }
 
 .details {
@@ -83,7 +100,8 @@
 
 <template>
 	<li>
-		<VCard variant="tonal">
+		<!-- Flat, so the card is the colour of the header (the theme's surface): tonal always tints it. -->
+		<VCard variant="flat">
 			<VCardText>
 				<div :class="$style.top">
 					<code :class="[$style.id, 'text-medium-emphasis']">{{ app.id }}</code>
@@ -115,9 +133,10 @@
 						:aria-label="t('quotaUsed', { app: app.name })"
 						:aria-valuetext="usedText"
 					/>
-					<span>{{ usedText }}</span>
+					<span :class="$style.used">{{ usedText }}</span>
 					<VBtn
 						v-if="!app.followsMain"
+						:class="$style.change"
 						variant="text"
 						:aria-label="t('changeQuotaLabel', { app: app.name })"
 						@click="emit('quota')"
@@ -195,7 +214,7 @@ import StateBadge from './StateBadge.vue';
 /**
  * One app of the list. Folded, it shows three lines: the ID; the name, with
  * Delete; the space the files take of the quota (a bar, the sizes in the unit
- * that fits, and Change). Unfolded, it adds the data folder (a button that
+ * that fits, and Change at the right, under Delete). Unfolded, it adds the data folder (a button that
  * opens it), the last write, the number of files and of devices. What needs
  * the user (a divergence, a sync the quota holds, a full quota) shows folded
  * as well; what to do about it is the parent's: the card only says so.
