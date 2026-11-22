@@ -52,6 +52,7 @@ import { useI18n } from 'vue-i18n';
 import { serverApi } from '@/api/client';
 import { errorMessage, type Message } from '@/composables/messages';
 import { useFormat } from '@/composables/useFormat';
+import { notify } from '@/composables/useNotify';
 import { useReturnFocus } from '@/composables/useReturnFocus';
 import AppDataFacts from './AppDataFacts.vue';
 import FactItem from './FactItem.vue';
@@ -83,13 +84,15 @@ function focusCancel(): void {
 	cancel.value?.$el.focus();
 }
 
-/** "Open folder" beside an app, to copy its files before they go. */
+/**
+ * "Open folder" beside an app, to copy its files before they go. The window is
+ * the answer, so only an error is said, in the notification centre.
+ */
 async function openFolder(app: AppFactItem): Promise<void> {
 	try {
 		await serverApi.openFolder(app.id);
-		message.value = { key: 'folderOpened', values: { app: app.name || app.id } };
 	} catch (error) {
-		message.value = errorMessage(error);
+		notify(errorMessage(error));
 	}
 }
 

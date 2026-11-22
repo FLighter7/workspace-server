@@ -107,7 +107,7 @@ test('an app is added and deleted', async ({ browser }) => {
 	await card.getByRole('button', { name: 'Delete My notes', exact: true }).click();
 	const dialog = page.getByRole('dialog', { name: 'Delete My notes?' });
 	await expect(dialog).toBeVisible();
-	const confirm = dialog.getByRole('button', { name: 'Delete for good' });
+	const confirm = dialog.getByRole('button', { name: 'Delete', exact: true });
 	await expect(confirm).toBeDisabled();
 	await dialog.getByLabel('To confirm, type notes').fill('notes');
 	await confirm.click();

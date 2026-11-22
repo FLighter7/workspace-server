@@ -20,3 +20,16 @@ code {
 	font-size: 0.9em;
 	overflow-wrap: anywhere;
 }
+
+// A dialog's title is an h2 (VCardTitle tag="h2"), which kept the browser's
+// margins, and the text's first paragraph kept its own: together they tripled
+// the room between the title and the text. The room above the title is its
+// padding instead, and less of it under it.
+.v-card-title {
+	margin: 0;
+	padding-block: 1.25rem 0.75rem;
+}
+
+.v-card-text > :first-child {
+	margin-top: 0;
+}

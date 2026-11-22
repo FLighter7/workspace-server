@@ -36,13 +36,21 @@ function open() {
 				lastSeen: '2026-11-10T00:00:00Z',
 				connected: false,
 			},
+			{
+				id: 'd2',
+				app: 'notes',
+				name: 'Laptop',
+				pairedAt: '2026-11-02T00:00:00Z',
+				lastSeen: '2026-11-10T00:00:00Z',
+				connected: false,
+			},
 		],
 	});
 }
 
 const confirmButton = (): HTMLButtonElement =>
-	[...document.querySelectorAll('button')].find((b) =>
-		b.textContent?.includes('Delete for good'),
+	[...document.querySelectorAll('button[type="submit"]')].find(
+		(b) => b.textContent?.trim() === 'Delete',
 	) as HTMLButtonElement;
 
 const input = (): HTMLInputElement => document.querySelector('input') as HTMLInputElement;
@@ -54,17 +62,21 @@ describe('DeleteAppDialog', () => {
 		await settle();
 		const text = document.body.textContent ?? '';
 		expect(text).toContain('Delete Notes?');
-		expect(text).toContain('all its files');
-		expect(text).toContain('Phone');
-		expect(text).toContain('2 kB');
-		expect(text).toContain('To keep a copy, open the app');
+		expect(text).toContain(
+			'The app and all its data will be deleted, and its devices disconnected.',
+		);
+		expect(text).toContain('To be deleted2 kB');
+		expect(text).toContain('To be disconnectedPhone, Laptop');
+		expect(text).not.toContain('Files');
+		expect(text).toContain("To keep it, open the app's folder first");
 		expect(text).toContain('To confirm, type notes');
 		expect(document.querySelector('a[download]')).toBeNull();
 
 		(document.querySelector('button[aria-label="Open folder of Notes"]') as HTMLElement).click();
 		await settle();
 		expect(openFolder).toHaveBeenCalledWith('notes');
-		expect(document.body.textContent).toContain('The folder of Notes opens in the file manager.');
+		// The window is the answer: nothing is said.
+		expect(document.body.textContent).not.toContain('opens in the file manager');
 	});
 
 	it('deletes only once the typed id matches', async () => {
