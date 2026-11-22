@@ -112,6 +112,21 @@ describe('DevicesSection on a main', () => {
 		expect(remove).toHaveBeenCalledWith('Server0000000001');
 	});
 
+	it("disconnects an app's device after a question, and says so", async () => {
+		const remove = vi.spyOn(serverApi, 'removeDevice').mockResolvedValue(null);
+		mountPage(Page);
+		await settle();
+		button('Disconnect').click();
+		await settle();
+		const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+		expect(dialog.textContent).toContain('Disconnect iPhone?');
+		expect(dialog.textContent).toContain('The device loses access.');
+		button('Disconnect', dialog).click();
+		await settle();
+		expect(remove).toHaveBeenCalledWith('Phone00000000001');
+		expect(document.body.textContent).toContain('Disconnected.');
+	});
+
 	it('hands the role of main to a linked server, after a question', async () => {
 		const handOver = vi.spyOn(serverApi, 'handOver').mockResolvedValue({ done: true });
 		mountPage(Page);

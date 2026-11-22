@@ -80,6 +80,7 @@
 		</VMain>
 
 		<ConfirmDialog />
+		<NotificationCenter />
 	</VApp>
 </template>
 
@@ -87,6 +88,7 @@
 import { nextTick, useTemplateRef, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
+import NotificationCenter from '@/components/NotificationCenter.vue';
 import LocaleMenu from '@/containers/LocaleMenu.vue';
 import ThemeMenu from '@/containers/ThemeMenu.vue';
 import { useAppLocale, useAppTheme } from '@/composables/useAppearance';

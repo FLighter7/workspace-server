@@ -4,7 +4,7 @@ import { ApiError } from '@/api/client';
 import { errorKey, errorMessage } from '../messages';
 import { haltedKey, upstreamError } from '../upstream';
 import { formatLeft } from '../usePairingCode';
-import { formatBytes } from '../useFormat';
+import { formatBytes, formatWhen } from '../useFormat';
 import { startPolling } from '../usePolling';
 
 describe('formatBytes', () => {
@@ -115,5 +115,20 @@ describe('upstreamError', () => {
 		expect(haltedKey('badToken')).toBe('haltedRemoved');
 		expect(haltedKey('protocol')).toBe('haltedTooOld');
 		expect(haltedKey(undefined)).toBe('haltedOther');
+	});
+});
+
+describe('formatWhen', () => {
+	// Noon UTC: the same day in any zone a test runs in.
+	const now = new Date('2026-11-22T12:00:00Z');
+
+	it('leaves the year out while it is this one', () => {
+		expect(formatWhen('2026-11-03T12:00:00Z', 'en', now)).toMatch(/^Nov 3, \d/);
+		expect(formatWhen('2026-11-03T12:00:00Z', 'ru', now)).toMatch(/^3 нояб\., \d/);
+	});
+
+	it('names the year of another one', () => {
+		expect(formatWhen('2025-11-03T12:00:00Z', 'en', now)).toMatch(/^Nov 3, 2025, \d/);
+		expect(formatWhen('2025-11-03T12:00:00Z', 'ru', now)).toMatch(/^3 нояб\. 2025 г\., \d/);
 	});
 });

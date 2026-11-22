@@ -31,6 +31,20 @@ export function formatBytes(bytes: number, lang: string): string {
 	}).format(value);
 }
 
+/** A moment in short: the day, the month and the time, and the year only when it is not `now`'s. */
+export function formatWhen(iso: string, lang: string, now = new Date()): string {
+	const date = new Date(iso);
+	const year = date.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' as const };
+
+	return new Intl.DateTimeFormat(lang, {
+		day: 'numeric',
+		month: 'short',
+		...year,
+		hour: 'numeric',
+		minute: '2-digit',
+	}).format(date);
+}
+
 /** Numbers, sizes and times in the page's current language; read in a template, they follow a switch. */
 export function useFormat() {
 	const { locale } = useI18n();
@@ -42,5 +56,7 @@ export function useFormat() {
 			new Intl.DateTimeFormat(locale.value, { dateStyle: 'medium', timeStyle: 'short' }).format(
 				new Date(iso),
 			),
+		/** A moment in short: the day, the month and the time; the year only when it is not this one. */
+		when: (iso: string): string => formatWhen(iso, locale.value),
 	};
 }

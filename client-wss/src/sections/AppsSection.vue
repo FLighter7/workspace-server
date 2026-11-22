@@ -30,7 +30,6 @@
 		<p v-if="loaded && apps.length === 0" class="text-medium-emphasis">{{ t('noApps') }}</p>
 
 		<FactList v-if="apps.length > 1" :class="$style.totals">
-			<FactItem :label="t('allFiles')">{{ format.number(totalFiles) }}</FactItem>
 			<FactItem :label="t('allUsed')">{{ format.bytes(totalSize) }}</FactItem>
 		</FactList>
 
@@ -41,16 +40,15 @@
 				:app="app"
 				:main-name="mainName"
 				:opening="opening === app.id"
+				:device-count="deviceCount(app)"
+				:online="online(app)"
 				@open-folder="openFolder(app)"
 				@quota="openQuota(app)"
 				@delete="openDelete(app)"
+				@devices="openDevices(app)"
 			/>
 		</ul>
 
-		<!-- What was done to an app, said once and gone: the list shows the rest. -->
-		<VSnackbar v-model="toastOpen" color="success" location="bottom end">{{
-			toast ? t(toast) : ''
-		}}</VSnackbar>
 		<AddAppDialog
 			v-model="addOpen"
 			:ids="apps.map((app) => app.id)"
@@ -64,6 +62,12 @@
 			@deleted="onDeleted"
 		/>
 		<QuotaDialog v-model="quotaOpen" :app="editing" @saved="onQuotaSaved" />
+		<AppDevicesDialog
+			v-model="devicesOpen"
+			:app="listing"
+			:devices="listingDevices"
+			@removed="onDeviceRemoved"
+		/>
 	</section>
 </template>
 
@@ -75,13 +79,15 @@ import { serverApi } from '@/api/client';
 import type { AppInfo, DeviceInfo, UpstreamStatus } from '@/api/types';
 import AddAppDialog from '@/components/AddAppDialog.vue';
 import AppCard from '@/components/AppCard.vue';
+import AppDevicesDialog from '@/components/AppDevicesDialog.vue';
 import DeleteAppDialog from '@/components/DeleteAppDialog.vue';
 import FactItem from '@/components/FactItem.vue';
 import FactList from '@/components/FactList.vue';
 import QuotaDialog from '@/components/QuotaDialog.vue';
 import StatusLine from '@/components/StatusLine.vue';
-import { errorMessage, type Message } from '@/composables/messages';
+import { errorMessage, info, type Message } from '@/composables/messages';
 import { useFormat } from '@/composables/useFormat';
+import { notify } from '@/composables/useNotify';
 import { usePolling } from '@/composables/usePolling';
 import { rescueFocus } from '@/composables/useReturnFocus';
 import s from '@/styles/section.module.scss';
@@ -91,8 +97,8 @@ import s from '@/styles/section.module.scss';
  * they take of its quota, its folder, and what needs the user (a divergence
  * to choose on a device, a sync the quota holds). This section does what the
  * cards ask: changing the quota (not for an app a subordinate follows its main
- * for: the main sets that one), opening the folder, deleting the app, and
- * adding one. The list is polled while the section is shown, so the marks
+ * for: the main sets that one), opening the folder, listing the app's devices
+ * (to remove one), deleting the app, and adding one. The list is polled while the section is shown, so the marks
  * come and go by themselves.
  */
 const { t } = useI18n();
@@ -101,12 +107,10 @@ const format = useFormat();
 const apps = ref<AppInfo[]>([]);
 const upstream = ref<UpstreamStatus | null>(null);
 const loaded = ref(false);
+/** The list cannot be read: a state, which lasts until a poll reads it again. */
 const appsMessage = ref<Message | null>(null);
 
 const addOpen = ref(false);
-/** The outcome of adding or deleting an app, shown in a snackbar. */
-const toast = ref<'added' | 'deleted' | null>(null);
-const toastOpen = ref(false);
 
 const deleteOpen = ref(false);
 const deleting = ref<AppInfo | null>(null);
@@ -117,13 +121,22 @@ const editing = ref<AppInfo | null>(null);
 /** The app whose folder is being opened. */
 const opening = ref<string | null>(null);
 
+/** The devices of apps, polled with them; null until the server has listed them. */
+const devices = ref<DeviceInfo[] | null>(null);
+const devicesOpen = ref(false);
+/** The app whose devices the dialog lists, by id: its copy follows the polls. */
+const listingId = ref<string | null>(null);
+const listing = computed(() => apps.value.find((app) => app.id === listingId.value) ?? null);
+const listingDevices = computed(() =>
+	devices.value === null ? null : devices.value.filter((d) => d.app === listingId.value),
+);
+
 /**
  * A subordinate: it takes the quota of each app its main lists from the main
  * (AppInfo.followsMain); an app only it serves is its own.
  */
 const linked = computed(() => upstream.value?.linked === true);
 const mainName = computed(() => upstream.value?.name ?? '');
-const totalFiles = computed(() => apps.value.reduce((sum, app) => sum + app.files, 0));
 const totalSize = computed(() => apps.value.reduce((sum, app) => sum + app.size, 0));
 
 /**
@@ -133,6 +146,7 @@ const totalSize = computed(() => apps.value.reduce((sum, app) => sum + app.size,
  */
 async function loadApps(): Promise<void> {
 	void loadUpstream();
+	void loadDevices();
 	try {
 		apps.value = await serverApi.apps();
 	} catch (error) {
@@ -151,30 +165,68 @@ async function loadUpstream(): Promise<void> {
 	}
 }
 
+/**
+ * The devices of apps, for the number each card shows connected and for the
+ * list its Devices tile opens. A failure keeps what was read last: the list of
+ * apps says what matters.
+ */
+async function loadDevices(): Promise<void> {
+	const read = ++devicesRead;
+	try {
+		const list = (await serverApi.devices()).filter((d) => d.kind !== 'server');
+		// A read begun before a removal may still list the removed device.
+		if (read === devicesRead) devices.value = list;
+	} catch {
+		// The next poll tries again.
+	}
+}
+
+/** Counts the reads of the devices, so a removal outdates the ones under way. */
+let devicesRead = 0;
+
+/** A device removed from the dialog leaves the list and its app's numbers at once. */
+function onDeviceRemoved(id: string): void {
+	devicesRead++;
+	if (devices.value) devices.value = devices.value.filter((d) => d.id !== id);
+	void loadApps();
+}
+
+/** How many devices an app has: as the dialog lists them, once they are listed. */
+function deviceCount(app: AppInfo): number {
+	if (devices.value === null) return app.devices;
+	return devices.value.filter((d) => d.app === app.id).length;
+}
+
+/** How many of an app's devices are connected now; null until they are listed. */
+function online(app: AppInfo): number | null {
+	if (devices.value === null) return null;
+	return devices.value.filter((d) => d.app === app.id && d.connected).length;
+}
+
 usePolling(loadApps);
 
-function say(outcome: 'added' | 'deleted'): void {
-	toast.value = outcome;
-	toastOpen.value = true;
+function openDevices(app: AppInfo): void {
+	listingId.value = app.id;
+	devicesOpen.value = true;
 }
 
 async function onAdded(): Promise<void> {
-	say('added');
+	notify(info('added'));
 	await loadApps();
 }
 
 /**
  * "Open folder": the server opens the app's folder in the file manager of its
- * own computer, which is the one this page is open on.
+ * own computer, which is the one this page is open on. The window is the
+ * answer, so only an error is said.
  */
 async function openFolder(app: AppInfo): Promise<void> {
 	if (opening.value !== null) return;
 	opening.value = app.id;
 	try {
 		await serverApi.openFolder(app.id);
-		appsMessage.value = { key: 'folderOpened', values: { app: app.name } };
 	} catch (error) {
-		appsMessage.value = errorMessage(error);
+		notify(errorMessage(error));
 	} finally {
 		opening.value = null;
 	}
@@ -188,10 +240,7 @@ function openQuota(app: AppInfo): void {
 async function onQuotaSaved(quota: number): Promise<void> {
 	const app = editing.value;
 	if (app) {
-		appsMessage.value = {
-			key: 'quotaSaved',
-			values: { app: app.name, quota: format.bytes(quota) },
-		};
+		notify({ key: 'quotaSaved', values: { app: app.name, quota: format.bytes(quota) } });
 	}
 	await loadApps();
 }
@@ -200,7 +249,7 @@ async function openDelete(app: AppInfo): Promise<void> {
 	try {
 		deletingDevices.value = (await serverApi.devices()).filter((d) => d.app === app.id);
 	} catch (error) {
-		appsMessage.value = errorMessage(error);
+		notify(errorMessage(error));
 		return;
 	}
 	deleting.value = app;
@@ -208,7 +257,7 @@ async function openDelete(app: AppInfo): Promise<void> {
 }
 
 async function onDeleted(): Promise<void> {
-	say('deleted');
+	notify(info('deleted'));
 	await loadApps();
 	await rescueFocus();
 }

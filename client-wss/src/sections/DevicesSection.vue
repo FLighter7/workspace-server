@@ -116,7 +116,7 @@
 						<FactItem :label="t('lastSeen')">{{ format.time(device.lastSeen) }}</FactItem>
 					</FactList>
 					<template #actions>
-						<VBtn @click="removeDevice(device)">{{ t('remove') }}</VBtn>
+						<VBtn @click="removeDevice(device)">{{ t('disconnect') }}</VBtn>
 					</template>
 				</ItemCard>
 			</ul>
@@ -140,7 +140,7 @@ import StateBadge from '@/components/StateBadge.vue';
 import StatusLine from '@/components/StatusLine.vue';
 import { errorMessage, info, type Message } from '@/composables/messages';
 import { upstreamError } from '@/composables/upstream';
-import { ask } from '@/composables/useConfirm';
+import { ask, type Question } from '@/composables/useConfirm';
 import { useFormat } from '@/composables/useFormat';
 import { usePolling } from '@/composables/usePolling';
 import { rescueFocus } from '@/composables/useReturnFocus';
@@ -218,12 +218,26 @@ async function loadDevices(): Promise<void> {
 // stays on the button that has it.
 usePolling(loadDevices);
 
+/** A device of an app is disconnected: it loses access, as from its app's card on Apps. */
 async function removeDevice(device: DeviceInfo): Promise<void> {
-	await remove(device, device.name, 'removeText');
+	const question = {
+		title: 'disconnectTitle',
+		name: device.name,
+		text: 'removeText',
+		ok: 'disconnect',
+	} as const;
+	await remove(device, question, 'disconnected');
 }
 
+/** A linked server is removed: the link between the two servers ends. */
 async function removeServer(device: DeviceInfo): Promise<void> {
-	await remove(device, device.server?.name ?? device.name, 'removeServerText');
+	const question = {
+		title: 'removeTitle',
+		name: device.server?.name ?? device.name,
+		text: 'removeServerText',
+		ok: 'remove',
+	} as const;
+	await remove(device, question, 'removed');
 }
 
 /**
@@ -261,17 +275,17 @@ async function handOver(device: DeviceInfo): Promise<void> {
 
 async function remove(
 	device: DeviceInfo,
-	name: string,
-	text: 'removeText' | 'removeServerText',
+	question: Question,
+	done: 'disconnected' | 'removed',
 ): Promise<void> {
-	if (!(await ask({ title: 'removeTitle', name, text, ok: 'remove' }))) return;
+	if (!(await ask(question))) return;
 	try {
 		await serverApi.removeDevice(device.id);
 	} catch (error) {
 		message.value = errorMessage(error);
 		return;
 	}
-	message.value = info('removed');
+	message.value = info(done);
 	await loadDevices();
 	await rescueFocus();
 }

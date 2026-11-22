@@ -78,8 +78,11 @@ const todoCard = (page: Page) =>
 		.getByRole('listitem')
 		.filter({ has: page.getByRole('heading', { name: 'Todo', exact: true }) });
 
-/** The section's status line. */
+/** The section's status line, for a state that lasts. */
 const said = (page: Page) => page.getByRole('region', { name: 'Apps' }).getByRole('status').first();
+
+/** The page's notification centre, a snackbar, for what an action came to. */
+const notice = (page: Page) => page.locator('.v-snackbar').getByRole('status');
 
 test('both pages mark the divergence by the other server, and say to choose on a device', async ({
 	browser,
@@ -143,7 +146,8 @@ test("the quota is changed on the main's page, and the laptop follows it, read-o
 	await desk.screenshot({ path: join(SHOTS, 'apps-quota-dialog.png') });
 	await dialog.getByRole('button', { name: 'Save' }).click();
 	await expect(dialog).toBeHidden();
-	await expect(said(desk)).toHaveText('The quota of Todo is now 30 MB.');
+	await expect(notice(desk)).toHaveText('The quota of Todo is now 30 MB.');
+	await expect(said(desk)).toHaveText('');
 	await expect(change).toBeFocused();
 	await expect(card).toContainText('of 30 MB');
 	const mainApps = await main.api<App[]>('GET', '/api/apps');
@@ -181,20 +185,43 @@ test("Open folder asks the server to open the app's folder", async ({ browser })
 	const page = await openPage(browser, main.base, '#apps');
 	// A stand-in answers in place of the server, which would open a window.
 	const asked: string[] = [];
+	let refuse = false;
 	await page.route('**/api/apps/*/open', async (route) => {
 		const request = route.request();
 		asked.push(`${request.method()} ${new URL(request.url()).pathname}`);
 		expect(request.headers()['x-workspace-server']).toBe('1');
-		await route.fulfill({ status: 204 });
+		await route.fulfill(
+			refuse
+				? { status: 404, json: { error: 'notFound', message: 'no such app' } }
+				: { status: 204 },
+		);
 	});
 
 	const card = todoCard(page);
-	// The folder's path is the button that opens it.
-	const folder = card.getByRole('button', { name: /Open folder of Todo/ });
-	await expect(folder).toContainText(join('WSS-Data', 'apps', 'todo'));
+	// An icon opens the folder; its path is the icon's name and tooltip, not shown on the card.
+	const folder = card.getByRole('button', { name: /^Open folder of Todo: / });
+	expect(await folder.getAttribute('title')).toContain(join('WSS-Data', 'apps', 'todo'));
+	await expect(card).not.toContainText(join('WSS-Data', 'apps', 'todo'));
 	await folder.click();
-	await expect(said(page)).toHaveText('The folder of Todo opens in the file manager.');
-	expect(asked).toEqual(['POST /api/apps/todo/open']);
+	await expect.poll(() => asked).toEqual(['POST /api/apps/todo/open']);
+	// The window is the answer: the page says nothing.
+	await expect(folder).toBeEnabled();
+	await expect(said(page)).toHaveText('');
+	await expect(page.locator('.v-snackbar')).toHaveCount(0);
+
+	// A refusal is said in the snackbar, in red, until Close; the section stays quiet.
+	refuse = true;
+	await folder.click();
+	await expect(notice(page)).toHaveText(
+		'Not found: it may have been removed already. (no such app)',
+	);
+	await expect(said(page)).toHaveText('');
+	// Shot once it has faded in.
+	await expect(page.locator('.v-snackbar__wrapper')).toHaveCSS('opacity', '1');
+	await page.screenshot({ path: join(SHOTS, 'apps-open-folder-error.png') });
+	await page.locator('.v-snackbar').getByRole('button', { name: 'Close' }).click();
+	await expect(page.locator('.v-snackbar')).toHaveCount(0);
+	refuse = false;
 
 	// The server's own answer for an app it does not serve: nothing opens.
 	await expect(main.api('POST', '/api/apps/none/open')).rejects.toThrow(/404.*notFound/);
@@ -206,6 +233,95 @@ test("Open folder asks the server to open the app's folder", async ({ browser })
 		true,
 	);
 	await page.screenshot({ path: join(SHOTS, 'apps-main-phone.png'), fullPage: true });
+
+	await expectNoCspViolations(page);
+	await page.context().close();
+});
+
+test("the Devices tile lists the app's devices in a dialog, where one is removed", async ({
+	browser,
+}) => {
+	const { main } = servers();
+	const page = await openPage(browser, main.base, '#apps');
+	// Stand-ins for the server's devices: pairing real ones is the server's own e2e.
+	let devices = [
+		{
+			id: 'PhoneDevice0001',
+			app: 'todo',
+			name: 'Pixel 8',
+			pairedAt: '2026-11-03T09:00:00Z',
+			lastSeen: '2026-11-22T10:00:00Z',
+			connected: true,
+		},
+		{
+			id: 'LaptopDevice001',
+			app: 'todo',
+			name: 'Laptop',
+			pairedAt: '2026-11-04T09:00:00Z',
+			lastSeen: '2026-11-21T18:00:00Z',
+			connected: false,
+		},
+	];
+	const removed: string[] = [];
+	await page.route('**/api/devices', (route) => route.fulfill({ json: devices }));
+	await page.route('**/api/devices/*', async (route) => {
+		const id = new URL(route.request().url()).pathname.split('/').pop() ?? '';
+		expect(route.request().method()).toBe('DELETE');
+		removed.push(id);
+		devices = devices.filter((d) => d.id !== id);
+		await route.fulfill({ status: 204 });
+	});
+
+	const card = todoCard(page);
+	const tile = card.getByRole('button', { name: 'Devices of Todo: 2, connected now: 1' });
+	await expect(tile).toContainText('1 connected');
+	await tile.click();
+	const dialog = page.getByRole('dialog', { name: 'Devices of Todo' });
+	await expect(dialog.getByRole('heading', { name: 'Devices of Todo' })).toBeFocused();
+	await expect(dialog.getByRole('listitem')).toHaveCount(2);
+	await expect(dialog.getByRole('listitem').first()).toContainText('Connected now');
+	await page.screenshot({ path: join(SHOTS, 'apps-devices-dialog.png') });
+
+	// Escape closes it, and the focus goes back to the tile.
+	await page.keyboard.press('Escape');
+	await expect(dialog).toBeHidden();
+	await expect(tile).toBeFocused();
+
+	// Remove asks first, then says so in the snackbar; the row goes.
+	await tile.click();
+	await dialog.getByRole('button', { name: 'Disconnect Laptop' }).click();
+	const question = page.getByRole('dialog', { name: 'Disconnect Laptop?' });
+	await question.getByRole('button', { name: 'Disconnect' }).click();
+	await expect(notice(page)).toHaveText('Disconnected.');
+	expect(removed).toEqual(['LaptopDevice001']);
+	await expect(dialog.getByRole('listitem')).toHaveCount(1);
+	await expect(dialog.getByRole('heading', { name: 'Devices of Todo' })).toBeFocused();
+	await dialog.getByRole('button', { name: 'Close' }).click();
+	await expect(
+		card.getByRole('button', { name: 'Devices of Todo: 1, connected now: 1' }),
+	).toBeVisible();
+
+	// A phone's width: the dialog fits, and nothing scrolls sideways.
+	await page.setViewportSize({ width: 360, height: 800 });
+	await card.getByRole('button', { name: /^Devices of Todo/ }).click();
+	// Shot once it has opened: the title takes the focus then.
+	await expect(dialog.getByRole('heading', { name: 'Devices of Todo' })).toBeFocused();
+	expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+		true,
+	);
+	await page.screenshot({ path: join(SHOTS, 'apps-devices-dialog-phone.png') });
+
+	// Removing the last one closes the dialog; the tile turns plain, and the
+	// focus goes to the section's heading.
+	await dialog.getByRole('button', { name: 'Disconnect Pixel 8' }).click();
+	await page
+		.getByRole('dialog', { name: 'Disconnect Pixel 8?' })
+		.getByRole('button', { name: 'Disconnect' })
+		.click();
+	await expect(dialog).toBeHidden();
+	expect(removed).toEqual(['LaptopDevice001', 'PhoneDevice0001']);
+	await expect(card.getByRole('button', { name: /^Devices of Todo/ })).toHaveCount(0);
+	await expect(page.getByRole('heading', { name: 'Apps', level: 1 })).toBeFocused();
 
 	await expectNoCspViolations(page);
 	await page.context().close();

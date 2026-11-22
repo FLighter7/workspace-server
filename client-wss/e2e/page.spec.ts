@@ -100,7 +100,9 @@ test('an app is added and deleted', async ({ browser }) => {
 	await expect(card).toBeVisible();
 	await expect(card).toContainText('notes');
 	await expect(card).toContainText('0 bytes of 20 MB');
-	await expect(card.getByText('No files yet')).toBeVisible();
+	await expect(card.getByText('Not yet')).toBeVisible();
+	// No devices: the Devices tile is plain, with nothing to open.
+	await expect(card.getByRole('button', { name: /^Devices of/ })).toHaveCount(0);
 
 	await card.getByRole('button', { name: 'Delete My notes', exact: true }).click();
 	const dialog = page.getByRole('dialog', { name: 'Delete My notes?' });

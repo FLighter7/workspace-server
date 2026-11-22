@@ -1,96 +1,147 @@
 <style lang="scss" module>
-// The name at the left, the ID at the right, and Delete, an icon, in the corner.
-// A long name and ID wrap, the ID under the name, instead of pushing Delete off.
+// The name on the first line, with Open folder and Delete, two icons, centred on
+// it at the right; the ID on the line under the name. A long name wraps and
+// leaves the icons where they are.
 .head {
-	display: flex;
+	display: grid;
+	grid-template:
+		'name actions' auto
+		'id id' auto
+		/ minmax(0, 1fr) auto;
 	align-items: center;
-	gap: 0.5rem 1rem;
-	margin-block-end: 0.5rem;
-}
-
-.titles {
-	display: flex;
-	flex: 1 1 0;
-	flex-wrap: wrap;
-	align-items: baseline;
-	justify-content: space-between;
-	gap: 0 1rem;
-	min-width: 0;
+	column-gap: 0.75rem;
 }
 
 .name {
+	grid-area: name;
 	min-width: 0;
 	margin: 0;
 	overflow-wrap: anywhere;
 }
 
 .id {
+	grid-area: id;
 	min-width: 0;
-	margin-inline-start: auto;
 	overflow-wrap: anywhere;
 }
 
-.delete {
-	flex: none;
-}
-
-// The bar takes half the card's width, the text follows it, and Change sits at
-// the right edge, under Delete. A phone leaves no room for all three on a line:
-// there the bar takes a line of its own, and the text and Change sit under it.
-.usage {
+.actions {
+	grid-area: actions;
 	display: flex;
 	align-items: center;
-	gap: 0.25rem 0.75rem;
+	margin-inline-end: -0.5rem;
+}
 
+// The caption (Space used, then the sizes) over a bar the card's width, and
+// Change at the right across both.
+.usage {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	align-items: center;
+	row-gap: 0.125rem;
+	margin-block-start: 0.75rem;
+
+	// Pinned to the first column: with no Change (the main sets the quota), the
+	// bar would otherwise flow into the second, which is then empty and zero wide.
+	.caption,
 	.bar {
-		flex: 0 1 50%;
-		width: auto;
+		grid-column: 1;
 	}
 
-	.used {
-		min-width: 0;
-	}
-
+	// The gap is Change's own, so with no Change the bar reaches the edge.
 	.change {
-		flex: none;
-		margin-inline-start: auto;
+		grid-row: 1 / span 2;
+		grid-column: 2;
+		margin-inline-start: 1rem;
 	}
+}
+
+.caption {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: space-between;
+	gap: 0 1rem;
+}
+
+// The last write and the devices, two tiles in a row of three columns, so each
+// keeps a third of the card; a phone puts the last write on a line of its own,
+// over the devices at half the width.
+.tiles {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 0.5rem;
+	margin: 1rem 0 0;
 
 	@media (max-width: 30rem) {
-		flex-wrap: wrap;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
 
-		.bar {
-			flex: 1 0 100%;
+		> :first-child {
+			grid-column: 1 / -1;
 		}
 	}
 }
 
-.facts {
-	margin-block-start: 0.75rem;
+.tile {
+	min-width: 0;
+	padding: 0.5rem 0.75rem;
+	background: rgba(var(--v-theme-on-surface), 0.04);
+	border-radius: 0.5rem;
+
+	dd {
+		margin: 0;
+		overflow-wrap: anywhere;
+	}
 }
 
-// The folder is a button that reads as a link: it opens the folder in the
-// file manager, and a long path wraps instead of cutting off.
-.folder {
+// The Devices tile opens the app's devices: its number is a button whose
+// ::after covers the whole tile, so a click anywhere on it opens them, while
+// the label stays the <dt> of a <dl>. The chevron says it opens something.
+.devices {
+	position: relative;
+	padding-inline-end: 2.25rem;
+
+	&:hover {
+		background: rgba(var(--v-theme-primary), 0.08);
+	}
+
+	&:has(.open:focus-visible) {
+		outline: 2px solid rgb(var(--v-theme-primary));
+		outline-offset: 2px;
+	}
+}
+
+.open {
 	padding: 0;
 	font: inherit;
-	color: rgb(var(--v-theme-primary));
+	color: inherit;
 	text-align: start;
-	text-decoration: underline;
-	overflow-wrap: anywhere;
 	cursor: pointer;
 	background: none;
 	border: 0;
+	outline: none;
 
-	&:disabled {
-		cursor: progress;
-		opacity: var(--v-disabled-opacity);
+	&::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		border-radius: inherit;
 	}
+}
 
-	&:focus-visible {
-		outline: 2px solid currentcolor;
-		outline-offset: 2px;
-	}
+// Whole, on the number's line or, in a narrow tile, on the next.
+.online {
+	display: inline-block;
+	margin-inline-start: 0.375rem;
+	color: rgb(var(--v-theme-success));
+	white-space: nowrap;
+}
+
+.chevron {
+	position: absolute;
+	inset-inline-end: 0.5rem;
+	inset-block-start: 50%;
+	translate: 0 -50%;
+	pointer-events: none;
 }
 
 // What needs the user: a divergence, a sync the quota holds, a full quota.
@@ -119,25 +170,38 @@
 		<VCard variant="flat">
 			<VCardText>
 				<div :class="$style.head">
-					<div :class="$style.titles">
-						<h2 :class="['text-title-large', $style.name]">
-							<bdi>{{ app.name }}</bdi>
-						</h2>
-						<code :class="[$style.id, 'text-medium-emphasis']">{{ app.id }}</code>
+					<h2 :class="['text-title-large', $style.name]">
+						<bdi>{{ app.name }}</bdi>
+					</h2>
+					<code :class="[$style.id, 'text-medium-emphasis']">{{ app.id }}</code>
+					<div :class="$style.actions">
+						<VBtn
+							class="text-medium-emphasis"
+							:icon="mdiFolderOpenOutline"
+							variant="text"
+							density="comfortable"
+							:loading="opening"
+							:title="t('openFolderTitle', { path: app.folder })"
+							:aria-label="t('openFolderPath', { app: app.name, path: app.folder })"
+							@click="emit('openFolder')"
+						/>
+						<VBtn
+							:icon="mdiDeleteOutline"
+							color="error"
+							variant="text"
+							density="comfortable"
+							:title="t('delete')"
+							:aria-label="t('deleteLabel', { app: app.name })"
+							@click="emit('delete')"
+						/>
 					</div>
-					<VBtn
-						:class="$style.delete"
-						:icon="mdiDeleteOutline"
-						color="error"
-						variant="text"
-						density="comfortable"
-						:title="t('delete')"
-						:aria-label="t('deleteLabel', { app: app.name })"
-						@click="emit('delete')"
-					/>
 				</div>
 
 				<div :class="$style.usage">
+					<div :class="[$style.caption, 'text-body-small', 'text-medium-emphasis']">
+						<span>{{ t('used') }}</span>
+						<span>{{ usedText }}</span>
+					</div>
 					<VProgressLinear
 						:class="$style.bar"
 						:model-value="usedPercent"
@@ -147,7 +211,6 @@
 						:aria-label="t('quotaUsed', { app: app.name })"
 						:aria-valuetext="usedText"
 					/>
-					<span :class="$style.used">{{ usedText }}</span>
 					<VBtn
 						v-if="!app.followsMain"
 						:class="$style.change"
@@ -159,26 +222,37 @@
 					</VBtn>
 				</div>
 
-				<FactList :class="$style.facts">
-					<FactItem :label="t('folder')">
-						<button
-							type="button"
-							:class="$style.folder"
-							:disabled="opening"
-							:aria-label="t('openFolderPath', { app: app.name, path: app.folder })"
-							@click="emit('openFolder')"
-						>
-							<code>{{ app.folder }}</code>
-						</button>
-					</FactItem>
-					<FactItem :label="t('modified')">
-						{{ app.modified ? format.time(app.modified) : t('notYet') }}
-					</FactItem>
-					<FactItem :label="t('files')">
-						{{ app.files > 0 ? format.number(app.files) : t('noFiles') }}
-					</FactItem>
-					<FactItem :label="t('tabDevices')">{{ format.number(app.devices) }}</FactItem>
-				</FactList>
+				<dl :class="$style.tiles">
+					<div :class="$style.tile">
+						<dt class="text-body-small text-medium-emphasis">{{ t('modified') }}</dt>
+						<dd class="text-title-medium">
+							{{ app.modified ? format.time(app.modified) : t('notYet') }}
+						</dd>
+					</div>
+					<!-- With no devices there is nothing to list: a plain tile, like the last write. -->
+					<div v-if="deviceCount === 0" :class="$style.tile">
+						<dt class="text-body-small text-medium-emphasis">{{ t('tabDevices') }}</dt>
+						<dd class="text-title-medium">{{ format.number(0) }}</dd>
+					</div>
+					<div v-else :class="[$style.tile, $style.devices]">
+						<dt class="text-body-small text-medium-emphasis">{{ t('tabDevices') }}</dt>
+						<dd class="text-title-medium">
+							<button
+								type="button"
+								:class="$style.open"
+								aria-haspopup="dialog"
+								:aria-label="devicesLabel"
+								@click="emit('devices')"
+							>
+								{{ format.number(deviceCount)
+								}}<span v-if="online" :class="['text-body-small', $style.online]">{{
+									t('onlineHint', { count: format.number(online) })
+								}}</span>
+							</button>
+							<VIcon :class="[$style.chevron, 'text-medium-emphasis']" :icon="mdiChevronRight" />
+						</dd>
+					</div>
+				</dl>
 
 				<div v-if="hasMarks" :class="$style.marks">
 					<div v-for="other in app.diverged" :key="other.serverId">
@@ -214,20 +288,20 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { I18nT, useI18n } from 'vue-i18n';
-import { mdiDeleteOutline } from '@mdi/js';
+import { mdiChevronRight, mdiDeleteOutline, mdiFolderOpenOutline } from '@mdi/js';
 import type { AppInfo } from '@/api/types';
 import { useFormat } from '@/composables/useFormat';
-import FactItem from './FactItem.vue';
-import FactList from './FactList.vue';
 import StateBadge from './StateBadge.vue';
 
 /**
- * One app of the list: the name and the ID on a line, with Delete, an icon, in
- * the corner; the space the files take of the quota (a bar, the sizes in the
- * unit that fits, and Change at the right, under Delete); the data folder (a button that opens it), the last
- * write, the number of files and of devices; and what needs the user (a
- * divergence, a sync the quota holds, a full quota). What to do about any of it
- * is the parent's: the card only says so and asks.
+ * One app of the list: the name, with Open folder and Delete, two icons, at
+ * the right of it, and the ID under it; the space the files take of the quota
+ * (the sizes in the unit that fits over a bar, and Change at the right); the
+ * last write and the number of devices, two tiles, the second of which opens
+ * the app's devices; and what needs the user (a divergence, a sync the quota
+ * holds, a full quota). The folder's path is the Open folder button's name and
+ * its tooltip. What to do about any of it is the parent's: the card only says
+ * so and asks.
  */
 const props = defineProps<{
 	app: AppInfo;
@@ -235,8 +309,12 @@ const props = defineProps<{
 	mainName: string;
 	/** The app's folder is being opened. */
 	opening: boolean;
+	/** How many devices it has, as its Devices tile lists them. */
+	deviceCount: number;
+	/** How many of its devices are connected now; null while that is not known. */
+	online: number | null;
 }>();
-const emit = defineEmits<{ delete: []; quota: []; openFolder: [] }>();
+const emit = defineEmits<{ delete: []; quota: []; openFolder: []; devices: [] }>();
 
 const { t } = useI18n();
 const format = useFormat();
@@ -244,6 +322,14 @@ const format = useFormat();
 const usedText = computed(() =>
 	t('usedOf', { used: format.bytes(props.app.size), quota: format.bytes(props.app.quota) }),
 );
+
+/** The Devices tile's name: the app, the number, and how many are connected now when known. */
+const devicesLabel = computed(() => {
+	const values = { app: props.app.name, count: format.number(props.deviceCount) };
+	return props.online === null
+		? t('devicesLabel', values)
+		: t('devicesOnlineLabel', { ...values, online: format.number(props.online) });
+});
 
 const usedPercent = computed(() =>
 	props.app.quota > 0 ? Math.min(100, Math.round((props.app.size / props.app.quota) * 100)) : 0,

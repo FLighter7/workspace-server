@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, serverApi } from '@/api/client';
-import type { AppInfo, UpstreamStatus } from '@/api/types';
+import type { AppInfo, DeviceInfo, UpstreamStatus } from '@/api/types';
+import { noticeState, resetNotices } from '@/composables/useNotify';
 import { mountPage, settle } from '@/testing/mountPage';
 import AppsSection from '../AppsSection.vue';
 
@@ -33,6 +34,35 @@ const notes: AppInfo = {
 	followsMain: false,
 };
 
+/** Todo's two devices, one of them connected now, and a linked server, which is no app's. */
+const todoDevices: DeviceInfo[] = [
+	{
+		id: 'PhoneDevice0001',
+		app: 'todo',
+		name: 'Pixel 8',
+		pairedAt: '2026-11-03T09:00:00Z',
+		lastSeen: '2026-11-13T10:00:00Z',
+		connected: true,
+	},
+	{
+		id: 'LaptopDevice001',
+		app: 'todo',
+		name: 'Laptop',
+		pairedAt: '2026-11-04T09:00:00Z',
+		lastSeen: '2026-11-12T18:00:00Z',
+		connected: false,
+	},
+	{
+		id: 'LinkedServer001',
+		app: '',
+		kind: 'server',
+		name: 'Laptop server',
+		pairedAt: '2026-11-05T09:00:00Z',
+		lastSeen: '2026-11-13T10:00:00Z',
+		connected: true,
+	},
+];
+
 const asMain: UpstreamStatus = {
 	linked: false,
 	connected: false,
@@ -60,10 +90,12 @@ beforeEach(() => {
 	apps = vi.spyOn(serverApi, 'apps').mockResolvedValue([todo, notes]);
 	upstream = vi.spyOn(serverApi, 'upstream').mockResolvedValue(asMain);
 	vi.spyOn(serverApi, 'status').mockResolvedValue({ dataFree: null } as never);
+	vi.spyOn(serverApi, 'devices').mockResolvedValue(todoDevices);
 });
 
 afterEach(() => {
 	vi.restoreAllMocks();
+	resetNotices();
 	document.body.innerHTML = '';
 });
 
@@ -72,7 +104,7 @@ const text = (): string => document.body.textContent?.replace(/\s+/g, ' ') ?? ''
 const byLabel = (label: string): HTMLButtonElement | null =>
 	document.querySelector(`button[aria-label="${label}"]`);
 
-/** The folder link of an app: its name is "Open folder of <app>: <path>". */
+/** The Open folder icon of an app: its name is "Open folder of <app>: <path>". */
 const folderButton = (name: string): HTMLButtonElement | null =>
 	document.querySelector(`button[aria-label^="Open folder of ${name}"]`);
 
@@ -81,6 +113,12 @@ const card = (name: string): HTMLElement =>
 	[...document.querySelectorAll('li')].find((li) =>
 		li.querySelector('h2')?.textContent?.includes(name),
 	) as HTMLElement;
+
+/** The value of an app's fact, by the fact's label. */
+const fact = (name: string, label: string): string | undefined =>
+	[...card(name).querySelectorAll('dt')]
+		.find((dt) => dt.textContent?.trim() === label)
+		?.nextElementSibling?.textContent?.trim();
 
 const dialog = (): HTMLElement => document.querySelector('[role="dialog"]') as HTMLElement;
 
@@ -91,27 +129,31 @@ async function openAddDialog(): Promise<void> {
 }
 
 describe('AppsSection on a main', () => {
-	it("shows each app's files, the space they take of the quota, its folder and the totals", async () => {
+	it("shows the space each app's files take of the quota, its folder and the total", async () => {
 		mountPage(AppsSection);
 		await settle();
 
 		const first = card('Todo').textContent ?? '';
-		expect(first).toContain('3');
 		expect(first).toContain('5 MB of 50 MB');
-		expect(first).toContain('C:\\ws\\WSS-Data\\apps\\todo');
+		// The folder's path is not shown: it is the Open folder icon's name and tooltip.
+		expect(first).not.toContain('C:\\ws');
+		expect(folderButton('Todo')?.title).toBe('Open folder: C:\\ws\\WSS-Data\\apps\\todo');
 		const bar = card('Todo').querySelector('[role="progressbar"][aria-hidden="false"]');
 		expect(bar?.getAttribute('aria-label')).toBe('Space used of the quota of Todo');
 		expect(bar?.getAttribute('aria-valuetext')).toBe('5 MB of 50 MB');
 		expect(bar?.getAttribute('aria-valuenow')).toBe('10');
-		expect(card('Notes').textContent).toContain('FilesNo files yet');
-		expect(card('Notes').textContent).toContain('Last writeNot yet');
+		expect(fact('Notes', 'Last write')).toBe('Not yet');
+		expect(byLabel('Devices of Todo: 2, connected now: 1')?.textContent).toBe('21 connected');
+		expect(fact('Notes', 'Devices')).toBe('0');
+		// The number of files is not shown: it says nothing the space does not.
+		expect(fact('Todo', 'Files')).toBeUndefined();
 
-		expect(text()).toContain('Files of all apps3');
 		expect(text()).toContain('Space used by all apps5 MB');
+		expect(text()).not.toContain('Files of all apps');
 		expect(text()).not.toContain('version');
 	});
 
-	it('lays a card out as the name and ID with Delete, the space with Change, then the facts', async () => {
+	it('lays a card out as the name and ID with Open folder and Delete, the space with Change, then the facts', async () => {
 		mountPage(AppsSection);
 		await settle();
 
@@ -124,19 +166,141 @@ describe('AppsSection on a main', () => {
 		expect(items).toEqual([
 			'Todo',
 			'todo',
+			// Open folder is an icon, named with the path.
+			'Open folder of Todo: C:\\ws\\WSS-Data\\apps\\todo',
 			'Delete Todo',
 			'Space used of the quota of Todo',
 			'Change the quota of Todo',
-			// The facts: the folder (a button, named with its path), the last write, the files, the devices.
-			'Data folder',
-			'Open folder of Todo: C:\\ws\\WSS-Data\\apps\\todo',
-			'C:\\ws\\WSS-Data\\apps\\todo',
+			// The facts, two tiles: the last write, the devices, a button that lists them.
 			'Last write',
-			'Files',
 			'Devices',
+			'Devices of Todo: 2, connected now: 1',
 		]);
 		// Nothing is folded away: there is no toggle.
 		expect(todoCard.querySelector('[aria-expanded]')).toBeNull();
+	});
+
+	it("lists an app's devices in a dialog from its Devices tile", async () => {
+		mountPage(AppsSection);
+		await settle();
+		byLabel('Devices of Todo: 2, connected now: 1')?.click();
+		await settle();
+		expect(dialog().getAttribute('aria-labelledby')).toBeTruthy();
+		expect(dialog().querySelector('h2')?.textContent?.trim()).toBe('Devices of Todo');
+		const rows = [...dialog().querySelectorAll('li')].map((li) =>
+			li.textContent?.replace(/\s+/g, ' ').trim(),
+		);
+		expect(rows).toHaveLength(2);
+		expect(rows[0]).toContain('Pixel 8');
+		expect(rows[0]).toContain('Connected now');
+		expect(rows[0]).toContain('Paired Nov 3,');
+		expect(rows[0]).not.toContain('Last seen');
+		// Not connected: when it was last seen stands in for the state, named for a screen reader.
+		expect(rows[1]).toContain('Laptop');
+		expect(rows[1]).toContain('Last seen: Nov 12,');
+		expect(rows[1]).not.toContain('Not connected');
+		expect(byLabel('Disconnect Laptop')?.getAttribute('title')).toBe('Disconnect');
+		// The linked server is no app's device.
+		expect(dialog().textContent).not.toContain('Laptop server');
+	});
+
+	it('lists the connected devices first, then the latest seen first', async () => {
+		const at = (name: string, lastSeen: string, connected: boolean): DeviceInfo => ({
+			id: `${name.padEnd(15, '0')}`,
+			app: 'todo',
+			name,
+			pairedAt: '2026-10-01T09:00:00Z',
+			lastSeen,
+			connected,
+		});
+		vi.mocked(serverApi.devices).mockResolvedValue([
+			at('OldOffline', '2026-10-05T09:00:00Z', false),
+			at('Online', '2026-11-13T09:00:00Z', true),
+			at('NewOffline', '2026-11-12T09:00:00Z', false),
+			at('LaterOnline', '2026-11-13T10:00:00Z', true),
+			at('MidOffline', '2026-11-01T09:00:00Z', false),
+		]);
+		mountPage(AppsSection);
+		await settle();
+		byLabel('Devices of Todo: 5, connected now: 2')?.click();
+		await settle();
+		const names = [...dialog().querySelectorAll('h3')].map((h) => h.textContent?.trim());
+		expect(names).toEqual(['LaterOnline', 'Online', 'NewOffline', 'MidOffline', 'OldOffline']);
+	});
+
+	it('keeps the Devices tile of an app with no devices plain: there is nothing to list', async () => {
+		mountPage(AppsSection);
+		await settle();
+		const tile = [...card('Notes').querySelectorAll('dt')].find(
+			(dt) => dt.textContent?.trim() === 'Devices',
+		)?.parentElement;
+		expect(tile?.querySelector('button')).toBeNull();
+		expect(tile?.querySelector('svg')).toBeNull();
+		expect(byLabel('Devices of Notes: 0, connected now: 0')).toBeNull();
+	});
+
+	/** The server's removal: the device leaves the list the next poll reads. */
+	function serverRemoves(): ReturnType<typeof vi.spyOn> {
+		let list = [...todoDevices];
+		vi.mocked(serverApi.devices).mockImplementation(async () => list);
+		return vi.spyOn(serverApi, 'removeDevice').mockImplementation(async (id: string) => {
+			list = list.filter((d) => d.id !== id);
+			return null;
+		});
+	}
+
+	it('removes a device from the dialog, after a question, and says so in the snackbar', async () => {
+		const removeDevice = serverRemoves();
+		const confirm = await import('@/composables/useConfirm');
+		vi.spyOn(confirm, 'ask').mockResolvedValue(true);
+		mountPage(AppsSection);
+		await settle();
+		byLabel('Devices of Todo: 2, connected now: 1')?.click();
+		await settle();
+		byLabel('Disconnect Laptop')?.click();
+		await settle();
+		expect(confirm.ask).toHaveBeenCalledWith(
+			expect.objectContaining({ title: 'disconnectTitle', name: 'Laptop', ok: 'disconnect' }),
+		);
+		expect(removeDevice).toHaveBeenCalledWith('LaptopDevice001');
+		expect(noticeState.current).toEqual({ key: 'disconnected' });
+		// Gone at once, before the next poll.
+		expect(byLabel('Disconnect Laptop')).toBeNull();
+		expect(byLabel('Disconnect Pixel 8')).not.toBeNull();
+		expect(byLabel('Devices of Todo: 1, connected now: 1')).not.toBeNull();
+	});
+
+	it('closes the dialog once its last device is removed, and the tile turns plain', async () => {
+		serverRemoves();
+		const confirm = await import('@/composables/useConfirm');
+		vi.spyOn(confirm, 'ask').mockResolvedValue(true);
+		mountPage(AppsSection);
+		await settle();
+		byLabel('Devices of Todo: 2, connected now: 1')?.click();
+		await settle();
+		byLabel('Disconnect Laptop')?.click();
+		await settle();
+		expect(dialog()).not.toBeNull();
+		byLabel('Disconnect Pixel 8')?.click();
+		await settle();
+		expect(document.querySelector('.v-overlay--active [role="dialog"]')).toBeNull();
+		expect(fact('Todo', 'Devices')).toBe('0');
+		expect(byLabel('Devices of Todo: 0, connected now: 0')).toBeNull();
+		expect(document.body.textContent).not.toContain('No devices yet');
+	});
+
+	it('keeps a device the user did not confirm removing', async () => {
+		const removeDevice = vi.spyOn(serverApi, 'removeDevice').mockResolvedValue(null);
+		const confirm = await import('@/composables/useConfirm');
+		vi.spyOn(confirm, 'ask').mockResolvedValue(false);
+		mountPage(AppsSection);
+		await settle();
+		byLabel('Devices of Todo: 2, connected now: 1')?.click();
+		await settle();
+		byLabel('Disconnect Laptop')?.click();
+		await settle();
+		expect(removeDevice).not.toHaveBeenCalled();
+		expect(byLabel('Disconnect Laptop')).not.toBeNull();
 	});
 
 	it('counts the space in the unit that fits: MB, GB, TB', async () => {
@@ -190,7 +354,11 @@ describe('AppsSection on a main', () => {
 		dialog().querySelector('form')?.dispatchEvent(new Event('submit'));
 		await settle();
 		expect(setQuota).toHaveBeenCalledWith('todo', 200 * MB);
-		expect(text()).toContain('The quota of Todo is now 200 MB.');
+		// Said in the page's snackbar, not in the section.
+		expect(noticeState.current).toEqual({
+			key: 'quotaSaved',
+			values: { app: 'Todo', quota: '200 MB' },
+		});
 	});
 
 	it("keeps the dialog open with the server's refusal", async () => {
@@ -249,12 +417,26 @@ describe('AppsSection on a main', () => {
 		const openFolder = vi.spyOn(serverApi, 'openFolder').mockResolvedValue(null);
 		mountPage(AppsSection);
 		await settle();
-		const link = folderButton('Notes');
-		expect(link?.textContent).toBe('C:\\ws\\WSS-Data\\apps\\notes');
-		link?.click();
+		const button = folderButton('Notes');
+		expect(button?.getAttribute('aria-label')).toBe(
+			'Open folder of Notes: C:\\ws\\WSS-Data\\apps\\notes',
+		);
+		button?.click();
 		await settle();
 		expect(openFolder).toHaveBeenCalledWith('notes');
-		expect(text()).toContain('The folder of Notes opens in the file manager.');
+		// The window is the answer: the page says nothing.
+		expect(noticeState.current).toBeNull();
+		expect(text()).not.toContain('opens in the file manager');
+	});
+
+	it('says in the snackbar why the folder did not open, and nothing in the section', async () => {
+		vi.spyOn(serverApi, 'openFolder').mockRejectedValue(new ApiError('notFound', 'no such app'));
+		mountPage(AppsSection);
+		await settle();
+		folderButton('Notes')?.click();
+		await settle();
+		expect(noticeState.current).toEqual({ key: 'errNotFound', detail: 'no such app', error: true });
+		expect(document.querySelector('[role="status"]')?.textContent?.trim()).toBe('');
 	});
 
 	it("refuses an id Windows reserves for a device, which could not name the app's folder", async () => {
@@ -404,6 +586,6 @@ describe('AppsSection on a subordinate', () => {
 		expect(text()).toContain('Held by the quota');
 		expect(text()).toContain("Raise the quota on the main's page, or remove files in the app");
 		// One app: no totals.
-		expect(text()).not.toContain('Files of all apps');
+		expect(text()).not.toContain('Space used by all apps');
 	});
 });
