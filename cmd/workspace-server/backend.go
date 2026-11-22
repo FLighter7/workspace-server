@@ -208,12 +208,16 @@ func (s *server) divergences(app string, link upstream.Status) []web.Divergence 
 // SetQuota sets the app's quota, and tells this server's subordinates,
 // which take it with the app list. A subordinate refuses for an app it
 // follows its main for, whose quota is the main's; an app only it serves
-// is its own. The link orders the write with the main's quotas
-// (Link.SetLocalQuota), so a link made meanwhile never has it land on an
-// app it has just started to follow.
+// is its own. A quota under what the app's files take already is refused
+// as invalid: the app would be full at once. The link orders the write
+// with the main's quotas (Link.SetLocalQuota), so a link made meanwhile
+// never has it land on an app it has just started to follow.
 func (s *server) SetQuota(id string, quota int64) error {
 	var changed bool
 	err := s.link.SetLocalQuota(id, func() error {
+		if err := s.quotaHolds(id, quota); err != nil {
+			return err
+		}
 		var err error
 		changed, err = s.apps.SetQuota(id, quota)
 		return err
@@ -230,6 +234,23 @@ func (s *server) SetQuota(id string, quota int64) error {
 		s.hub.AppsChanged()
 	}
 	return nil
+}
+
+// quotaHolds refuses a quota, zero being the default, under the bytes app
+// id's files take. An app the registry does not list, or whose files cannot
+// be summed, is left to the registry and the hub.
+func (s *server) quotaHolds(id string, quota int64) error {
+	if _, ok := s.apps.Get(id); !ok {
+		return nil
+	}
+	if quota == 0 {
+		quota = apps.DefaultQuota
+	}
+	st, err := s.store.Stats(id)
+	if err != nil || quota >= st.Bytes {
+		return nil
+	}
+	return fmt.Errorf("%w: quota %d is under the %d bytes the app's files take", apps.ErrInvalid, quota, st.Bytes)
 }
 
 // OpenFolder shows the app's folder in the system's file manager. It

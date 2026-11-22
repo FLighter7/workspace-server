@@ -11,19 +11,23 @@
 
 			<VForm ref="form" @submit.prevent="save">
 				<VCardText class="pt-0">
-					<p class="mb-4">
-						{{ t('usedOf', { used: format.bytes(app.size), quota: format.bytes(app.quota) }) }}
-					</p>
+					<UsageBar
+						:size="app.size"
+						:quota="app.quota"
+						:label="t('quotaUsed', { app: app.name })"
+					/>
+					<p class="mt-4 mb-6">{{ t('quotaText') }}</p>
 					<VTextField
 						ref="input"
 						v-model="megabytes"
-						type="number"
-						inputmode="numeric"
 						:label="t('quotaField')"
+						inputmode="numeric"
+						autocomplete="off"
 						:suffix="t('quotaUnit')"
-						:hint="t('quotaHint', { range })"
+						:hint="bounds"
 						persistent-hint
 						:rules="[quotaRule]"
+						@beforeinput="digitsOnly"
 					/>
 					<StatusLine :message="message" />
 				</VCardText>
@@ -41,29 +45,46 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, useId, useTemplateRef, watch } from 'vue';
+import { computed, onMounted, ref, useId, useTemplateRef, watch } from 'vue';
 import { I18nT, useI18n } from 'vue-i18n';
 import type { VForm } from 'vuetify/components';
 import { serverApi } from '@/api/client';
 import type { AppInfo } from '@/api/types';
+import { digitsOnly } from '@/composables/digitsOnly';
 import { errorMessage, type Message } from '@/composables/messages';
 import { useRules } from '@/composables/rules';
-import { MB, MIN_QUOTA_MB, useFormat } from '@/composables/useFormat';
+import { MB, MIN_QUOTA_MB } from '@/composables/useFormat';
 import { useQuotaMax } from '@/composables/useQuotaMax';
 import { useReturnFocus } from '@/composables/useReturnFocus';
 import StatusLine from './StatusLine.vue';
+import UsageBar from './UsageBar.vue';
 
+/**
+ * The app's quota: the space its files take of it (UsageBar), what the quota
+ * is, and the field, in whole MB, from what the files take already (never
+ * under the least a quota can be) to what the disk has free; the server
+ * refuses a quota under the files too. The field takes digits alone.
+ */
 const props = defineProps<{ app: AppInfo | null }>();
 const open = defineModel<boolean>({ required: true });
 const emit = defineEmits<{ saved: [quota: number] }>();
 
-const { t } = useI18n();
-const format = useFormat();
-const { maxMb, known, range, refresh } = useQuotaMax();
+const { t, n } = useI18n();
+const { maxMb, known, refresh } = useQuotaMax();
 const rules = useRules();
+/** The least the quota can be: what the files take already, in whole MB. */
+const leastMb = computed(() => Math.max(MIN_QUOTA_MB, Math.ceil((props.app?.size ?? 0) / MB)));
+/** The most: what the disk has free, though never under the least. */
+const mostMb = computed(() => Math.max(leastMb.value, maxMb.value));
+/** "From … to … MB", or the least alone while the free space is not known. */
+const bounds = computed(() =>
+	known.value
+		? t('quotaBounds', { min: n(leastMb.value), max: n(mostMb.value) })
+		: t('quotaRangeMin', { min: n(leastMb.value) }),
+);
 /** The quota against the room the disk has, which is read again on each opening. */
 const quotaRule = (value: string): true | string =>
-	rules.wholeNumber(MIN_QUOTA_MB, maxMb.value, known.value)(value);
+	rules.wholeNumber(leastMb.value, mostMb.value, known.value)(value);
 const titleId = useId();
 const form = useTemplateRef<VForm>('form');
 const input = useTemplateRef<{ focus: () => void }>('input');
@@ -93,13 +114,15 @@ function focusInput(): void {
 
 async function save(): Promise<void> {
 	const app = props.app;
-	if (!app || !(await form.value?.validate())?.valid) return;
+	if (!app) return;
 	// Saved as shown, a quota of no whole MB (apps.json edited by hand) would
-	// be rounded: a field left as it was changes nothing.
+	// be rounded: a field left as it was changes nothing, even when the files
+	// have outgrown it since.
 	if (megabytes.value.trim() === shown.value) {
 		open.value = false;
 		return;
 	}
+	if (!(await form.value?.validate())?.valid) return;
 	const quota = Number(megabytes.value) * MB;
 	busy.value = true;
 	try {

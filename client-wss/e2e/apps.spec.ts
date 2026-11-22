@@ -134,10 +134,20 @@ test("the quota is changed on the main's page, and the laptop follows it, read-o
 	).toBeVisible();
 	const change = card.getByRole('button', { name: 'Change the quota of Todo' });
 	await change.click();
-	const dialog = desk.getByRole('dialog', { name: 'The quota of Todo' });
-	const field = dialog.getByLabel('Maximum storage size', { exact: true });
+	const dialog = desk.getByRole('dialog', { name: 'Data of Todo' });
+	await expect(
+		dialog.getByRole('progressbar', { name: 'Space used of the quota of Todo' }),
+	).toBeVisible();
+	const field = dialog.getByLabel('Maximum size', { exact: true });
 	await expect(field).toBeFocused();
 	await expect(field).toHaveValue('50');
+	// The range from what the files take (under 10 MB here) to what the disk has free.
+	await expect(dialog).toContainText(/From 10 to [\d,]+ MB/);
+	// Digits alone land, typed or pasted: no spin buttons, no letters, no signs.
+	await expect(field).toHaveAttribute('type', 'text');
+	await field.fill('');
+	await field.pressSequentially('3x-5');
+	await expect(field).toHaveValue('35');
 	await field.fill('0');
 	await dialog.getByRole('button', { name: 'Save' }).click();
 	// The top is what the disk has free, which is the machine's.
@@ -174,7 +184,7 @@ test("the quota is changed on the main's page, and the laptop follows it, read-o
 	await expect(subCard.getByRole('button', { name: /Change the quota/ })).toHaveCount(0);
 	// A new app takes a quota of its own, until the main serves it too.
 	await laptop.getByRole('button', { name: 'Add an app' }).click();
-	await expect(laptop.getByLabel('Maximum storage size', { exact: true })).toHaveValue('50');
+	await expect(laptop.getByLabel('Maximum size', { exact: true })).toHaveValue('50');
 	await expect(laptop.getByText("the main's quota replaces it")).toBeVisible();
 	await expectNoCspViolations(laptop);
 	await laptop.context().close();

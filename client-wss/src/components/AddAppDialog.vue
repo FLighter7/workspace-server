@@ -43,13 +43,14 @@
 					/>
 					<VTextField
 						v-model="quota"
-						type="number"
 						inputmode="numeric"
+						autocomplete="off"
 						:label="t('quotaField')"
 						:suffix="t('quotaUnit')"
 						:hint="t(linked ? 'quotaAddLinkedHint' : 'quotaAddHint', { range })"
 						persistent-hint
 						:rules="[quotaRule]"
+						@beforeinput="digitsOnly"
 					/>
 					<StatusLine :message="message" />
 				</VCardText>
@@ -72,6 +73,7 @@ import { serverApi } from '@/api/client';
 import { ID_MAX_LENGTH, ID_PATTERN, keepIdChars, RESERVED_ID } from '@/api/ids';
 import type { NewApp } from '@/api/types';
 import { boot } from '@/boot';
+import { digitsOnly } from '@/composables/digitsOnly';
 import { errorMessage, type Message } from '@/composables/messages';
 import { useRules } from '@/composables/rules';
 import { MB, MIN_QUOTA_MB } from '@/composables/useFormat';

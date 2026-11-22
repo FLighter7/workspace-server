@@ -62,6 +62,31 @@ func TestSetQuotaOnAMain(t *testing.T) {
 	}
 }
 
+// A quota under what the app's files take is refused, and the quota stays;
+// one as large as they are is taken.
+func TestSetQuotaUnderTheFilesIsRefused(t *testing.T) {
+	s, _ := newTestServer(t, io.Discard)
+	folder := s.appFolder("todo")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "data.json"), make([]byte, 3<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.store.Reconcile("todo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetQuota("todo", 2<<20); !errors.Is(err, apps.ErrInvalid) {
+		t.Errorf("a quota under the files: %v, want ErrInvalid", err)
+	}
+	if a, _ := s.apps.Get("todo"); a.Quota != apps.DefaultQuota {
+		t.Errorf("quota = %d after a refusal, want the default", a.Quota)
+	}
+	if err := s.SetQuota("todo", 3<<20); err != nil {
+		t.Errorf("a quota as large as the files: %v", err)
+	}
+}
+
 // OpenFolder opens the app's folder, or while it has none the nearest
 // folder above it that exists, up to WSS-Data, and creates nothing; nothing
 // for an app the server does not serve.

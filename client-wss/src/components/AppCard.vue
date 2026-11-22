@@ -32,35 +32,17 @@
 	margin-inline-end: -0.5rem;
 }
 
-// The caption (Space used, then the sizes) over a bar the card's width, and
-// Change at the right across both.
+// The space used (UsageBar) the card's width, and Change at the right of it.
 .usage {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr) auto;
 	align-items: center;
-	row-gap: 0.125rem;
 	margin-block-start: 0.75rem;
-
-	// Pinned to the first column: with no Change (the main sets the quota), the
-	// bar would otherwise flow into the second, which is then empty and zero wide.
-	.caption,
-	.bar {
-		grid-column: 1;
-	}
 
 	// The gap is Change's own, so with no Change the bar reaches the edge.
 	.change {
-		grid-row: 1 / span 2;
-		grid-column: 2;
 		margin-inline-start: 1rem;
 	}
-}
-
-.caption {
-	display: flex;
-	flex-wrap: wrap;
-	justify-content: space-between;
-	gap: 0 1rem;
 }
 
 // The last write and the devices, two tiles in a row of three columns, so each
@@ -198,18 +180,10 @@
 				</div>
 
 				<div :class="$style.usage">
-					<div :class="[$style.caption, 'text-body-small', 'text-medium-emphasis']">
-						<span>{{ t('used') }}</span>
-						<span>{{ usedText }}</span>
-					</div>
-					<VProgressLinear
-						:class="$style.bar"
-						:model-value="usedPercent"
-						:color="usageColor"
-						height="6"
-						rounded
-						:aria-label="t('quotaUsed', { app: app.name })"
-						:aria-valuetext="usedText"
+					<UsageBar
+						:size="app.size"
+						:quota="app.quota"
+						:label="t('quotaUsed', { app: app.name })"
 					/>
 					<VBtn
 						v-if="!app.followsMain"
@@ -292,6 +266,7 @@ import { mdiChevronRight, mdiDeleteOutline, mdiFolderOpenOutline } from '@mdi/js
 import type { AppInfo } from '@/api/types';
 import { useFormat } from '@/composables/useFormat';
 import StateBadge from './StateBadge.vue';
+import UsageBar from './UsageBar.vue';
 
 /**
  * One app of the list: the name, with Open folder and Delete, two icons, at
@@ -319,27 +294,12 @@ const emit = defineEmits<{ delete: []; quota: []; openFolder: []; devices: [] }>
 const { t } = useI18n();
 const format = useFormat();
 
-const usedText = computed(() =>
-	t('usedOf', { used: format.bytes(props.app.size), quota: format.bytes(props.app.quota) }),
-);
-
 /** The Devices tile's name: the app, the number, and how many are connected now when known. */
 const devicesLabel = computed(() => {
 	const values = { app: props.app.name, count: format.number(props.deviceCount) };
 	return props.online === null
 		? t('devicesLabel', values)
 		: t('devicesOnlineLabel', { ...values, online: format.number(props.online) });
-});
-
-const usedPercent = computed(() =>
-	props.app.quota > 0 ? Math.min(100, Math.round((props.app.size / props.app.quota) * 100)) : 0,
-);
-
-/** The bar warns from 90 %, and is red once the files fill the quota. */
-const usageColor = computed(() => {
-	if (props.app.size >= props.app.quota) return 'error';
-	if (props.app.size >= props.app.quota * 0.9) return 'warning';
-	return 'primary';
 });
 
 const hasMarks = computed(

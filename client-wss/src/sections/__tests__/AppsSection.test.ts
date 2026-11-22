@@ -337,7 +337,7 @@ describe('AppsSection on a main', () => {
 		byLabel('Change the quota of Todo')?.click();
 		await settle();
 
-		expect(dialog().textContent).toContain('The quota of Todo');
+		expect(dialog().textContent).toContain('Data of Todo');
 		const field = dialog().querySelector('input') as HTMLInputElement;
 		expect(field.value).toBe('50');
 		field.value = '0';

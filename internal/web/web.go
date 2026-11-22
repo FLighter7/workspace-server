@@ -38,7 +38,7 @@ type Status struct {
 	Program     string   `json:"program"`    // the program file
 	ServerDir   string   `json:"serverDir"`  // settings, identity, devices, log
 	DataDir     string   `json:"dataDir"`    // the WSS-Data folder that holds the apps' data; never empty
-	DataFree    *int64   `json:"dataFree"`  // bytes still free for the data folder on its volume; nil when unknown
+	DataFree    *int64   `json:"dataFree"`   // bytes still free for the data folder on its volume; nil when unknown
 	MainServer  bool     `json:"mainServer"` // the default server folder: owns autostart and the program file
 	LastError   string   `json:"lastError"`  // why the last reset or data move failed; "" when none did
 	Role        string   `json:"role"`       // "main", or "subordinate" while linked to an upstream server
@@ -163,7 +163,8 @@ type Backend interface {
 	// sessions. An unknown app is an error wrapping apps.ErrNotFound.
 	DeleteApp(id string) error
 	// SetQuota sets the app's quota; zero is the default. Its errors wrap
-	// apps.ErrNotFound, apps.ErrInvalid (out of range) or ErrFollowsMain
+	// apps.ErrNotFound, apps.ErrInvalid (out of range, or under what the
+	// app's files take) or ErrFollowsMain
 	// (an app a subordinate follows its main for, which sets the quota), or
 	// are internal.
 	SetQuota(id string, quota int64) error
