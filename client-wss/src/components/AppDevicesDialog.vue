@@ -157,7 +157,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, useId, useTemplateRef } from 'vue';
+import { computed, ref, useId, useTemplateRef, watch } from 'vue';
 import { I18nT, useI18n } from 'vue-i18n';
 import { mdiCellphone, mdiLinkVariantOff, mdiMonitor, mdiTablet } from '@mdi/js';
 import { serverApi } from '@/api/client';
@@ -200,8 +200,17 @@ function byPresence(a: DeviceInfo, b: DeviceInfo): number {
 	return Date.parse(b.lastSeen) - Date.parse(a.lastSeen);
 }
 
-const shown = computed(() =>
-	open.value ? [...(props.devices ?? [])].sort(byPresence) : closing.value,
+const sorted = computed(() => [...(props.devices ?? [])].sort(byPresence));
+const shown = computed(() => (open.value ? sorted.value : closing.value));
+
+// Taken the moment it closes, however it closes: a list taken earlier would
+// bring back a device removed since, for as long as the dialog fades out.
+watch(
+	open,
+	(isOpen) => {
+		if (!isOpen) closing.value = sorted.value;
+	},
+	{ flush: 'sync' },
 );
 
 useReturnFocus(open);
@@ -238,18 +247,16 @@ async function remove(device: DeviceInfo): Promise<void> {
 	} finally {
 		removing.value = null;
 	}
-	const left = shown.value.filter((d) => d.id !== device.id).length;
-	// Taken before the section drops the device, in case this closes the dialog.
-	closing.value = shown.value;
 	notify(info('disconnected'));
-	emit('removed', device.id);
-	if (left === 0) {
+	if (sorted.value.every((d) => d.id === device.id)) {
 		// Nothing left to list; the tile it opened from is plain now, so the
-		// focus goes to the section's heading. It fades out as it was, not
-		// saying there are no devices.
+		// focus goes to the section's heading. Closed before the section drops
+		// the device, it fades out as it was, not saying there are no devices.
 		open.value = false;
+		emit('removed', device.id);
 		return;
 	}
+	emit('removed', device.id);
 	// Its row has gone with the button that had the focus.
 	focusTitle();
 }

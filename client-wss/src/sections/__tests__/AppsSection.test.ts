@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { nextTick } from 'vue';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, serverApi } from '@/api/client';
 import type { AppInfo, DeviceInfo, UpstreamStatus } from '@/api/types';
@@ -268,6 +269,24 @@ describe('AppsSection on a main', () => {
 		expect(byLabel('Disconnect Laptop')).toBeNull();
 		expect(byLabel('Disconnect Pixel 8')).not.toBeNull();
 		expect(byLabel('Devices of Todo: 1, connected now: 1')).not.toBeNull();
+	});
+
+	it('does not bring a removed device back while the dialog fades out on Close', async () => {
+		serverRemoves();
+		const confirm = await import('@/composables/useConfirm');
+		vi.spyOn(confirm, 'ask').mockResolvedValue(true);
+		mountPage(AppsSection);
+		await settle();
+		byLabel('Devices of Todo: 2, connected now: 1')?.click();
+		await settle();
+		byLabel('Disconnect Laptop')?.click();
+		await settle();
+		[...(dialog()?.querySelectorAll('button') ?? [])]
+			.find((b) => b.textContent?.trim() === 'Close')
+			?.click();
+		await nextTick();
+		expect(byLabel('Disconnect Laptop')).toBeNull();
+		expect(byLabel('Disconnect Pixel 8')).not.toBeNull();
 	});
 
 	it('closes the dialog once its last device is removed, and the tile turns plain', async () => {
