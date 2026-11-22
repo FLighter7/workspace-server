@@ -54,6 +54,7 @@
 	"allFiles": "Files of all apps",
 	"allUsed": "Space used by all apps",
 	"delete": "Delete",
+	"deleteLabel": "Delete {app}",
 	"addApp": "Add an app",
 	"appId": "ID",
 	"appIdHint": "It must match the ID the app itself uses.",

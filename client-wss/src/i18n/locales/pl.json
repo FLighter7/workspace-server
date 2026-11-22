@@ -54,6 +54,7 @@
 	"allFiles": "Pliki wszystkich aplikacji",
 	"allUsed": "Miejsce zajęte przez wszystkie aplikacje",
 	"delete": "Usuń",
+	"deleteLabel": "Usuń {app}",
 	"addApp": "Dodaj aplikację",
 	"appId": "ID",
 	"appIdHint": "Musi być taki sam jak ID, którego używa sama aplikacja.",

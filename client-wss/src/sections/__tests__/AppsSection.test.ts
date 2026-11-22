@@ -111,7 +111,7 @@ describe('AppsSection on a main', () => {
 		expect(text()).not.toContain('version');
 	});
 
-	it('lays a card out as the ID, the name with Delete, the space with Change, then the facts', async () => {
+	it('lays a card out as the name and ID with Delete, the space with Change, then the facts', async () => {
 		mountPage(AppsSection);
 		await settle();
 
@@ -122,9 +122,9 @@ describe('AppsSection on a main', () => {
 			),
 		].map((el) => el.getAttribute('aria-label') ?? el.textContent?.trim());
 		expect(items).toEqual([
-			'todo',
 			'Todo',
-			'Delete',
+			'todo',
+			'Delete Todo',
 			'Space used of the quota of Todo',
 			'Change the quota of Todo',
 			// The facts: the folder (a button, named with its path), the last write, the files, the devices.

@@ -1,20 +1,37 @@
 <style lang="scss" module>
-.id {
-	display: block;
-	overflow-wrap: anywhere;
-}
-
-.row {
+// The name at the left, the ID at the right, and Delete, an icon, in the corner.
+// A long name and ID wrap, the ID under the name, instead of pushing Delete off.
+.head {
 	display: flex;
 	align-items: center;
-	justify-content: space-between;
 	gap: 0.5rem 1rem;
+	margin-block-end: 0.5rem;
+}
+
+.titles {
+	display: flex;
+	flex: 1 1 0;
+	flex-wrap: wrap;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 0 1rem;
+	min-width: 0;
 }
 
 .name {
 	min-width: 0;
 	margin: 0;
 	overflow-wrap: anywhere;
+}
+
+.id {
+	min-width: 0;
+	margin-inline-start: auto;
+	overflow-wrap: anywhere;
+}
+
+.delete {
+	flex: none;
 }
 
 // The bar takes half the card's width, the text follows it, and Change sits at
@@ -101,13 +118,23 @@
 		<!-- Flat, so the card is the colour of the header (the theme's surface): tonal always tints it. -->
 		<VCard variant="flat">
 			<VCardText>
-				<code :class="[$style.id, 'text-medium-emphasis']">{{ app.id }}</code>
-
-				<div :class="$style.row">
-					<h2 :class="['text-title-medium', $style.name]">
-						<bdi>{{ app.name }}</bdi>
-					</h2>
-					<VBtn color="error" variant="text" @click="emit('delete')">{{ t('delete') }}</VBtn>
+				<div :class="$style.head">
+					<div :class="$style.titles">
+						<h2 :class="['text-title-large', $style.name]">
+							<bdi>{{ app.name }}</bdi>
+						</h2>
+						<code :class="[$style.id, 'text-medium-emphasis']">{{ app.id }}</code>
+					</div>
+					<VBtn
+						:class="$style.delete"
+						:icon="mdiDeleteOutline"
+						color="error"
+						variant="text"
+						density="comfortable"
+						:title="t('delete')"
+						:aria-label="t('deleteLabel', { app: app.name })"
+						@click="emit('delete')"
+					/>
 				</div>
 
 				<div :class="$style.usage">
@@ -187,6 +214,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { I18nT, useI18n } from 'vue-i18n';
+import { mdiDeleteOutline } from '@mdi/js';
 import type { AppInfo } from '@/api/types';
 import { useFormat } from '@/composables/useFormat';
 import FactItem from './FactItem.vue';
@@ -194,9 +222,9 @@ import FactList from './FactList.vue';
 import StateBadge from './StateBadge.vue';
 
 /**
- * One app of the list: the ID; the name, with Delete; the space the files take
- * of the quota (a bar, the sizes in the unit that fits, and Change at the
- * right, under Delete); the data folder (a button that opens it), the last
+ * One app of the list: the name and the ID on a line, with Delete, an icon, in
+ * the corner; the space the files take of the quota (a bar, the sizes in the
+ * unit that fits, and Change at the right, under Delete); the data folder (a button that opens it), the last
  * write, the number of files and of devices; and what needs the user (a
  * divergence, a sync the quota holds, a full quota). What to do about any of it
  * is the parent's: the card only says so and asks.

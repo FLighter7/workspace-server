@@ -102,7 +102,7 @@ test('an app is added and deleted', async ({ browser }) => {
 	await expect(card).toContainText('0 bytes of 20 MB');
 	await expect(card.getByText('No files yet')).toBeVisible();
 
-	await card.getByRole('button', { name: 'Delete', exact: true }).click();
+	await card.getByRole('button', { name: 'Delete My notes', exact: true }).click();
 	const dialog = page.getByRole('dialog', { name: 'Delete My notes?' });
 	await expect(dialog).toBeVisible();
 	const confirm = dialog.getByRole('button', { name: 'Delete for good' });
