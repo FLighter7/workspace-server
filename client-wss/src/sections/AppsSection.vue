@@ -9,31 +9,6 @@
 .totals {
 	margin-block-end: 1rem;
 }
-
-.usage {
-	display: grid;
-	gap: 0.375rem;
-	max-width: 24rem;
-}
-
-// What needs the user: a divergence, a sync the quota holds, a full quota.
-.marks {
-	display: grid;
-	gap: 0.75rem;
-	margin-block-start: 0.75rem;
-
-	p {
-		margin: 0.25rem 0 0;
-	}
-}
-
-.note {
-	margin: 0.75rem 0 0;
-}
-
-.error {
-	color: rgb(var(--v-theme-error));
-}
 </style>
 
 <template>
@@ -60,85 +35,16 @@
 		</FactList>
 
 		<ul :class="s.cards">
-			<ItemCard v-for="app in apps" :key="app.id">
-				<template #title>
-					<bdi>{{ app.name }}</bdi>
-					{{ ' ' }}
-					<code class="text-medium-emphasis">{{ app.id }}</code>
-				</template>
-				<template #side>
-					<VBtn color="error" @click="openDelete(app)">{{ t('delete') }}</VBtn>
-				</template>
-				<FactList>
-					<FactItem :label="t('files')">
-						{{ app.files > 0 ? format.number(app.files) : t('noFiles') }}
-					</FactItem>
-					<FactItem :label="t('used')">
-						<div :class="$style.usage">
-							<span>{{ usedText(app) }}</span>
-							<VProgressLinear
-								:model-value="usedPercent(app)"
-								:color="usageColor(app)"
-								height="6"
-								rounded
-								:aria-label="t('quotaUsed', { app: app.name })"
-								:aria-valuetext="usedText(app)"
-							/>
-						</div>
-					</FactItem>
-					<FactItem :label="t('modified')">
-						{{ app.modified ? format.time(app.modified) : t('notYet') }}
-					</FactItem>
-					<FactItem :label="t('tabDevices')">{{ format.number(app.devices) }}</FactItem>
-					<FactItem :label="t('folder')">
-						<code>{{ app.folder }}</code>
-					</FactItem>
-				</FactList>
-
-				<div v-if="hasMarks(app)" :class="$style.marks">
-					<div v-for="other in app.diverged" :key="other.serverId">
-						<StateBadge tone="warning">{{ t('divergedMark') }}</StateBadge>
-						<I18nT keypath="divergedText" tag="p" scope="global">
-							<template #name>
-								<bdi>{{ other.name || other.serverId }}</bdi>
-							</template>
-						</I18nT>
-					</div>
-					<div v-if="app.failing === 'quota'">
-						<StateBadge tone="error">{{ t('failingMark') }}</StateBadge>
-						<p>{{ t('failingText') }}</p>
-					</div>
-					<p v-if="app.size >= app.quota" :class="$style.error">{{ t('quotaFull') }}</p>
-				</div>
-				<I18nT
-					v-if="app.followsMain"
-					keypath="quotaFollowsMain"
-					tag="p"
-					scope="global"
-					:class="[$style.note, 'text-medium-emphasis']"
-				>
-					<template #name>
-						<bdi>{{ mainName }}</bdi>
-					</template>
-				</I18nT>
-
-				<template #actions>
-					<VBtn
-						:aria-label="t('openFolderLabel', { app: app.name })"
-						:loading="opening === app.id"
-						@click="openFolder(app)"
-					>
-						{{ t('openFolder') }}
-					</VBtn>
-					<VBtn
-						v-if="!app.followsMain"
-						:aria-label="t('changeQuotaLabel', { app: app.name })"
-						@click="openQuota(app)"
-					>
-						{{ t('changeQuota') }}
-					</VBtn>
-				</template>
-			</ItemCard>
+			<AppCard
+				v-for="app in apps"
+				:key="app.id"
+				:app="app"
+				:main-name="mainName"
+				:opening="opening === app.id"
+				@open-folder="openFolder(app)"
+				@quota="openQuota(app)"
+				@delete="openDelete(app)"
+			/>
 		</ul>
 
 		<!-- What was done to an app, said once and gone: the list shows the rest. -->
@@ -163,17 +69,16 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { I18nT, useI18n } from 'vue-i18n';
+import { useI18n } from 'vue-i18n';
 import { mdiPlus } from '@mdi/js';
 import { serverApi } from '@/api/client';
 import type { AppInfo, DeviceInfo, UpstreamStatus } from '@/api/types';
 import AddAppDialog from '@/components/AddAppDialog.vue';
+import AppCard from '@/components/AppCard.vue';
 import DeleteAppDialog from '@/components/DeleteAppDialog.vue';
 import FactItem from '@/components/FactItem.vue';
 import FactList from '@/components/FactList.vue';
-import ItemCard from '@/components/ItemCard.vue';
 import QuotaDialog from '@/components/QuotaDialog.vue';
-import StateBadge from '@/components/StateBadge.vue';
 import StatusLine from '@/components/StatusLine.vue';
 import { errorMessage, type Message } from '@/composables/messages';
 import { useFormat } from '@/composables/useFormat';
@@ -182,11 +87,11 @@ import { rescueFocus } from '@/composables/useReturnFocus';
 import s from '@/styles/section.module.scss';
 
 /**
- * The apps this server serves: each with its files, the space they take of
- * its quota, its folder, and what needs the user (a divergence to choose on a
- * device, a sync the quota holds); changing the quota (not for an app a
- * subordinate follows its main for: the main sets that one), opening the
- * folder, deleting the app, and
+ * The apps this server serves, one card each (AppCard): its files, the space
+ * they take of its quota, its folder, and what needs the user (a divergence
+ * to choose on a device, a sync the quota holds). This section does what the
+ * cards ask: changing the quota (not for an app a subordinate follows its main
+ * for: the main sets that one), opening the folder, deleting the app, and
  * adding one. The list is polled while the section is shown, so the marks
  * come and go by themselves.
  */
@@ -247,25 +152,6 @@ async function loadUpstream(): Promise<void> {
 }
 
 usePolling(loadApps);
-
-function usedText(app: AppInfo): string {
-	return t('usedOf', { used: format.bytes(app.size), quota: format.bytes(app.quota) });
-}
-
-function usedPercent(app: AppInfo): number {
-	return app.quota > 0 ? Math.min(100, Math.round((app.size / app.quota) * 100)) : 0;
-}
-
-/** The bar warns from 90 %, and is red once the files fill the quota. */
-function usageColor(app: AppInfo): string {
-	if (app.size >= app.quota) return 'error';
-	if (app.size >= app.quota * 0.9) return 'warning';
-	return 'primary';
-}
-
-function hasMarks(app: AppInfo): boolean {
-	return app.diverged.length > 0 || app.failing === 'quota' || app.size >= app.quota;
-}
 
 function say(outcome: 'added' | 'deleted'): void {
 	toast.value = outcome;

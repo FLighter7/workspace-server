@@ -71,7 +71,7 @@ test('an app is added and deleted', async ({ browser }) => {
 	const page = await openPage(browser, '#apps');
 
 	// A new server serves todo already.
-	await expect(page.getByRole('heading', { level: 2, name: 'Todo todo' })).toBeVisible();
+	await expect(page.getByRole('heading', { level: 2, name: 'Todo', exact: true })).toBeVisible();
 	const addButton = page.getByRole('button', { name: 'Add an app' });
 	await addButton.click();
 	const form = page.getByRole('dialog', { name: 'Add an app' });
@@ -95,11 +95,15 @@ test('an app is added and deleted', async ({ browser }) => {
 	await expect(page.getByRole('status').filter({ hasText: 'Added' })).toBeVisible();
 	await expect(addButton).toBeFocused();
 	const card = page.getByRole('listitem').filter({
-		has: page.getByRole('heading', { name: 'My notes notes' }),
+		has: page.getByRole('heading', { name: 'My notes', exact: true }),
 	});
 	await expect(card).toBeVisible();
+	await expect(card).toContainText('notes');
 	await expect(card).toContainText('0 bytes of 20 MB');
-	await expect(card).toContainText('No files yet');
+	// The files are on the unfolded part of the card.
+	await expect(card.getByText('No files yet')).toBeHidden();
+	await card.getByRole('button', { name: 'Show details of My notes' }).click();
+	await expect(card.getByText('No files yet')).toBeVisible();
 
 	await card.getByRole('button', { name: 'Delete', exact: true }).click();
 	const dialog = page.getByRole('dialog', { name: 'Delete My notes?' });

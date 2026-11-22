@@ -72,6 +72,10 @@ const text = (): string => document.body.textContent?.replace(/\s+/g, ' ') ?? ''
 const byLabel = (label: string): HTMLButtonElement | null =>
 	document.querySelector(`button[aria-label="${label}"]`);
 
+/** The folder link of an app: its name is "Open folder of <app>: <path>". */
+const folderButton = (name: string): HTMLButtonElement | null =>
+	document.querySelector(`button[aria-label^="Open folder of ${name}"]`);
+
 /** The card of the app whose heading names it. */
 const card = (name: string): HTMLElement =>
 	[...document.querySelectorAll('li')].find((li) =>
@@ -105,6 +109,50 @@ describe('AppsSection on a main', () => {
 		expect(text()).toContain('Files of all apps3');
 		expect(text()).toContain('Space used by all apps5 MB');
 		expect(text()).not.toContain('version');
+	});
+
+	it('folds a card to the ID, the name with Delete, and the space with Change; the toggle unfolds the rest', async () => {
+		mountPage(AppsSection);
+		await settle();
+
+		const todoCard = card('Todo');
+		const items = [
+			...todoCard.querySelectorAll('code, h2, button, [role="progressbar"][aria-hidden="false"]'),
+		].map((el) => el.getAttribute('aria-label') ?? el.textContent?.trim());
+		// The ID, then the name and Delete, then the bar with Change: the rest is behind the toggle.
+		expect(items.slice(0, 5)).toEqual([
+			'todo',
+			'Show details of Todo',
+			'Todo',
+			'Delete',
+			'Space used of the quota of Todo',
+		]);
+		const toggle = byLabel('Show details of Todo') as HTMLButtonElement;
+		const details = document.getElementById(toggle.getAttribute('aria-controls') ?? '');
+		expect(toggle.getAttribute('aria-expanded')).toBe('false');
+		expect(details?.style.display).toBe('none');
+		// Unfolded: the folder, the last write, the files and the devices, in that order.
+		toggle.click();
+		await settle();
+		expect(byLabel('Hide details of Todo')?.getAttribute('aria-expanded')).toBe('true');
+		expect(details?.style.display).not.toBe('none');
+		expect(
+			[...(details?.querySelectorAll('dt') ?? [])].map((dt) => dt.textContent?.trim()),
+		).toEqual(['Data folder', 'Last write', 'Files', 'Devices']);
+		byLabel('Hide details of Todo')?.click();
+		await settle();
+		expect(byLabel('Show details of Todo')).not.toBeNull();
+	});
+
+	it('counts the space in the unit that fits: MB, GB, TB', async () => {
+		apps.mockResolvedValue([
+			{ ...todo, size: 3 * 1024 ** 3, quota: 2 * 1024 ** 4 },
+			{ ...notes, id: 'photos', name: 'Photos', size: 700 * MB, quota: 2 * 1024 ** 3 },
+		]);
+		mountPage(AppsSection);
+		await settle();
+		expect(card('Todo').textContent).toContain('3 GB of 2 TB');
+		expect(card('Photos').textContent).toContain('700 MB of 2 GB');
 	});
 
 	it('marks a divergence by the other server, a full quota, and polls them away', async () => {
@@ -206,7 +254,9 @@ describe('AppsSection on a main', () => {
 		const openFolder = vi.spyOn(serverApi, 'openFolder').mockResolvedValue(null);
 		mountPage(AppsSection);
 		await settle();
-		byLabel('Open folder of Notes')?.click();
+		const link = folderButton('Notes');
+		expect(link?.textContent).toBe('C:\\ws\\WSS-Data\\apps\\notes');
+		link?.click();
 		await settle();
 		expect(openFolder).toHaveBeenCalledWith('notes');
 		expect(text()).toContain('The folder of Notes opens in the file manager.');
@@ -328,7 +378,7 @@ describe('AppsSection on a subordinate', () => {
 		mountPage(AppsSection);
 		await settle();
 		expect(byLabel('Change the quota of Todo')).toBeNull();
-		expect(byLabel('Open folder of Todo')).not.toBeNull();
+		expect(folderButton('Todo')).not.toBeNull();
 		expect(card('Todo').textContent).toContain(
 			"The main server, Desk, sets the quota: change it on the main's page.",
 		);

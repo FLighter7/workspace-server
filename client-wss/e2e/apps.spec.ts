@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { expectNoCspViolations, openPage } from './harness';
 import { buildServer, onLoopback, SCRATCH, Server } from './servers';
 
@@ -72,9 +72,20 @@ function servers(): { main: Server; sub: Server } {
 	return { main, sub };
 }
 
-/** The card of todo on the Apps tab. */
+/** The card of todo on the Apps tab; it opens folded. */
 const todoCard = (page: Page) =>
-	page.getByRole('listitem').filter({ has: page.getByRole('heading', { name: 'Todo todo' }) });
+	page
+		.getByRole('listitem')
+		.filter({ has: page.getByRole('heading', { name: 'Todo', exact: true }) });
+
+/** Unfolds a card, for the folder, the last write, the files and the devices. */
+async function unfold(card: Locator, app: string): Promise<void> {
+	await card.getByRole('button', { name: `Show details of ${app}` }).click();
+	await expect(card.getByRole('button', { name: `Hide details of ${app}` })).toHaveAttribute(
+		'aria-expanded',
+		'true',
+	);
+}
 
 /** The section's status line. */
 const said = (page: Page) => page.getByRole('region', { name: 'Apps' }).getByRole('status').first();
@@ -166,6 +177,9 @@ test("the quota is changed on the main's page, and the laptop follows it, read-o
 		"The main server, Desk, sets the quota: change it on the main's page.",
 	);
 	await expect(subCard.getByRole('button', { name: /Change the quota/ })).toHaveCount(0);
+	await expect(subCard.getByText("change it on the main's page")).toBeHidden();
+	await unfold(subCard, 'Todo');
+	await expect(subCard.getByText("change it on the main's page")).toBeVisible();
 	// A new app takes a quota of its own, until the main serves it too.
 	await laptop.getByRole('button', { name: 'Add an app' }).click();
 	await expect(laptop.getByLabel('Maximum storage size', { exact: true })).toHaveValue('50');
@@ -187,8 +201,12 @@ test("Open folder asks the server to open the app's folder", async ({ browser })
 	});
 
 	const card = todoCard(page);
-	await expect(card).toContainText(join('WSS-Data', 'apps', 'todo'));
-	await card.getByRole('button', { name: 'Open folder of Todo' }).click();
+	// Folded, the folder is out of sight; unfolded, its path is the button that opens it.
+	await expect(card.getByRole('button', { name: /Open folder of Todo/ })).toBeHidden();
+	await unfold(card, 'Todo');
+	const folder = card.getByRole('button', { name: /Open folder of Todo/ });
+	await expect(folder).toContainText(join('WSS-Data', 'apps', 'todo'));
+	await folder.click();
 	await expect(said(page)).toHaveText('The folder of Todo opens in the file manager.');
 	expect(asked).toEqual(['POST /api/apps/todo/open']);
 
