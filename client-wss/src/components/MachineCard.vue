@@ -123,9 +123,9 @@
 					<span :class="[$style.kind, 'text-medium-emphasis']">
 						<VIcon :icon="icon" />
 					</span>
-					<h3 :class="['text-title-large', $style.name]">
+					<component :is="headingTag" :class="['text-title-large', $style.name]">
 						<bdi>{{ name }}</bdi>
-					</h3>
+					</component>
 					<div :class="$style.actions">
 						<VBtn
 							class="text-medium-emphasis"
@@ -190,18 +190,23 @@ import { useFormat } from '@/composables/useFormat';
 
 /**
  * One of the user's devices, a phone or a laptop, with the apps paired on it:
- * what kind it is (by the name its first app paired under), its name (an h3,
- * under the section's Devices), with Rename and Delete (with every app on
+ * what kind it is (by the name its first app paired under), its name (an h3
+ * under the section's Devices heading, an h2 when there is none), with Rename and Delete (with every app on
  * it), two icons, at the right; when it
  * was last seen (connected now, when an app on it is), and the number of its
  * apps, a tile which opens them. What to do about any of it is the parent's:
  * the card only asks.
  */
-const props = defineProps<{
-	name: string;
-	/** Its apps' pairings, at least one. */
-	devices: DeviceInfo[];
-}>();
+const props = withDefaults(
+	defineProps<{
+		name: string;
+		/** Its apps' pairings, at least one. */
+		devices: DeviceInfo[];
+		/** The name's heading: h3 under a Devices heading, h2 with none. */
+		headingTag?: 'h2' | 'h3';
+	}>(),
+	{ headingTag: 'h2' },
+);
 const emit = defineEmits<{ apps: []; rename: []; delete: [] }>();
 
 const { t } = useI18n();

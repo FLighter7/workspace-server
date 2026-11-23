@@ -114,7 +114,7 @@ On the first start the server creates its folder and an entry for the `todo` app
     - **Delete the server and all data** stops the server and removes it from the computer, like `delete`: its data, its folders, the program file and the autostart.
 - **Devices** (Устройства):
   - **Pair a device** at the top opens the pairing code; on a server linked to a main, devices pair with the main instead;
-  - lists servers linked to this one first, under **Linked servers**, then your devices, under **Devices**, each once, however many apps are paired on it: its name, when it was last seen or "Connected now", and the number of its apps. Clicking that number lists the apps on the device, each with when it paired and whether it is connected now;
+  - lists servers linked to this one first, under **Linked servers**, then your devices (under **Devices** when there are linked servers), each once, however many apps are paired on it: its name, when it was last seen or "Connected now", and the number of its apps. Clicking that number lists the apps on the device, each with when it paired and whether it is connected now;
   - the pencil renames a device, say "Alex's phone" instead of "iPhone";
   - the trash can (**Delete**) ends a device's access for all its apps, after a question; in the list of its apps, the crossed-out link icon (**Disconnect**) ends one app's. To sync again, the app pairs again;
   - if two cards are one device (paired before the server knew), open one's apps and move them to the other with the arrows icon; the arrows also move an app to a device of its own.

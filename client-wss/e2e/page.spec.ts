@@ -203,8 +203,8 @@ test('Devices shows each device once, with its apps, and pairs another app on on
 	mkdirSync(shots, { recursive: true });
 
 	// One card for each device, whatever its apps.
-	await expect(page.getByRole('heading', { level: 2 })).toHaveText(['Devices']);
-	await expect(page.getByRole('heading', { level: 3 })).toHaveText(["Alex's phone", 'Windows']);
+	// No linked servers: no Devices heading over the cards.
+	await expect(page.getByRole('heading', { level: 2 })).toHaveText(["Alex's phone", 'Windows']);
 	const tile = page.getByRole('button', { name: "Apps on Alex's phone: 2, connected now: 1" });
 	await expect(tile).toContainText('1 connected');
 	await page.screenshot({ path: join(shots, 'devices.png'), fullPage: true });
@@ -228,7 +228,7 @@ test('Devices shows each device once, with its apps, and pairs another app on on
 	const rename = page.getByRole('dialog', { name: 'Rename Windows' });
 	await rename.getByLabel('Name').fill('Desk');
 	await rename.getByRole('button', { name: 'Save' }).click();
-	await expect(page.getByRole('heading', { level: 3 })).toHaveText(["Alex's phone", 'Desk']);
+	await expect(page.getByRole('heading', { level: 2 })).toHaveText(["Alex's phone", 'Desk']);
 
 	// Pair a device asks which device the code is for, and asks the server for
 	// a code for it.

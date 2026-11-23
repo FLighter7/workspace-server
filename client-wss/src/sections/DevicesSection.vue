@@ -94,9 +94,12 @@
 			</ul>
 		</div>
 
-		<!-- The user's devices, each with the apps paired on it, after the servers. -->
+		<!-- The user's devices, each with the apps paired on it, after the servers. Their
+		     heading only parts them from the servers: with none, the cards are the page. -->
 		<div v-if="loaded">
-			<h2 :class="['text-title-large', s.subtitle]">{{ t('tabDevices') }}</h2>
+			<h2 v-if="servers.length" :class="['text-title-large', s.subtitle]">
+				{{ t('tabDevices') }}
+			</h2>
 			<p v-if="cards.length === 0" class="text-medium-emphasis">{{ t('noDevices') }}</p>
 			<ul v-else :class="s.cards">
 				<MachineCard
@@ -104,6 +107,7 @@
 					:key="card.id"
 					:name="card.name"
 					:devices="card.devices"
+					:heading-tag="servers.length ? 'h3' : 'h2'"
 					@apps="openApps(card.id)"
 					@rename="openRename(card.id)"
 					@delete="deleteMachine(card)"

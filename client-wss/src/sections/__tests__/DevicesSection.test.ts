@@ -165,7 +165,9 @@ describe('DevicesSection on a main', () => {
 		await settle();
 		const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
 		expect(dialog.textContent).toContain("Apps on Alex's phone");
-		expect(headings('h3')).toEqual(["Alex's phone", 'Todo', 'notes']);
+		// No linked servers: no Devices heading; the card's name is an h2, as the dialog's title.
+		expect(headings('h2')).toEqual(["Alex's phone", "Apps on Alex's phone"]);
+		expect(headings('h3')).toEqual(['Todo', 'notes']);
 		expect(dialog.textContent).toContain('iPhone Safari (PWA)');
 		labelled('Move notes to another device', dialog).click();
 		await settle();
