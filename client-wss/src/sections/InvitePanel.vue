@@ -8,8 +8,9 @@
 			</I18nT>
 		</p>
 		<p class="text-medium-emphasis mb-4">{{ t('inviteRules') }}</p>
+		<PairTargetField :model-value="invitedCode.state.machine" @update:model-value="newCode" />
 		<div :class="s.actions">
-			<VBtn color="primary" variant="flat" @click="newCode">{{ t('newCode') }}</VBtn>
+			<VBtn color="primary" variant="flat" @click="newCode()">{{ t('newCode') }}</VBtn>
 		</div>
 		<StatusLine :message="message" />
 
@@ -21,6 +22,7 @@
 import { onMounted, ref } from 'vue';
 import { I18nT, useI18n } from 'vue-i18n';
 import PairingCodeView from '@/components/PairingCodeView.vue';
+import PairTargetField from '@/components/PairTargetField.vue';
 import StatusLine from '@/components/StatusLine.vue';
 import type { Message } from '@/composables/messages';
 import { upstreamError } from '@/composables/upstream';
@@ -33,10 +35,14 @@ defineProps<{ main: string }>();
 const { t } = useI18n();
 const message = ref<Message | null>(null);
 
-/** Asks the main for a code over the link; it has to be reachable. */
-async function newCode(): Promise<void> {
+/**
+ * Asks the main for a code over the link, for machine when given (one of the
+ * main's devices, chosen in the field), else for the same one; the main has
+ * to be reachable.
+ */
+async function newCode(machine?: string): Promise<void> {
 	try {
-		await invitedCode.issue();
+		await invitedCode.issue(machine);
 	} catch (error) {
 		message.value = upstreamError(error, { unreachable: 'inviteUnreachable' });
 		return;

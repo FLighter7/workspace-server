@@ -5,6 +5,7 @@ import type {
 	DataDirVerdict,
 	DeviceInfo,
 	HandedOver,
+	MachineInfo,
 	NewApp,
 	Pairing,
 	Promoted,
@@ -97,8 +98,20 @@ export const serverApi = {
 
 	devices: () => request<DeviceInfo[]>('GET', '/api/devices'),
 	removeDevice: (id: string) => request<null>('DELETE', `/api/devices/${encodeURIComponent(id)}`),
+	/** Puts a device of an app on machine, or on a new machine for ""; answers with where it is now. */
+	moveDevice: (id: string, machine: string) =>
+		request<{ machine: string }>('POST', `/api/devices/${encodeURIComponent(id)}/move`, {
+			machine,
+		}),
 
-	issuePairing: () => request<Pairing>('POST', '/api/pairing'),
+	machines: () => request<MachineInfo[]>('GET', '/api/machines'),
+	renameMachine: (id: string, name: string) =>
+		request<null>('PUT', `/api/machines/${encodeURIComponent(id)}`, { name }),
+	/** Removes every device paired on the machine, which goes with them. */
+	removeMachine: (id: string) => request<null>('DELETE', `/api/machines/${encodeURIComponent(id)}`),
+
+	/** A code whose device joins machine, or a new machine for "". */
+	issuePairing: (machine = '') => request<Pairing>('POST', '/api/pairing', { machine }),
 	refusals: () => request<Refusal[]>('GET', '/api/pairing/refusals'),
 
 	upstream: () => request<UpstreamStatus>('GET', '/api/upstream'),
@@ -106,7 +119,7 @@ export const serverApi = {
 	link: (code: string) => request<UpstreamStatus>('POST', '/api/upstream', { code }),
 	unlink: () => request<Unlinked>('DELETE', '/api/upstream'),
 	/** A pairing code of the main, which it issues over the link. */
-	invite: () => request<Pairing>('POST', '/api/upstream/invite'),
+	invite: (machine = '') => request<Pairing>('POST', '/api/upstream/invite', { machine }),
 	/** Makes this server, a subordinate, the main: planned, or forced while the main is away. */
 	promote: (force: boolean) => request<Promoted>('POST', '/api/upstream/promote', { force }),
 	/** Asks the subordinate serverId to take the role of main over. */

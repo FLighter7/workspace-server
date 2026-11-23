@@ -325,6 +325,7 @@ type call struct {
 	Tx       string          `json:"tx"`
 	Keep     string          `json:"keep"`
 	Since    *string         `json:"since"`
+	Machine  string          `json:"machine"`
 }
 
 func (c *call) key() Key { return Key{Path: c.Path, ID: c.ID, Type: c.Type} }
@@ -430,7 +431,7 @@ func start(cl *Client, c *call) (any, error) {
 		}
 		return nil, cl.Diverged(ctx, c.App, since)
 	case "invite":
-		inv, err := cl.Invite(ctx)
+		inv, err := cl.Invite(ctx, c.Machine)
 		return map[string]any{"code": inv.Code, "expiresAt": inv.ExpiresAt.UTC().Format(time.RFC3339)}, err
 	}
 	panic("unknown method " + c.Method)

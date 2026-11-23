@@ -77,8 +77,9 @@ describe('request', () => {
 		expect(vi.mocked(fetch).mock.calls[0].slice(0, 1)).toEqual(['/api/upstream']);
 		expect(vi.mocked(fetch).mock.calls[0][1]?.method).toBe('DELETE');
 		respond(200, { code: 'c', expiresAt: '', qr: '' });
-		await serverApi.invite();
+		await serverApi.invite('Machine000000001');
 		expect(vi.mocked(fetch).mock.calls[0][0]).toBe('/api/upstream/invite');
+		expect(vi.mocked(fetch).mock.calls[0][1]?.body).toBe('{"machine":"Machine000000001"}');
 	});
 
 	it('reads a failure without JSON as internal, with the status text', async () => {

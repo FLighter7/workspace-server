@@ -15,6 +15,7 @@ import (
 	"github.com/skip2/go-qrcode"
 
 	"github.com/FLighter7/workspace-server/internal/apps"
+	"github.com/FLighter7/workspace-server/internal/devices"
 	"github.com/FLighter7/workspace-server/internal/upstream"
 )
 
@@ -105,6 +106,21 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 		return false
 	}
 	return true
+}
+
+// readOptionalJSON reads the body into v as readJSON does, and takes an
+// empty body as v left as it is.
+func readOptionalJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalid, "request body: "+err.Error())
+		return false
+	}
+	if strings.TrimSpace(string(body)) == "" {
+		return true
+	}
+	r.Body = io.NopCloser(strings.NewReader(string(body)))
+	return readJSON(w, r, v)
 }
 
 func notFound(w http.ResponseWriter, what string) {
@@ -377,6 +393,91 @@ func (a *api) removeDevice(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// moveRequest is the body of POST /api/devices/{id}/move: the machine the
+// device goes on, "" for a new one.
+type moveRequest struct {
+	Machine *string `json:"machine"`
+}
+
+// moveResponse names the machine the device is on now.
+type moveResponse struct {
+	Machine string `json:"machine"`
+}
+
+// moveDevice puts a device of an app on another machine: two machines
+// merge when every device of one moves onto the other, and one splits off
+// when it moves to a new machine.
+func (a *api) moveDevice(w http.ResponseWriter, r *http.Request) {
+	var req moveRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.Machine == nil {
+		writeError(w, http.StatusBadRequest, codeInvalid, "machine is missing")
+		return
+	}
+	machine, err := a.b.MoveDevice(r.PathValue("id"), *req.Machine)
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, moveResponse{Machine: machine})
+	case errors.Is(err, devices.ErrNoDevice):
+		notFound(w, "device")
+	case errors.Is(err, devices.ErrNoMachine):
+		notFound(w, "machine")
+	default:
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+	}
+}
+
+func (a *api) listMachines(w http.ResponseWriter, r *http.Request) {
+	list := a.b.Machines()
+	if list == nil {
+		list = []MachineInfo{}
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// renameRequest is the body of PUT /api/machines/{id}.
+type renameRequest struct {
+	Name *string `json:"name"`
+}
+
+func (a *api) renameMachine(w http.ResponseWriter, r *http.Request) {
+	var req renameRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.Name == nil {
+		writeError(w, http.StatusBadRequest, codeInvalid, "name is missing")
+		return
+	}
+	switch err := a.b.RenameMachine(r.PathValue("id"), *req.Name); {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, devices.ErrNoMachine):
+		notFound(w, "machine")
+	case errors.Is(err, devices.ErrInvalidName):
+		writeError(w, http.StatusBadRequest, codeInvalid, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, codeInternal, err.Error())
+	}
+}
+
+func (a *api) removeMachine(w http.ResponseWriter, r *http.Request) {
+	if !a.b.RemoveMachine(r.PathValue("id")) {
+		notFound(w, "machine")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// pairingRequest is the optional body of POST /api/pairing and POST
+// /api/upstream/invite: the machine the device that pairs joins, absent or
+// "" for a new one.
+type pairingRequest struct {
+	Machine string `json:"machine"`
+}
+
 type pairingResponse struct {
 	Code      string    `json:"code"`
 	ExpiresAt time.Time `json:"expiresAt"`
@@ -384,7 +485,11 @@ type pairingResponse struct {
 }
 
 func (a *api) issuePairing(w http.ResponseWriter, r *http.Request) {
-	code, expires, err := a.b.IssuePairing()
+	var req pairingRequest
+	if !readOptionalJSON(w, r, &req) {
+		return
+	}
+	code, expires, err := a.b.IssuePairing(req.Machine)
 	switch {
 	case errors.Is(err, ErrNotMain):
 		writeError(w, http.StatusConflict, codeNotMain, err.Error())
@@ -519,9 +624,13 @@ func (a *api) unlinkUpstream(w http.ResponseWriter, r *http.Request) {
 // over the link for a browser on this computer, as POST /api/pairing
 // answers with this server's own.
 func (a *api) inviteUpstream(w http.ResponseWriter, r *http.Request) {
+	var req pairingRequest
+	if !readOptionalJSON(w, r, &req) {
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), linkTimeout)
 	defer cancel()
-	code, expires, err := a.b.InviteUpstream(ctx)
+	code, expires, err := a.b.InviteUpstream(ctx, req.Machine)
 	var refused *upstream.RefusedError
 	switch {
 	case err == nil:

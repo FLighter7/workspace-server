@@ -145,6 +145,118 @@ test('the pairing dialog on Devices shows a code with its QR and countdown', asy
 	await page.context().close();
 });
 
+test('Devices shows each device once, with its apps, and pairs another app on one', async ({
+	browser,
+}) => {
+	const page = await openPage(browser, '#devices');
+	// Stand-ins for the server's devices and machines: pairing real ones is the
+	// server's own e2e. The pairing code itself is the real server's.
+	let devices = [
+		{
+			id: 'PhoneTodo000001',
+			app: 'todo',
+			name: 'iPhone Safari (PWA)',
+			machine: 'Machine00000001',
+			pairedAt: '2026-11-03T09:00:00Z',
+			lastSeen: '2026-11-22T10:00:00Z',
+			connected: true,
+		},
+		{
+			id: 'PhoneNotes00001',
+			app: 'notes',
+			name: 'iPhone Safari',
+			machine: 'Machine00000001',
+			pairedAt: '2026-11-05T09:00:00Z',
+			lastSeen: '2026-11-21T18:00:00Z',
+			connected: false,
+		},
+		{
+			id: 'DeskTodo0000001',
+			app: 'todo',
+			name: 'Windows Edge',
+			machine: 'Machine00000002',
+			pairedAt: '2026-11-04T09:00:00Z',
+			lastSeen: '2026-11-22T08:00:00Z',
+			connected: false,
+		},
+	];
+	let machines = [
+		{ id: 'Machine00000001', name: "Alex's phone" },
+		{ id: 'Machine00000002', name: 'Windows' },
+	];
+	await page.route('**/api/devices', (route) => route.fulfill({ json: devices }));
+	await page.route('**/api/machines', (route) => route.fulfill({ json: machines }));
+	await page.route('**/api/devices/*/move', async (route) => {
+		const id = new URL(route.request().url()).pathname.split('/').at(-2);
+		const { machine } = route.request().postDataJSON() as { machine: string };
+		devices = devices.map((d) => (d.id === id ? { ...d, machine } : d));
+		await route.fulfill({ json: { machine } });
+	});
+	await page.route('**/api/machines/*', async (route) => {
+		const id = new URL(route.request().url()).pathname.split('/').pop();
+		const { name } = route.request().postDataJSON() as { name: string };
+		machines = machines.map((m) => (m.id === id ? { ...m, name } : m));
+		await route.fulfill({ status: 204 });
+	});
+	await page.reload();
+	const shots = join(SCRATCH, 'reports', 'devices-machines');
+	mkdirSync(shots, { recursive: true });
+
+	// One card for each device, whatever its apps.
+	await expect(page.getByRole('heading', { level: 2 })).toHaveText(['Devices']);
+	await expect(page.getByRole('heading', { level: 3 })).toHaveText(["Alex's phone", 'Windows']);
+	const tile = page.getByRole('button', { name: "Apps on Alex's phone: 2, connected now: 1" });
+	await expect(tile).toContainText('1 connected');
+	await page.screenshot({ path: join(shots, 'devices.png'), fullPage: true });
+
+	// The tile lists the device's apps; one moves to the other device.
+	await tile.click();
+	const dialog = page.getByRole('dialog', { name: "Apps on Alex's phone" });
+	await expect(dialog.getByRole('heading', { name: "Apps on Alex's phone" })).toBeFocused();
+	await expect(dialog.getByRole('listitem')).toHaveCount(2);
+	await expect(dialog.getByRole('listitem').first()).toContainText('Todo');
+	await page.screenshot({ path: join(shots, 'apps-dialog.png') });
+	await dialog.getByRole('button', { name: 'Move notes to another device' }).click();
+	await page.locator('.v-overlay--active .v-list-item', { hasText: 'Windows' }).click();
+	await expect(page.locator('.v-snackbar').getByRole('status')).toHaveText('Moved.');
+	await expect(dialog.getByRole('listitem')).toHaveCount(1);
+	await dialog.getByRole('button', { name: 'Close' }).click();
+	await expect(page.getByRole('button', { name: 'Apps on Windows: 2' })).toBeVisible();
+
+	// Renamed, the card takes the new name.
+	await page.getByRole('button', { name: 'Rename Windows' }).click();
+	const rename = page.getByRole('dialog', { name: 'Rename Windows' });
+	await rename.getByLabel('Name').fill('Desk');
+	await rename.getByRole('button', { name: 'Save' }).click();
+	await expect(page.getByRole('heading', { level: 3 })).toHaveText(["Alex's phone", 'Desk']);
+
+	// Pair a device asks which device the code is for, and asks the server for
+	// a code for it.
+	await page.getByRole('button', { name: 'Pair a device' }).click();
+	const pair = page.getByRole('dialog', { name: 'Pair a device' });
+	await expect(pair.getByLabel('The code as text')).not.toHaveValue('');
+	const issued = page.waitForRequest(
+		(r) => r.url().endsWith('/api/pairing') && r.method() === 'POST',
+	);
+	await pair.locator('.v-select .v-field').click();
+	await page.getByRole('option', { name: "Alex's phone" }).click();
+	expect((await issued).postDataJSON()).toEqual({ machine: 'Machine00000001' });
+	await expect(pair.getByLabel('The code as text')).not.toHaveValue('');
+	await page.screenshot({ path: join(shots, 'pair-dialog.png') });
+	await pair.getByRole('button', { name: 'Close' }).click();
+	await expect(pair).toBeHidden();
+
+	// A phone's width: the cards fit, and nothing scrolls sideways.
+	await page.setViewportSize({ width: 360, height: 800 });
+	expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+		true,
+	);
+	await page.screenshot({ path: join(shots, 'devices-phone.png'), fullPage: true });
+
+	await expectNoCspViolations(page);
+	await page.context().close();
+});
+
 test('the language follows the browser and then the choice, which a reload keeps', async ({
 	browser,
 }) => {

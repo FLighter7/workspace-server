@@ -142,15 +142,19 @@ type Server struct {
 // Device is one device of a main's registry: its id, its app (none for a
 // server-kind device, another server of the family), and its token's
 // SHA-256 in lowercase hex; its kind, name and pairing time (RFC 3339) when
-// the main names them, and what a server-kind device announced.
+// the main names them, what a server-kind device announced, and the machine
+// (a physical device of the user's) a device of an app is paired on, with
+// the name the main gives it.
 type Device struct {
-	ID        string  `json:"id"`
-	App       string  `json:"app"`
-	Kind      string  `json:"kind,omitempty"`
-	Name      string  `json:"name,omitempty"`
-	TokenHash string  `json:"tokenHash"`
-	PairedAt  string  `json:"pairedAt,omitempty"`
-	Server    *Server `json:"server,omitempty"`
+	ID          string  `json:"id"`
+	App         string  `json:"app"`
+	Kind        string  `json:"kind,omitempty"`
+	Name        string  `json:"name,omitempty"`
+	TokenHash   string  `json:"tokenHash"`
+	PairedAt    string  `json:"pairedAt,omitempty"`
+	Server      *Server `json:"server,omitempty"`
+	Machine     string  `json:"machine,omitempty"`
+	MachineName string  `json:"machineName,omitempty"`
 }
 
 // Tombstone is a device removed from the family: its id, and when (RFC
@@ -792,10 +796,15 @@ type Invitation struct {
 
 // Invite asks the main, over a link session, for a pairing code of its own:
 // the code its page's "Pair a device" shows, for a browser on this server's
-// computer to pair with the main.
-func (c *Client) Invite(ctx context.Context) (Invitation, error) {
+// computer to pair with the main. machine, when not "", is the main's
+// machine (a physical device of the user's) the browser that pairs joins.
+func (c *Client) Invite(ctx context.Context, machine string) (Invitation, error) {
 	var inv Invitation
-	err := c.request(ctx, map[string]any{"t": "invite"}, nil, nil, func(in incoming) (bool, error) {
+	frame := map[string]any{"t": "invite"}
+	if machine != "" {
+		frame["machine"] = machine
+	}
+	err := c.request(ctx, frame, nil, nil, func(in incoming) (bool, error) {
 		code, ok1 := readString(in.frame["code"])
 		at, ok2 := readString(in.frame["expiresAt"])
 		expires, err := time.Parse(time.RFC3339, at)
@@ -983,6 +992,8 @@ func readRegistry(frame map[string]json.RawMessage) (Registry, error) {
 		TokenHash *string         `json:"tokenHash"`
 		PairedAt  string          `json:"pairedAt"`
 		Server    json.RawMessage `json:"server"`
+		Machine   string          `json:"machine"`
+		MName     string          `json:"machineName"`
 	}
 	if json.Unmarshal(frame["devices"], &raw) != nil || raw == nil {
 		return Registry{}, protocolError("a malformed devices")
@@ -992,7 +1003,7 @@ func readRegistry(frame map[string]json.RawMessage) (Registry, error) {
 		if d.ID == nil || d.App == nil || d.TokenHash == nil {
 			return Registry{}, protocolError("a malformed devices")
 		}
-		dev := Device{ID: *d.ID, App: *d.App, Kind: d.Kind, Name: d.Name, TokenHash: *d.TokenHash, PairedAt: d.PairedAt}
+		dev := Device{ID: *d.ID, App: *d.App, Kind: d.Kind, Name: d.Name, TokenHash: *d.TokenHash, PairedAt: d.PairedAt, Machine: d.Machine, MachineName: d.MName}
 		var s Server
 		if d.Server != nil && json.Unmarshal(d.Server, &s) == nil && s.valid() {
 			dev.Server = &s

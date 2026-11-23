@@ -74,7 +74,7 @@ type Deps struct {
 	// secret, as its page's "Pair a device" does (the new secret revokes the
 	// previous one). A subordinate asks for one over its link session
 	// (invite), for a browser on its own computer.
-	Invite func() (code string, expires time.Time, err error)
+	Invite func(machine string) (code string, expires time.Time, err error)
 	// Term, if set, is the family's term as this server knows it, read at
 	// every welcome. Unset means 0.
 	Term func() int
@@ -269,12 +269,13 @@ func (h *Hub) Pair(s *protocol.Session, kind, app, secret, name string) (string,
 		h.limit.fail(ip, h.d.Now())
 		return "", "", protocol.Welcome{}, errUnknownApp(app)
 	}
-	if !h.d.Secrets.Consume(secret) { // another pairing used it meanwhile
+	machine, ok := h.d.Secrets.ConsumeFor(secret)
+	if !ok { // another pairing used it meanwhile
 		unlock()
 		h.limit.fail(ip, h.d.Now())
 		return "", "", protocol.Welcome{}, errBadSecret()
 	}
-	d, token, err := h.d.Devices.Pair(app, name)
+	d, token, err := h.d.Devices.PairTo(app, name, machine)
 	if err != nil {
 		unlock()
 		return "", "", protocol.Welcome{}, h.errInternal(err)
@@ -484,7 +485,7 @@ func (h *Hub) Announce(s *protocol.Session, server protocol.ServerInfo, handover
 func fromWire(reg protocol.Registry) ([]devices.Entry, []devices.Tombstone, error) {
 	list := make([]devices.Entry, 0, len(reg.Devices))
 	for _, d := range reg.Devices {
-		e := devices.Entry{ID: d.ID, App: d.App, Kind: d.Kind, Name: d.Name, TokenHash: d.TokenHash}
+		e := devices.Entry{ID: d.ID, App: d.App, Kind: d.Kind, Name: d.Name, TokenHash: d.TokenHash, Machine: d.Machine, MachineName: d.MachineName}
 		if d.PairedAt != "" {
 			at, err := time.Parse(time.RFC3339, d.PairedAt)
 			if err != nil {
@@ -513,7 +514,7 @@ func fromWire(reg protocol.Registry) ([]devices.Entry, []devices.Tombstone, erro
 func ToWire(list []devices.Entry, removed []devices.Tombstone) protocol.Registry {
 	out := protocol.Registry{Devices: make([]protocol.DeviceEntry, 0, len(list))}
 	for _, e := range list {
-		d := protocol.DeviceEntry{ID: e.ID, App: e.App, Kind: e.Kind, Name: e.Name, TokenHash: e.TokenHash}
+		d := protocol.DeviceEntry{ID: e.ID, App: e.App, Kind: e.Kind, Name: e.Name, TokenHash: e.TokenHash, Machine: e.Machine, MachineName: e.MachineName}
 		if !e.PairedAt.IsZero() {
 			d.PairedAt = e.PairedAt.UTC().Format(time.RFC3339)
 		}
@@ -561,7 +562,7 @@ func (h *Hub) Term(s *protocol.Session, term int, server protocol.ServerInfo, de
 // code does: the device's pair names its own. Only a link session of a
 // server-kind device may ask; any other session gets a protocol error, which
 // closes it. A subordinate answers notMain: its codes would be refused.
-func (h *Hub) Invite(s *protocol.Session) (string, time.Time, *protocol.Error) {
+func (h *Hub) Invite(s *protocol.Session, machine string) (string, time.Time, *protocol.Error) {
 	h.mu.Lock()
 	m, ok := h.sessions[s]
 	h.mu.Unlock()
@@ -574,7 +575,7 @@ func (h *Hub) Invite(s *protocol.Session) (string, time.Time, *protocol.Error) {
 	if h.d.Invite == nil {
 		return "", time.Time{}, h.errInternal(errors.New("this server issues no pairing codes"))
 	}
-	code, expires, err := h.d.Invite()
+	code, expires, err := h.d.Invite(machine)
 	if err != nil {
 		return "", time.Time{}, h.errInternal(err)
 	}

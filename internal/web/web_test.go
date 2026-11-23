@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/FLighter7/workspace-server/internal/apps"
+	"github.com/FLighter7/workspace-server/internal/devices"
 	"github.com/FLighter7/workspace-server/internal/pairing"
 	"github.com/FLighter7/workspace-server/internal/upstream"
 )
@@ -68,7 +69,12 @@ type fakeBackend struct {
 	upstream  UpstreamStatus
 	linkErr   error
 	linkCodes []string
-	pairErr   error // IssuePairing fails with it
+	pairErr   error    // IssuePairing fails with it
+	pairedFor []string // the machine of each IssuePairing and InviteUpstream
+
+	machines  []MachineInfo
+	moved     map[string]string // device id -> machine, per MoveDevice
+	renameErr error
 
 	unlinks   int
 	unlinkErr error
@@ -145,8 +151,9 @@ func (f *fakeBackend) ResumeUpstream(app string) error {
 	return nil
 }
 
-func (f *fakeBackend) InviteUpstream(ctx context.Context) (string, time.Time, error) {
+func (f *fakeBackend) InviteUpstream(ctx context.Context, machine string) (string, time.Time, error) {
 	f.invites++
+	f.pairedFor = append(f.pairedFor, machine)
 	if _, ok := ctx.Deadline(); !ok {
 		return "", time.Time{}, errors.New("no deadline")
 	}
@@ -287,6 +294,51 @@ func (f *fakeBackend) OpenFolder(id string) error {
 
 func (f *fakeBackend) Devices() []DeviceInfo { return f.devices }
 
+func (f *fakeBackend) Machines() []MachineInfo { return f.machines }
+
+func (f *fakeBackend) RenameMachine(id, name string) error {
+	if f.renameErr != nil {
+		return f.renameErr
+	}
+	for i, m := range f.machines {
+		if m.ID == id {
+			f.machines[i].Name = name
+			return nil
+		}
+	}
+	return devices.ErrNoMachine
+}
+
+func (f *fakeBackend) MoveDevice(id, machine string) (string, error) {
+	if !slices.ContainsFunc(f.devices, func(d DeviceInfo) bool { return d.ID == id }) {
+		return "", devices.ErrNoDevice
+	}
+	if machine != "" && !slices.ContainsFunc(f.machines, func(m MachineInfo) bool { return m.ID == machine }) {
+		return "", devices.ErrNoMachine
+	}
+	if machine == "" {
+		machine = "NewMachine"
+	}
+	if f.moved == nil {
+		f.moved = map[string]string{}
+	}
+	f.moved[id] = machine
+	return machine, nil
+}
+
+func (f *fakeBackend) RemoveMachine(id string) bool {
+	found := false
+	f.devices = slices.DeleteFunc(f.devices, func(d DeviceInfo) bool {
+		if d.Machine == id {
+			found = true
+			f.removed = append(f.removed, d.ID)
+			return true
+		}
+		return false
+	})
+	return found
+}
+
 func (f *fakeBackend) RemoveDevice(id string) bool {
 	for i, d := range f.devices {
 		if d.ID == id {
@@ -298,7 +350,8 @@ func (f *fakeBackend) RemoveDevice(id string) bool {
 	return false
 }
 
-func (f *fakeBackend) IssuePairing() (string, time.Time, error) {
+func (f *fakeBackend) IssuePairing(machine string) (string, time.Time, error) {
+	f.pairedFor = append(f.pairedFor, machine)
 	if f.pairErr != nil {
 		return "", time.Time{}, f.pairErr
 	}
@@ -456,6 +509,9 @@ func TestGuardMutatingNeedsHeader(t *testing.T) {
 		{http.MethodPut, "/api/apps/todo", `{"quota":2097152}`},
 		{http.MethodPost, "/api/apps/todo/open", ""},
 		{http.MethodDelete, "/api/devices/Q2xhdWRlUm9ja3Mx", ""},
+		{http.MethodPost, "/api/devices/Q2xhdWRlUm9ja3Mx/move", `{"machine":""}`},
+		{http.MethodPut, "/api/machines/M1", `{"name":"x"}`},
+		{http.MethodDelete, "/api/machines/M1", ""},
 		{http.MethodOptions, "/api/pairing", ""},
 		{http.MethodPost, "/api/server/stop", `{"removeAutostart":true}`},
 		{http.MethodDelete, "/api/data", ""},
@@ -473,7 +529,7 @@ func TestGuardMutatingNeedsHeader(t *testing.T) {
 			t.Errorf("%s %s without the header: status %d, want 403", tc.method, tc.path, w.Code)
 		}
 	}
-	if len(f.configCalls)+len(f.added)+len(f.deleted)+len(f.removed)+len(f.calls)+len(f.dataDirs)+len(f.linkCodes)+f.unlinks+f.invites+len(f.resumed)+len(f.quotas)+len(f.opened) != 0 || f.issued != 1 {
+	if len(f.configCalls)+len(f.added)+len(f.deleted)+len(f.removed)+len(f.calls)+len(f.dataDirs)+len(f.linkCodes)+f.unlinks+f.invites+len(f.resumed)+len(f.quotas)+len(f.opened)+len(f.moved) != 0 || f.issued != 1 {
 		t.Errorf("refused requests reached the backend: %+v", f)
 	}
 }
@@ -981,6 +1037,72 @@ func TestRemoveDevice(t *testing.T) {
 	if !reflect.DeepEqual(f.removed, []string{"Q2xhdWRlUm9ja3Mx"}) {
 		t.Errorf("removed = %v", f.removed)
 	}
+}
+
+// The machines devices of apps are paired on: listed, renamed, removed with
+// their devices, and joined or left by moving a device.
+func TestMachines(t *testing.T) {
+	f := newFake()
+	f.machines = []MachineInfo{{ID: "M1", Name: "iPhone"}, {ID: "M2", Name: "Windows"}}
+	f.devices = []DeviceInfo{
+		{ID: "D1", App: "todo", Name: "iPhone Safari", Machine: "M1"},
+		{ID: "D2", App: "notes", Name: "iPhone Safari", Machine: "M1"},
+		{ID: "D3", App: "todo", Name: "Windows Edge", Machine: "M2"},
+	}
+	h := newTestHandler(f)
+
+	w := serve(h, request(http.MethodGet, "/api/machines", ""))
+	wantStatus(t, w, http.StatusOK)
+	var list []MachineInfo
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil || !reflect.DeepEqual(list, f.machines) {
+		t.Errorf("GET /api/machines = %s (%v)", w.Body, err)
+	}
+	if empty := serve(newTestHandler(newFake()), request(http.MethodGet, "/api/machines", "")); strings.TrimSpace(empty.Body.String()) != "[]" {
+		t.Errorf("no machines = %s, want []", empty.Body)
+	}
+
+	wantStatus(t, serve(h, request(http.MethodPut, "/api/machines/M1", `{"name":"Alex's phone"}`)), http.StatusNoContent)
+	if f.machines[0].Name != "Alex's phone" {
+		t.Errorf("rename: machines = %+v", f.machines)
+	}
+	wantError(t, serve(h, request(http.MethodPut, "/api/machines/nope", `{"name":"x"}`)), http.StatusNotFound, "notFound")
+	wantError(t, serve(h, request(http.MethodPut, "/api/machines/M1", `{}`)), http.StatusBadRequest, "invalid")
+	f.renameErr = devices.ErrInvalidName
+	wantError(t, serve(h, request(http.MethodPut, "/api/machines/M1", `{"name":" "}`)), http.StatusBadRequest, "invalid")
+	f.renameErr = nil
+
+	w = serve(h, request(http.MethodPost, "/api/devices/D3/move", `{"machine":"M1"}`))
+	wantStatus(t, w, http.StatusOK)
+	if strings.TrimSpace(w.Body.String()) != `{"machine":"M1"}` || f.moved["D3"] != "M1" {
+		t.Errorf("move to M1 = %s, moved %v", w.Body, f.moved)
+	}
+	w = serve(h, request(http.MethodPost, "/api/devices/D2/move", `{"machine":""}`))
+	if strings.TrimSpace(w.Body.String()) != `{"machine":"NewMachine"}` {
+		t.Errorf("move to a new machine = %s", w.Body)
+	}
+	wantError(t, serve(h, request(http.MethodPost, "/api/devices/nope/move", `{"machine":"M1"}`)), http.StatusNotFound, "notFound")
+	wantError(t, serve(h, request(http.MethodPost, "/api/devices/D1/move", `{"machine":"nope"}`)), http.StatusNotFound, "notFound")
+	wantError(t, serve(h, request(http.MethodPost, "/api/devices/D1/move", `{}`)), http.StatusBadRequest, "invalid")
+
+	wantStatus(t, serve(h, request(http.MethodDelete, "/api/machines/M1", "")), http.StatusNoContent)
+	if !reflect.DeepEqual(f.removed, []string{"D1", "D2"}) {
+		t.Errorf("removing M1 removed %v, want its devices", f.removed)
+	}
+	wantError(t, serve(h, request(http.MethodDelete, "/api/machines/M1", "")), http.StatusNotFound, "notFound")
+}
+
+// A pairing code, of this server or of the main, is issued for the machine
+// the body names, or for a new one when there is no body.
+func TestPairingForAMachine(t *testing.T) {
+	f := newFake()
+	h := newTestHandler(f)
+	wantStatus(t, serve(h, request(http.MethodPost, "/api/pairing", "")), http.StatusOK)
+	wantStatus(t, serve(h, request(http.MethodPost, "/api/pairing", `{"machine":"M1"}`)), http.StatusOK)
+	wantStatus(t, serve(h, request(http.MethodPost, "/api/upstream/invite", `{"machine":"M2"}`)), http.StatusOK)
+	if want := []string{"", "M1", "M2"}; !reflect.DeepEqual(f.pairedFor, want) {
+		t.Errorf("codes issued for %q, want %q", f.pairedFor, want)
+	}
+	wantError(t, serve(h, request(http.MethodPost, "/api/pairing", `{"machine":1}`)), http.StatusBadRequest, "invalid")
 }
 
 func TestJSONShape(t *testing.T) {

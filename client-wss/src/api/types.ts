@@ -103,12 +103,24 @@ export interface DeviceInfo {
 	/** "server": a server linked to this one, its subordinate. */
 	kind?: 'server';
 	name: string;
+	/** The machine a device of an app is paired on (MachineInfo); absent for a server. */
+	machine?: string;
 	pairedAt: string;
 	lastSeen: string;
 	/** A session is open now. */
 	connected: boolean;
 	/** What a server-kind device announced; absent until it has. */
 	server?: LinkedServer;
+}
+
+/**
+ * GET /api/machines: a physical device of the user's, a phone or a laptop,
+ * which devices of apps are paired on. The user says which pairings share
+ * one: when the code is issued, or later by moving a pairing.
+ */
+export interface MachineInfo {
+	id: string;
+	name: string;
 }
 
 /** How devices reach a server linked to this one, as it announced it. */

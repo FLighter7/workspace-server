@@ -149,6 +149,7 @@ type textFrame struct {
 	Tx       string          `json:"tx"`
 	Keep     string          `json:"keep"`
 	Since    json.RawMessage `json:"since"`
+	Machine  string          `json:"machine"`
 }
 
 func (f *textFrame) key() Key { return Key{Path: f.Path, ID: f.ID, Type: f.Type} }
@@ -330,7 +331,7 @@ func (s *Session) HandleText(msg string) {
 			s.fail(CodeProtocol, "only a link session may ask for a pairing code")
 			return
 		}
-		code, expires, e := s.b.Invite(s)
+		code, expires, e := s.b.Invite(s, f.Machine)
 		if e != nil {
 			s.answer(e)
 			return

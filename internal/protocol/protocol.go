@@ -247,6 +247,10 @@ type DeviceEntry struct {
 	TokenHash string      `json:"tokenHash"`
 	PairedAt  string      `json:"pairedAt,omitempty"`
 	Server    *ServerInfo `json:"server,omitempty"`
+	// Machine and MachineName name the physical device a device of an app
+	// is paired on, and the name the main gives it.
+	Machine     string `json:"machine,omitempty"`
+	MachineName string `json:"machineName,omitempty"`
 }
 
 // Tombstone is a device removed from the family, by id, and when (RFC 3339
@@ -322,7 +326,7 @@ type Backend interface {
 	// page issues, with a new secret. The session calls it only for a link
 	// session; an error with CodeProtocol closes the session, any other is
 	// answered and the session stays open.
-	Invite(s *Session) (code string, expires time.Time, err *Error)
+	Invite(s *Session, machine string) (code string, expires time.Time, err *Error)
 
 	// The documents, for app sessions only. An error with CodeProtocol
 	// closes the session; any other is answered, and the session stays

@@ -4,6 +4,7 @@ import { defineComponent, h } from 'vue';
 import { ApiError, serverApi } from '@/api/client';
 import type { DeviceInfo, UpstreamStatus } from '@/api/types';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
+import { resetNotices, noticeState } from '@/composables/useNotify';
 import { invitedCode, ownCode } from '@/composables/usePairingCode';
 import { mountPage, settle } from '@/testing/mountPage';
 import DevicesSection from '../DevicesSection.vue';
@@ -14,10 +15,32 @@ const Page = defineComponent({ render: () => h('div', [h(DevicesSection), h(Conf
 const phone: DeviceInfo = {
 	id: 'Phone00000000001',
 	app: 'todo',
-	name: 'iPhone',
+	name: 'iPhone Safari (PWA)',
+	machine: 'Machine000000001',
 	pairedAt: '2026-11-10T10:00:00Z',
 	lastSeen: '2026-11-12T10:00:00Z',
 	connected: true,
+};
+
+/** Another app on the same phone. */
+const phoneNotes: DeviceInfo = {
+	id: 'Phone00000000002',
+	app: 'notes',
+	name: 'iPhone Safari',
+	machine: 'Machine000000001',
+	pairedAt: '2026-11-11T10:00:00Z',
+	lastSeen: '2026-11-11T12:00:00Z',
+	connected: false,
+};
+
+const desk: DeviceInfo = {
+	id: 'Desk000000000001',
+	app: 'todo',
+	name: 'Windows Edge',
+	machine: 'Machine000000002',
+	pairedAt: '2026-11-10T10:00:00Z',
+	lastSeen: '2026-11-12T09:00:00Z',
+	connected: false,
 };
 
 const laptop: DeviceInfo = {
@@ -73,12 +96,20 @@ beforeEach(() => {
 		},
 	]);
 	vi.spyOn(serverApi, 'devices').mockResolvedValue([laptop, phone]);
+	vi.spyOn(serverApi, 'machines').mockResolvedValue([
+		{ id: 'Machine000000001', name: "Alex's phone" },
+		{ id: 'Machine000000002', name: 'Desk' },
+	]);
 });
+
+const labelled = (label: string, within: ParentNode = document): HTMLButtonElement =>
+	within.querySelector(`button[aria-label="${label}"]`) as HTMLButtonElement;
 
 afterEach(() => {
 	vi.restoreAllMocks();
 	invitedCode.drop();
 	ownCode.drop();
+	resetNotices();
 	document.body.innerHTML = '';
 });
 
@@ -90,8 +121,8 @@ describe('DevicesSection on a main', () => {
 	it('marks a linked server as one, with what it announced', async () => {
 		mountPage(Page);
 		await settle();
-		expect(headings('h2')).toEqual(['Linked servers', 'Todo todo']);
-		expect(headings('h3')).toEqual(['Laptop', 'iPhone']);
+		expect(headings('h2')).toEqual(['Linked servers', 'Devices']);
+		expect(headings('h3')).toEqual(['Laptop', "Alex's phone"]);
 		expect(text()).toContain('Lp7tOp0123ab');
 		expect(text()).toContain('192.168.1.30');
 		expect(text()).toContain('47801');
@@ -112,19 +143,72 @@ describe('DevicesSection on a main', () => {
 		expect(remove).toHaveBeenCalledWith('Server0000000001');
 	});
 
-	it("disconnects an app's device after a question, and says so", async () => {
-		const remove = vi.spyOn(serverApi, 'removeDevice').mockResolvedValue(null);
+	it('shows each device once, with its apps, by name', async () => {
+		vi.spyOn(serverApi, 'devices').mockResolvedValue([laptop, phone, phoneNotes, desk]);
 		mountPage(Page);
 		await settle();
-		button('Disconnect').click();
+		expect(headings('h2')).toEqual(['Linked servers', 'Devices']);
+		expect(headings('h3')).toEqual(['Laptop', "Alex's phone", 'Desk']);
+		expect(labelled("Apps on Alex's phone: 2, connected now: 1")).not.toBeNull();
+		expect(labelled('Apps on Desk: 1')).not.toBeNull();
+		expect(text()).toContain('Connected now');
+	});
+
+	it("lists a device's apps, and moves one to a device of its own", async () => {
+		vi.spyOn(serverApi, 'devices').mockResolvedValue([phone, phoneNotes]);
+		const move = vi
+			.spyOn(serverApi, 'moveDevice')
+			.mockResolvedValue({ machine: 'Machine000000003' });
+		mountPage(Page);
+		await settle();
+		labelled("Apps on Alex's phone: 2, connected now: 1").click();
 		await settle();
 		const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
-		expect(dialog.textContent).toContain('Disconnect iPhone?');
-		expect(dialog.textContent).toContain('The device loses access.');
-		button('Disconnect', dialog).click();
+		expect(dialog.textContent).toContain("Apps on Alex's phone");
+		expect(headings('h3')).toEqual(["Alex's phone", 'Todo', 'notes']);
+		expect(dialog.textContent).toContain('iPhone Safari (PWA)');
+		labelled('Move notes to another device', dialog).click();
 		await settle();
-		expect(remove).toHaveBeenCalledWith('Phone00000000001');
-		expect(document.body.textContent).toContain('Disconnected.');
+		const item = [...document.querySelectorAll('.v-list-item')].find(
+			(e) => e.textContent?.trim() === 'A device of its own',
+		) as HTMLElement;
+		item.click();
+		await settle();
+		expect(move).toHaveBeenCalledWith('Phone00000000002', '');
+		expect(noticeState.current?.key).toBe('moved');
+	});
+
+	it('deletes a device with all its apps after a question, and says so', async () => {
+		const remove = vi.spyOn(serverApi, 'removeMachine').mockResolvedValue(null);
+		mountPage(Page);
+		await settle();
+		labelled("Delete Alex's phone with all its apps").click();
+		await settle();
+		const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+		expect(dialog.textContent).toContain("Delete Alex's phone?");
+		expect(dialog.textContent).toContain('Every app on this device loses access.');
+		button('Delete', dialog).click();
+		await settle();
+		expect(remove).toHaveBeenCalledWith('Machine000000001');
+		expect(document.body.textContent).toContain('Deleted');
+	});
+
+	it('renames a device', async () => {
+		const rename = vi.spyOn(serverApi, 'renameMachine').mockResolvedValue(null);
+		mountPage(Page);
+		await settle();
+		labelled("Rename Alex's phone").click();
+		await settle();
+		const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+		const input = dialog.querySelector('input') as HTMLInputElement;
+		expect(input.value).toBe("Alex's phone");
+		input.value = 'Work phone';
+		input.dispatchEvent(new Event('input'));
+		await settle();
+		button('Save', dialog).click();
+		await settle();
+		expect(rename).toHaveBeenCalledWith('Machine000000001', 'Work phone');
+		expect(text()).toContain('Renamed.');
 	});
 
 	it('hands the role of main to a linked server, after a question', async () => {

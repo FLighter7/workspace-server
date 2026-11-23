@@ -2,8 +2,9 @@
 	<div ref="panel">
 		<p class="mb-2">{{ t('pairIntro') }}</p>
 		<p class="text-medium-emphasis mb-4">{{ t('pairRules') }}</p>
+		<PairTargetField :model-value="ownCode.state.machine" @update:model-value="newCode" />
 		<div :class="s.actions">
-			<VBtn color="primary" variant="flat" @click="newCode">{{ t('newCode') }}</VBtn>
+			<VBtn color="primary" variant="flat" @click="newCode()">{{ t('newCode') }}</VBtn>
 		</div>
 		<StatusLine :message="message" />
 
@@ -54,6 +55,7 @@ import FactItem from '@/components/FactItem.vue';
 import FactList from '@/components/FactList.vue';
 import ItemCard from '@/components/ItemCard.vue';
 import PairingCodeView from '@/components/PairingCodeView.vue';
+import PairTargetField from '@/components/PairTargetField.vue';
 import StatusLine from '@/components/StatusLine.vue';
 import { errorMessage, info, type Message } from '@/composables/messages';
 import { useFormat } from '@/composables/useFormat';
@@ -68,9 +70,10 @@ const message = ref<Message | null>(null);
 const refusals = ref<Refusal[]>([]);
 const panel = useTemplateRef<HTMLElement>('panel');
 
-async function newCode(): Promise<void> {
+/** A new code, for machine when given (a device chosen in the field), else for the same one. */
+async function newCode(machine?: string): Promise<void> {
 	try {
-		await ownCode.issue();
+		await ownCode.issue(machine);
 	} catch (error) {
 		message.value = errorMessage(error);
 		return;

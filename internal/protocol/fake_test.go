@@ -347,6 +347,7 @@ type fakeBackend struct {
 	inviteCode    string
 	inviteExpires time.Time
 	inviteErr     *Error
+	inviteMachine string // what the last invite asked for
 
 	divergedErr *Error
 	divergeds   []divergedCall
@@ -578,10 +579,11 @@ func (b *fakeBackend) Term(s *Session, term int, server ServerInfo, device, toke
 	return b.termAnswer, b.termErr
 }
 
-func (b *fakeBackend) Invite(s *Session) (string, time.Time, *Error) {
+func (b *fakeBackend) Invite(s *Session, machine string) (string, time.Time, *Error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.calls = append(b.calls, "invite")
+	b.inviteMachine = machine
 	return b.inviteCode, b.inviteExpires, b.inviteErr
 }
 

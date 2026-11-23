@@ -677,7 +677,10 @@ func (l *Link) forget(ctx context.Context, st *state) bool {
 	}
 }
 
-type inviteReq struct{ reply chan inviteResult }
+type inviteReq struct {
+	machine string // the main's machine the browser joins; "" for a new one
+	reply   chan inviteResult
+}
 
 type inviteResult struct {
 	inv wsclient.Invitation
@@ -687,10 +690,11 @@ type inviteResult struct {
 // Invite asks the main, over the link session, for a pairing code of its
 // own, the one its page's "Pair a device" would show, for a browser on this
 // computer: the browser pairs with the main, and learns this server from the
-// main's welcome. It needs the main: a link that is not connected now is a
-// *RefusedError with ReasonUnreachable, and a halted one names why it
-// halted. A server that is not linked is ErrNotLinked.
-func (l *Link) Invite(ctx context.Context) (wsclient.Invitation, error) {
+// main's welcome; machine, when not "", is the main's machine (a physical
+// device of the user's) the browser joins. It needs the main: a link that is
+// not connected now is a *RefusedError with ReasonUnreachable, and a halted
+// one names why it halted. A server that is not linked is ErrNotLinked.
+func (l *Link) Invite(ctx context.Context, machine string) (wsclient.Invitation, error) {
 	l.mu.Lock()
 	linked, connected, halted, reason, lastErr := l.st != nil, l.connected, l.halted, l.reason, l.lastErr
 	l.mu.Unlock()
@@ -702,7 +706,7 @@ func (l *Link) Invite(ctx context.Context) (wsclient.Invitation, error) {
 	case !connected:
 		return wsclient.Invitation{}, errUnreachable()
 	}
-	req := inviteReq{reply: make(chan inviteResult, 1)}
+	req := inviteReq{machine: machine, reply: make(chan inviteResult, 1)}
 	select {
 	case l.invites <- req:
 	case <-ctx.Done():
@@ -776,10 +780,10 @@ func (l *Link) resumeSignalLocked(app string) chan struct{} {
 
 // invite asks the main for a pairing code over its link session cl, and
 // checks that the code is the main's own.
-func (l *Link) invite(ctx context.Context, cl *wsclient.Client, mainID string) inviteResult {
+func (l *Link) invite(ctx context.Context, cl *wsclient.Client, mainID, machine string) inviteResult {
 	ctx, cancel := context.WithTimeout(ctx, inviteWait)
 	defer cancel()
-	inv, err := cl.Invite(ctx)
+	inv, err := cl.Invite(ctx, machine)
 	if err != nil {
 		return inviteResult{err: refused(err)}
 	}
@@ -1118,7 +1122,7 @@ func (l *Link) session(ctx context.Context) error {
 		case req := <-l.invites:
 			// Beside the loop: the main's answer is awaited without holding
 			// up the app list, the registry or a failure.
-			wg.Go(func() { req.reply <- l.invite(sctx, cl, st.ServerID) })
+			wg.Go(func() { req.reply <- l.invite(sctx, cl, st.ServerID, req.machine) })
 		case err := <-fatal:
 			return err
 		case <-cl.Done():

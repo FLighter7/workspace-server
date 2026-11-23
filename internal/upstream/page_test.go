@@ -20,19 +20,33 @@ import (
 
 // The main issues an ordinary pairing code of its own for the subordinate:
 // a browser pairs with the main with it, hears of the subordinate in the
-// main's welcome, and is admitted there on the main's word. A server that
-// is not linked, or whose main is out of reach, gets no code.
+// main's welcome, and is admitted there on the main's word. The code is for
+// a machine of the main's, which the subordinate knows from the main's
+// registry, and the browser joins it. A server that is not linked, or whose
+// main is out of reach, gets no code.
 func TestInviteIssuesAWorkingCode(t *testing.T) {
 	main := startNode(t, "Desk")
 	sub := startNode(t, "Laptop")
-	if _, err := sub.link.Invite(ctx(t)); !errors.Is(err, ErrNotLinked) {
+	if _, err := sub.link.Invite(ctx(t), ""); !errors.Is(err, ErrNotLinked) {
 		t.Errorf("invite before linking: %v, want ErrNotLinked", err)
 	}
 	sub.linkTo(main)
 	waitFor(t, "the link", func() bool { return sub.link.Status().Connected })
+	notes, _, err := main.devices.Pair("notes", "Windows Edge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := main.devices.RenameMachine(notes.Machine, "Laptop itself"); err != nil {
+		t.Fatal(err)
+	}
+	main.hub.DevicesChanged()
+	waitFor(t, "the subordinate to learn the main's machine", func() bool {
+		list := sub.devices.ReplicaMachines()
+		return len(list) == 1 && list[0].ID == notes.Machine && list[0].Name == "Laptop itself"
+	})
 
 	before := time.Now()
-	inv, err := sub.link.Invite(ctx(t))
+	inv, err := sub.link.Invite(ctx(t), notes.Machine)
 	if err != nil {
 		t.Fatalf("invite: %v", err)
 	}
@@ -62,6 +76,9 @@ func TestInviteIssuesAWorkingCode(t *testing.T) {
 	if got, want := w.Subordinates, []wsclient.Server{sub.self()}; !reflect.DeepEqual(got, want) {
 		t.Errorf("the main's welcome lists %+v, want the subordinate", got)
 	}
+	if d, _ := main.devices.Get(p.Device); d.Machine != notes.Machine {
+		t.Errorf("the browser is on machine %q, want the one invited for, %q", d.Machine, notes.Machine)
+	}
 	waitFor(t, "the subordinate to admit the browser", func() bool { _, ok := sub.devices.Get(p.Device); return ok })
 	sub.connect("todo", p.Device, p.Token)
 
@@ -70,7 +87,7 @@ func TestInviteIssuesAWorkingCode(t *testing.T) {
 	}
 	waitFor(t, "the link to notice", func() bool { return !sub.link.Status().Connected })
 	var re *RefusedError
-	if _, err := sub.link.Invite(ctx(t)); !errors.As(err, &re) || re.Reason != ReasonUnreachable {
+	if _, err := sub.link.Invite(ctx(t), ""); !errors.As(err, &re) || re.Reason != ReasonUnreachable {
 		t.Errorf("invite with the main away: %v, want %s", err, ReasonUnreachable)
 	}
 }

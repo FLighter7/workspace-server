@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FLighter7/workspace-server/internal/apps"
+	"github.com/FLighter7/workspace-server/internal/devices"
 	"github.com/FLighter7/workspace-server/internal/fsutil"
 	"github.com/FLighter7/workspace-server/internal/hub"
 	"github.com/FLighter7/workspace-server/internal/pairing"
@@ -392,8 +393,8 @@ func (s *server) ResumeUpstream(app string) error {
 
 // InviteUpstream asks the main, over the link, for a pairing code of its own
 // for a browser on this computer.
-func (s *server) InviteUpstream(ctx context.Context) (string, time.Time, error) {
-	inv, err := s.link.Invite(ctx)
+func (s *server) InviteUpstream(ctx context.Context, machine string) (string, time.Time, error) {
+	inv, err := s.link.Invite(ctx, machine)
 	return inv.Code, inv.ExpiresAt, err
 }
 
@@ -410,6 +411,7 @@ func (s *server) Devices() []web.DeviceInfo {
 			App:       d.App,
 			Kind:      d.Kind,
 			Name:      d.Name,
+			Machine:   d.Machine,
 			PairedAt:  d.PairedAt,
 			LastSeen:  d.LastSeen,
 			Connected: connected[d.ID],
@@ -426,14 +428,62 @@ func (s *server) RemoveDevice(id string) bool {
 	return s.hub.RemoveDevice(id)
 }
 
+// Machines lists this server's machines, then those of its main's registry
+// it does not hold itself.
+func (s *server) Machines() []web.MachineInfo {
+	out := []web.MachineInfo{}
+	seen := map[string]bool{}
+	for _, list := range [][]devices.Machine{s.devices.Machines(), s.devices.ReplicaMachines()} {
+		for _, m := range list {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				out = append(out, web.MachineInfo{ID: m.ID, Name: m.Name})
+			}
+		}
+	}
+	return out
+}
+
+// RenameMachine names a machine, and tells the subordinates.
+func (s *server) RenameMachine(id, name string) error {
+	if err := s.devices.RenameMachine(id, name); err != nil {
+		return err
+	}
+	s.hub.DevicesChanged()
+	return nil
+}
+
+// MoveDevice puts a device on another machine, and tells the subordinates.
+func (s *server) MoveDevice(id, machine string) (string, error) {
+	got, err := s.devices.MoveDevice(id, machine)
+	if err != nil {
+		return "", err
+	}
+	s.hub.DevicesChanged()
+	return got, nil
+}
+
+// RemoveMachine removes the devices paired on a machine, which goes with
+// the last of them, and closes their sessions.
+func (s *server) RemoveMachine(id string) bool {
+	found := false
+	for _, d := range s.devices.List() {
+		if d.Machine == id && !d.IsServer() {
+			found = true
+			s.hub.RemoveDevice(d.ID)
+		}
+	}
+	return found
+}
+
 // IssuePairing issues a pairing code with a new secret. A subordinate issues
 // none: it answers pair with notMain, so its code would only fail. Its page
 // asks the main for one instead (InviteUpstream).
-func (s *server) IssuePairing() (string, time.Time, error) {
+func (s *server) IssuePairing(machine string) (string, time.Time, error) {
 	if s.link.Role() == upstream.RoleSubordinate {
 		return "", time.Time{}, web.ErrNotMain
 	}
-	secret, expires := s.secrets.Issue()
+	secret, expires := s.secrets.IssueFor(machine)
 	s.mu.Lock()
 	code := pairing.Code{
 		V:  1,

@@ -10,13 +10,16 @@ import (
 
 const secretTTL = 10 * time.Minute
 
-// Secrets holds the single live one-time pairing secret, in memory only.
+// Secrets holds the single live one-time pairing secret, in memory only,
+// with the machine the device that pairs with it joins: the physical device
+// the user chose when the code was issued, or "" for a new one.
 type Secrets struct {
 	now func() time.Time
 
 	mu      sync.Mutex
 	secret  string
 	expires time.Time
+	machine string
 }
 
 // NewSecrets returns an empty Secrets that reads time from now.
@@ -26,6 +29,12 @@ func NewSecrets(now func() time.Time) *Secrets {
 
 // Issue creates a new secret valid for 10 minutes and revokes the previous one.
 func (s *Secrets) Issue() (secret string, expires time.Time) {
+	return s.IssueFor("")
+}
+
+// IssueFor creates a new secret as Issue does, for a device that joins
+// machine, a physical device the user already has, or a new one for "".
+func (s *Secrets) IssueFor(machine string) (secret string, expires time.Time) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
 		// crypto/rand does not fail on supported platforms.
@@ -36,7 +45,7 @@ func (s *Secrets) Issue() (secret string, expires time.Time) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.secret, s.expires = secret, expires
+	s.secret, s.expires, s.machine = secret, expires, machine
 	return secret, expires
 }
 
@@ -51,13 +60,21 @@ func (s *Secrets) Check(secret string) bool {
 // Consume reports whether secret was valid and, if so, removes it so that it
 // can never succeed again.
 func (s *Secrets) Consume(secret string) bool {
+	_, ok := s.ConsumeFor(secret)
+	return ok
+}
+
+// ConsumeFor consumes secret as Consume does, and returns the machine it was
+// issued for (IssueFor).
+func (s *Secrets) ConsumeFor(secret string) (machine string, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.validLocked(secret) {
-		return false
+		return "", false
 	}
-	s.secret, s.expires = "", time.Time{}
-	return true
+	machine = s.machine
+	s.secret, s.expires, s.machine = "", time.Time{}, ""
+	return machine, true
 }
 
 func (s *Secrets) validLocked(secret string) bool {

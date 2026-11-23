@@ -2457,6 +2457,70 @@
 			]
 		},
 		{
+			"name": "devices pushed with the machines the devices of apps are paired on",
+			"session": "link",
+			"backend": {},
+			"pushDevices": [
+				{
+					"id": "Dev0123456789ab",
+					"app": "todo",
+					"name": "iPhone Safari (PWA)",
+					"tokenHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+					"machine": "Mac0123456789ab",
+					"machineName": "Alex's phone"
+				},
+				{
+					"id": "Dev9876543210zy",
+					"app": "notes",
+					"name": "iPhone Safari",
+					"tokenHash": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752",
+					"machine": "Mac0123456789ab",
+					"machineName": "Alex's phone"
+				}
+			],
+			"server": [
+				{
+					"t": "devices",
+					"devices": [
+						{
+							"id": "Dev0123456789ab",
+							"app": "todo",
+							"name": "iPhone Safari (PWA)",
+							"tokenHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+							"machine": "Mac0123456789ab",
+							"machineName": "Alex's phone"
+						},
+						{
+							"id": "Dev9876543210zy",
+							"app": "notes",
+							"name": "iPhone Safari",
+							"tokenHash": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752",
+							"machine": "Mac0123456789ab",
+							"machineName": "Alex's phone"
+						}
+					]
+				}
+			],
+			"result": [
+				{
+					"id": "Dev0123456789ab",
+					"app": "todo",
+					"name": "iPhone Safari (PWA)",
+					"tokenHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+					"machine": "Mac0123456789ab",
+					"machineName": "Alex's phone"
+				},
+				{
+					"id": "Dev9876543210zy",
+					"app": "notes",
+					"name": "iPhone Safari",
+					"tokenHash": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752",
+					"machine": "Mac0123456789ab",
+					"machineName": "Alex's phone"
+				}
+			]
+		},
+		{
 			"name": "announce that the main refuses",
 			"session": "link",
 			"backend": {
@@ -2594,6 +2658,35 @@
 			},
 			"client": {
 				"t": "invite"
+			},
+			"server": [
+				{
+					"t": "invited",
+					"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOlsiMGI3YzVhNTItNmEzZS00ZDJiLTlmMWUtN2QyYzNiNGE1ZjYwLmxvY2FsIiwiMTkyLjE2OC4xLjIwIiwiMTAuMC4wLjUiXSwicyI6InE4M3ZFalJXZUpDcnplOFNORlo0a0EifQ",
+					"expiresAt": "2026-11-12T10:10:00Z"
+				}
+			],
+			"result": {
+				"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOlsiMGI3YzVhNTItNmEzZS00ZDJiLTlmMWUtN2QyYzNiNGE1ZjYwLmxvY2FsIiwiMTkyLjE2OC4xLjIwIiwiMTAuMC4wLjUiXSwicyI6InE4M3ZFalJXZUpDcnplOFNORlo0a0EifQ",
+				"expiresAt": "2026-11-12T10:10:00Z"
+			}
+		},
+		{
+			"name": "invite for a machine the user already has, which the device that pairs with the code joins",
+			"session": "link",
+			"backend": {
+				"invite": {
+					"code": "wsrv1.eyJ2IjoxLCJpZCI6IkFiM2RFZjZoSWo5ayIsIm4iOiJEZXNrIiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eCIsImYiOiJDaHNzUFU1ZllIR0NrNlMxeHRmby1Rb2JMRDFPWDJCeGdwT2t0Y2JYNlBrIiwibyI6NDc4MDAsImgiOlsiMGI3YzVhNTItNmEzZS00ZDJiLTlmMWUtN2QyYzNiNGE1ZjYwLmxvY2FsIiwiMTkyLjE2OC4xLjIwIiwiMTAuMC4wLjUiXSwicyI6InE4M3ZFalJXZUpDcnplOFNORlo0a0EifQ",
+					"expiresAt": "2026-11-12T10:10:00Z"
+				}
+			},
+			"call": {
+				"method": "invite",
+				"machine": "Mac0123456789ab"
+			},
+			"client": {
+				"t": "invite",
+				"machine": "Mac0123456789ab"
 			},
 			"server": [
 				{

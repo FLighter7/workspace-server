@@ -59,7 +59,16 @@ func entryOf(e *env, t *testing.T, id string) obj {
 	if !ok {
 		t.Fatalf("no device %s", id)
 	}
-	return obj{"id": d.ID, "app": d.App, "name": d.Name, "tokenHash": d.TokenHash, "pairedAt": d.PairedAt.UTC().Format(time.RFC3339)}
+	out := obj{"id": d.ID, "app": d.App, "name": d.Name, "tokenHash": d.TokenHash, "pairedAt": d.PairedAt.UTC().Format(time.RFC3339)}
+	if d.Machine != "" {
+		out["machine"] = d.Machine
+		for _, m := range e.devices.Machines() {
+			if m.ID == d.Machine {
+				out["machineName"] = m.Name
+			}
+		}
+	}
+	return out
 }
 
 // appDevices is a devices frame's entries of apps: the registry without its
@@ -216,7 +225,9 @@ func TestInvite(t *testing.T) {
 	e := newEnv(t)
 	issued := 0
 	var fail error
-	e.hub.d.Invite = func() (string, time.Time, error) {
+	var machines []string
+	e.hub.d.Invite = func(machine string) (string, time.Time, error) {
+		machines = append(machines, machine)
 		if fail != nil {
 			return "", time.Time{}, fail
 		}
@@ -272,6 +283,17 @@ func TestInvite(t *testing.T) {
 	settleLink(t, link, linkFc) // the session stays open
 	if issued != 1 || linkFc.isClosed() {
 		t.Errorf("a subordinate issued a code (%d), or closed the session", issued)
+	}
+
+	// An invite for a machine asks for a code for it.
+	e.hub.d.Role = func() string { return protocol.RoleMain }
+	link.HandleText(`{"t":"invite","machine":"Mac0123456789ab"}`)
+	waitFrames(t, linkFc, "invited", 2)
+	if got := machines[len(machines)-1]; got != "Mac0123456789ab" {
+		t.Errorf("the code was issued for machine %q, want the one asked for", got)
+	}
+	if machines[0] != "" {
+		t.Errorf("an invite with no machine asked for %q", machines[0])
 	}
 }
 

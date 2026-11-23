@@ -43,12 +43,15 @@ const KindServer = "server"
 // device's token. A server-kind device (Kind KindServer) has no App; Server
 // is what it announced about itself, once it has. Replica marks a device of
 // this server's main, which this server admits on the main's word (see
-// SetReplica); it is never written to the file.
+// SetReplica); it is never written to the file. Machine is the physical
+// device a device of an app is paired on (see Machine); a server-kind
+// device has none.
 type Device struct {
 	ID        string    `json:"id"`
 	App       string    `json:"app"`
 	Kind      string    `json:"kind,omitempty"`
 	Name      string    `json:"name"`
+	Machine   string    `json:"machine,omitempty"`
 	TokenHash string    `json:"tokenHash"`
 	PairedAt  time.Time `json:"pairedAt"`
 	LastSeen  time.Time `json:"lastSeen"`
@@ -62,8 +65,9 @@ func (d Device) IsServer() bool { return d.Kind == KindServer }
 var tokenHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type file struct {
-	Devices []Device    `json:"devices"`
-	Removed []Tombstone `json:"removed,omitempty"`
+	Devices  []Device    `json:"devices"`
+	Machines []Machine   `json:"machines,omitempty"`
+	Removed  []Tombstone `json:"removed,omitempty"`
 }
 
 // Registry is the set of paired devices. It is safe for concurrent use.
@@ -71,10 +75,13 @@ type Registry struct {
 	path string
 	now  func() time.Time
 
-	mu      sync.Mutex
-	devices []Device
-	removed []Tombstone // the devices removed here or on the family's main; see Merge
-	replica []Device    // the main's devices, on a subordinate; see SetReplica
+	mu       sync.Mutex
+	devices  []Device
+	machines []Machine   // the machines of devices, each holding at least one
+	removed  []Tombstone // the devices removed here or on the family's main; see Merge
+	replica  []Device    // the main's devices, on a subordinate; see SetReplica
+	// replicaMachines are the machines the main's registry names.
+	replicaMachines []Machine
 	// touched records when Touch last wrote the file for a device. Writes made
 	// by other operations are not recorded here.
 	touched map[string]time.Time
@@ -86,8 +93,11 @@ type Registry struct {
 // unknown kind, an invalid app id (a server-kind entry has none), a
 // tokenHash that is not 64 lowercase hex digits, or a server that is not
 // valid or not a server-kind device's, or a removed entry with an id that is
-// not valid. Times are read into UTC. now supplies the clock for PairedAt, LastSeen and write
-// throttling.
+// not valid, or a machine with an id that is not valid or repeated. Times
+// are read into UTC. A device of an app on no machine, or on one the file
+// does not hold, gets one, and a machine with no devices is dropped; the
+// file is written then. now supplies the clock for PairedAt, LastSeen and
+// write throttling.
 func Open(path string, now func() time.Time) (*Registry, error) {
 	r := &Registry{path: path, now: now, touched: map[string]time.Time{}}
 	raw, err := os.ReadFile(path)
@@ -121,6 +131,8 @@ func Open(path string, now func() time.Time) (*Registry, error) {
 			return nil, fmt.Errorf("%s: devices[%d]: only a server-kind device has a server", path, i)
 		case d.Server != nil && d.Server.Validate() != nil:
 			return nil, fmt.Errorf("%s: devices[%d]: server: %v", path, i, d.Server.Validate())
+		case d.Machine != "" && !deviceIDPattern.MatchString(d.Machine):
+			return nil, fmt.Errorf("%s: devices[%d]: machine %q is not valid", path, i, d.Machine)
 		}
 		seen[d.ID] = true
 		d.PairedAt, d.LastSeen = d.PairedAt.UTC(), d.LastSeen.UTC()
@@ -132,7 +144,24 @@ func Open(path string, now func() time.Time) (*Registry, error) {
 		}
 		t.At = t.At.UTC()
 	}
-	r.devices, r.removed = f.Devices, f.Removed
+	machines := map[string]bool{}
+	for i := range f.Machines {
+		m := &f.Machines[i]
+		switch {
+		case !deviceIDPattern.MatchString(m.ID):
+			return nil, fmt.Errorf("%s: machines[%d]: id %q is not valid", path, i, m.ID)
+		case machines[m.ID]:
+			return nil, fmt.Errorf("%s: machines[%d]: id %q is used twice", path, i, m.ID)
+		}
+		machines[m.ID] = true
+		m.Name = cleanName(m.Name)
+	}
+	r.devices, r.machines, r.removed = f.Devices, f.Machines, f.Removed
+	if r.tidyMachinesLocked() {
+		if err := r.write(); err != nil {
+			log.Printf("devices: write %s after giving its devices machines: %v", path, err)
+		}
+	}
 
 	return r, nil
 }
@@ -141,16 +170,23 @@ func Open(path string, now func() time.Time) (*Registry, error) {
 // token is returned only here; it cannot be recovered later. The name is
 // trimmed and cut to 64 runes, and an empty name becomes "Device".
 func (r *Registry) Pair(app, name string) (Device, string, error) {
-	return r.pair("", app, name)
+	return r.pair("", app, name, "")
+}
+
+// PairTo registers a new device for app as Pair does, on machine: another
+// app paired on a device the user already has. A machine "" or one the
+// registry no longer holds gives the device a new machine, named after it.
+func (r *Registry) PairTo(app, name, machine string) (Device, string, error) {
+	return r.pair("", app, name, machine)
 }
 
 // PairServer registers a new server-kind device, admitted to every app, and
 // returns it with its token, as Pair does.
 func (r *Registry) PairServer(name string) (Device, string, error) {
-	return r.pair(KindServer, "", name)
+	return r.pair(KindServer, "", name, "")
 }
 
-func (r *Registry) pair(kind, app, name string) (Device, string, error) {
+func (r *Registry) pair(kind, app, name, machine string) (Device, string, error) {
 	token, err := newToken()
 	if err != nil {
 		return Device{}, "", err
@@ -168,9 +204,17 @@ func (r *Registry) pair(kind, app, name string) (Device, string, error) {
 		PairedAt:  at,
 		LastSeen:  at,
 	}
+	prevMachines := r.machines
+	if kind != KindServer {
+		if machine == "" || r.machineIndex(machine) < 0 {
+			machine = r.newMachineLocked(d.Name)
+		}
+		d.Machine = machine
+	}
 	r.devices = append(r.devices, d)
 	if err := r.write(); err != nil {
 		r.devices = r.devices[:len(r.devices)-1]
+		r.machines = prevMachines
 		return Device{}, "", fmt.Errorf("write %s: %w", r.path, err)
 	}
 	delete(r.touched, d.ID)
@@ -329,13 +373,15 @@ func (r *Registry) newID() string {
 	}
 }
 
-// write saves the current devices. The caller holds r.mu.
+// write saves the current devices, once every device of an app is on a
+// machine and every machine holds one. The caller holds r.mu.
 func (r *Registry) write() error {
+	r.tidyMachinesLocked()
 	list := r.devices
 	if list == nil {
 		list = []Device{}
 	}
-	data, err := json.MarshalIndent(file{Devices: list, Removed: r.removed}, "", "  ")
+	data, err := json.MarshalIndent(file{Devices: list, Machines: r.machines, Removed: r.removed}, "", "  ")
 	if err != nil {
 		return err
 	}

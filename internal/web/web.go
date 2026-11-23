@@ -119,16 +119,25 @@ type Divergence struct {
 
 // DeviceInfo is one paired device. A server-kind device (a subordinate
 // linked to this server) has Kind "server" and no App; Server is what it
-// announced, nil until it has.
+// announced, nil until it has. Machine is the machine a device of an app is
+// paired on.
 type DeviceInfo struct {
 	ID        string        `json:"id"`
 	App       string        `json:"app"`
 	Kind      string        `json:"kind,omitempty"`
 	Name      string        `json:"name"`
+	Machine   string        `json:"machine,omitempty"`
 	PairedAt  time.Time     `json:"pairedAt"`
 	LastSeen  time.Time     `json:"lastSeen"`
 	Connected bool          `json:"connected"` // a session is open now
 	Server    *LinkedServer `json:"server,omitempty"`
+}
+
+// MachineInfo is a physical device of the user's, a phone or a laptop, which
+// devices of apps are paired on (devices.Machine).
+type MachineInfo struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // LinkedServer is what a subordinate announced about itself: how devices
@@ -177,9 +186,26 @@ type Backend interface {
 	// RemoveDevice removes the device and closes its session. It reports
 	// false when there is no such device.
 	RemoveDevice(id string) bool
+	// Machines returns the machines devices of apps are paired on: this
+	// server's own, and on a subordinate also its main's, as the main's
+	// registry names them, which the page offers when it asks the main for a
+	// pairing code (InviteUpstream).
+	Machines() []MachineInfo
+	// RenameMachine names a machine. Its errors wrap devices.ErrNoMachine or
+	// devices.ErrInvalidName, or are internal.
+	RenameMachine(id, name string) error
+	// MoveDevice puts a device of an app on machine, or on a new machine for
+	// "", and returns the machine it is on now. Its errors wrap
+	// devices.ErrNoDevice or devices.ErrNoMachine, or are internal.
+	MoveDevice(id, machine string) (string, error)
+	// RemoveMachine removes every device paired on the machine and closes
+	// their sessions. It reports false when there is no such machine.
+	RemoveMachine(id string) bool
 	// IssuePairing creates a pairing code with a new secret, revoking the
-	// previous one. A subordinate refuses with ErrNotMain.
-	IssuePairing() (code string, expires time.Time, err error)
+	// previous one; the device that pairs with it joins machine, or a new
+	// machine for "" or one that is gone by then. A subordinate refuses with
+	// ErrNotMain.
+	IssuePairing(machine string) (code string, expires time.Time, err error)
 	// Refusals returns the recent pairings refused for an unknown app,
 	// newest first.
 	Refusals() []pairing.Refusal
@@ -220,10 +246,10 @@ type Backend interface {
 	// upstream.ErrNotLinked or ErrBusy, or are internal.
 	UnlinkUpstream(ctx context.Context) (forgotten bool, err error)
 	// InviteUpstream asks the main, over the link, for a pairing code of its
-	// own, for a browser on this computer. Its errors wrap
-	// upstream.ErrNotLinked, or are an *upstream.RefusedError, or are
-	// internal.
-	InviteUpstream(ctx context.Context) (code string, expires time.Time, err error)
+	// own, for a browser on this computer, which joins the main's machine,
+	// or a new machine for "". Its errors wrap upstream.ErrNotLinked, or are
+	// an *upstream.RefusedError, or are internal.
+	InviteUpstream(ctx context.Context, machine string) (code string, expires time.Time, err error)
 	// PromoteUpstream makes this server, a subordinate, the main of its
 	// family. planned (force false) needs the main reachable and the
 	// documents the same on both, and reports whether the former main
@@ -282,6 +308,10 @@ func newHandler(b Backend, port func() int, ui fs.FS) http.Handler {
 	mux.HandleFunc("POST /api/apps/{id}/open", a.openApp)
 	mux.HandleFunc("GET /api/devices", a.listDevices)
 	mux.HandleFunc("DELETE /api/devices/{id}", a.removeDevice)
+	mux.HandleFunc("POST /api/devices/{id}/move", a.moveDevice)
+	mux.HandleFunc("GET /api/machines", a.listMachines)
+	mux.HandleFunc("PUT /api/machines/{id}", a.renameMachine)
+	mux.HandleFunc("DELETE /api/machines/{id}", a.removeMachine)
 	mux.HandleFunc("POST /api/pairing", a.issuePairing)
 	mux.HandleFunc("GET /api/pairing/refusals", a.refusals)
 	mux.HandleFunc("POST /api/server/stop", a.stopServer)

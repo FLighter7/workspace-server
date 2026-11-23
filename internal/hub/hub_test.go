@@ -498,6 +498,27 @@ func TestPairConsumesSecret(t *testing.T) {
 	}
 }
 
+// A code issued for a machine puts the device that pairs with it on that
+// machine: another app on a phone the user already has.
+func TestPairJoinsTheMachineOfTheCode(t *testing.T) {
+	e := newEnv(t)
+	first, _, err := e.devices.Pair("notes", "iPhone Safari")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, _ := e.secrets.IssueFor(first.Machine)
+	s, fc := e.connect(t, "192.168.1.9:5000")
+	s.HandleText(pairFrame("todo", secret, "iPhone Safari (PWA)"))
+	waitFrames(t, fc, "welcome", 1)
+	device, _ := fc.frames()[0]["device"].(string)
+	if d, _ := e.devices.Get(device); d.Machine != first.Machine {
+		t.Errorf("the device is on machine %q, want the code's %q", d.Machine, first.Machine)
+	}
+	if n := len(e.devices.Machines()); n != 1 {
+		t.Errorf("%d machines, want the one both devices share", n)
+	}
+}
+
 func TestPairWrongSecret(t *testing.T) {
 	e := newEnv(t)
 	e.secrets.Issue()

@@ -125,8 +125,8 @@ func TestEntries(t *testing.T) {
 	r.SetReplica([]Entry{{ID: "Dev0123456789ab", App: "todo", TokenHash: strings.Repeat("a", 64)}})
 	want := []Entry{
 		{ID: laptop.ID, App: "", Kind: KindServer, Name: "Laptop", TokenHash: laptop.TokenHash, PairedAt: laptop.PairedAt},
-		{ID: notes.ID, App: "notes", Name: "Phone", TokenHash: notes.TokenHash, PairedAt: notes.PairedAt},
-		{ID: todo.ID, App: "todo", Name: "Phone", TokenHash: todo.TokenHash, PairedAt: todo.PairedAt},
+		{ID: notes.ID, App: "notes", Name: "Phone", TokenHash: notes.TokenHash, PairedAt: notes.PairedAt, Machine: notes.Machine, MachineName: "Phone"},
+		{ID: todo.ID, App: "todo", Name: "Phone", TokenHash: todo.TokenHash, PairedAt: todo.PairedAt, Machine: todo.Machine, MachineName: "Phone"},
 	}
 	if got := r.Entries(); !reflect.DeepEqual(got, want) {
 		t.Errorf("Entries = %+v, want %+v", got, want)

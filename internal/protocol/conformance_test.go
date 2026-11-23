@@ -119,6 +119,7 @@ type call struct {
 	Revision *string         `json:"revision"`
 	Cursor   *string         `json:"cursor"`
 	Since    json.RawMessage `json:"since"`
+	Machine  string          `json:"machine"`
 }
 
 func (c *call) key() Key { return Key{Path: c.Path, ID: c.ID, Type: c.Type} }
@@ -500,6 +501,9 @@ func checkCall(t *testing.T, b *fakeBackend, ex exchange) {
 		}
 		if n != 1 {
 			t.Errorf("backend %s called %d times, want 1", c.Method, n)
+		}
+		if c.Method == "invite" && b.inviteMachine != c.Machine {
+			t.Errorf("backend Invite got machine %q, want %q", b.inviteMachine, c.Machine)
 		}
 	case "announce":
 		if ex.Error != "" {

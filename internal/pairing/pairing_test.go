@@ -102,6 +102,24 @@ func TestSecretLifecycle(t *testing.T) {
 	}
 }
 
+// The machine a secret was issued for comes back once, with the secret, and
+// a new secret forgets it.
+func TestSecretCarriesItsMachine(t *testing.T) {
+	s := NewSecrets(newClock().now)
+	secret, _ := s.IssueFor("Mac0000000000aa")
+	if machine, ok := s.ConsumeFor(secret); !ok || machine != "Mac0000000000aa" {
+		t.Errorf("ConsumeFor = %q, %v; want the machine, true", machine, ok)
+	}
+	if machine, ok := s.ConsumeFor(secret); ok || machine != "" {
+		t.Errorf("ConsumeFor again = %q, %v; want \"\", false", machine, ok)
+	}
+	s.IssueFor("Mac0000000000aa")
+	plain, _ := s.Issue()
+	if machine, ok := s.ConsumeFor(plain); !ok || machine != "" {
+		t.Errorf("a secret issued for no machine came back with %q, %v", machine, ok)
+	}
+}
+
 func TestSecretExpiresAtExactlyTenMinutes(t *testing.T) {
 	clk := newClock()
 	s := NewSecrets(clk.now)

@@ -114,8 +114,10 @@ On the first start the server creates its folder and an entry for the `todo` app
     - **Delete the server and all data** stops the server and removes it from the computer, like `delete`: its data, its folders, the program file and the autostart.
 - **Devices** (Устройства):
   - **Pair a device** at the top opens the pairing code; on a server linked to a main, devices pair with the main instead;
-  - lists, for each app, its paired devices: when each paired, when it was last seen, and whether it is connected now; servers linked to this one are listed first, under **Linked servers**;
-  - **Disconnect** ends a device's access, after a question; to sync again, it pairs again.
+  - lists servers linked to this one first, under **Linked servers**, then your devices, under **Devices**, each once, however many apps are paired on it: its name, when it was last seen or "Connected now", and the number of its apps. Clicking that number lists the apps on the device, each with when it paired and whether it is connected now;
+  - the pencil renames a device, say "Alex's phone" instead of "iPhone";
+  - the trash can (**Delete**) ends a device's access for all its apps, after a question; in the list of its apps, the crossed-out link icon (**Disconnect**) ends one app's. To sync again, the app pairs again;
+  - if two cards are one device (paired before the server knew), open one's apps and move them to the other with the arrows icon; the arrows also move an app to a device of its own.
 - **Apps** (Приложения):
   - lists each app as a card: its name, with a folder icon (**Open folder**, once the app has a folder: the first write makes it) and a trash can (**Delete**) at the right of it, and its ID under it; the space its files take of its quota (the sizes in MB, GB or TB, whichever fits, over a bar), with **Change** at the right; and below them two tiles: the last write and the number of its devices, with how many are connected now. When there are any, clicking the devices tile lists them, the connected ones first, then the most recently seen: each with when it paired, and at the right either "Connected now" or when it was last seen, and a crossed-out link icon (**Disconnect**), as on the Devices page. A device names itself by its system and browser, such as "iPhone Safari", with "(PWA)" when the app runs installed. With more than one app, the space all of them take comes first;
   - the folder icon opens the app's data folder in Explorer, Finder or your file manager (hover over it to see the path), on the computer the server runs on (the page is open only there); the window may open behind the browser;
@@ -126,7 +128,7 @@ On the first start the server creates its folder and an entry for the `todo` app
 
 ## Pairing a device
 
-1. On the web page, open **Devices** and press **Pair a device**. It shows a pairing code as a QR code and as text with a Copy button.
+1. On the web page, open **Devices** and press **Pair a device**. It shows a pairing code as a QR code and as text with a Copy button. If another app on the same device is paired already, choose that device under **Device** first: the page then shows the device once, with both apps. The server cannot tell this by itself.
 2. In the app on your device, open its sync settings, and scan the QR code or paste the text.
 3. The device connects and is paired. From now on it syncs by itself whenever the app is open and the server is reachable.
 
@@ -155,7 +157,7 @@ Linking deletes nothing by itself. If both servers already hold an app's data an
 
 ### Pairing the laptop's browser
 
-Devices pair only with the main, the laptop's own browser too. On the laptop's page, press **Pair this computer's browser** (under Devices, or under Server → Upstream server). The laptop asks the main for a pairing code and shows it as a QR code and as text with a Copy button; paste it into the app's sync settings in the browser. This needs the main to be reachable. As with any new code, the one on the main's page stops working.
+Devices pair only with the main, the laptop's own browser too. On the laptop's page, press **Pair this computer's browser** (under Devices, or under Server → Upstream server). The laptop asks the main for a pairing code and shows it as a QR code and as text with a Copy button; paste it into the app's sync settings in the browser. If another app in it is paired already, choose the laptop under **Device**, as on the main's page. This needs the main to be reachable. As with any new code, the one on the main's page stops working.
 
 ### At home and away
 

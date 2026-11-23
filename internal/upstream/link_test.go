@@ -172,8 +172,8 @@ func (n *node) open() {
 		Role:     func() string { return n.cur.Load().Role() },
 		Logf:     n.logs.printf,
 		Changed:  func(app string, _ *string) { n.cur.Load().LocalWrite(app) },
-		Invite: func() (string, time.Time, error) {
-			secret, expires := n.secrets.Issue()
+		Invite: func(machine string) (string, time.Time, error) {
+			secret, expires := n.secrets.IssueFor(machine)
 			return n.codeWith(secret), expires, nil
 		},
 		Term: func() int { return n.cur.Load().Term() },
