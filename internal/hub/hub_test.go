@@ -784,6 +784,70 @@ func TestClosedSessionLeavesTheList(t *testing.T) {
 	expectSessions(t, e.hub, SessionInfo{App: "todo", Device: idB, Remote: "192.168.1.9:5001"})
 }
 
+func TestClosedSessionWasSeenUntilNow(t *testing.T) {
+	lastSeen := func(e *env, id string) time.Time {
+		t.Helper()
+		for _, d := range e.devices.List() {
+			if d.ID == id {
+				return d.LastSeen
+			}
+		}
+		t.Fatalf("no device %s", id)
+		return time.Time{}
+	}
+
+	t.Run("a device of an app", func(t *testing.T) {
+		e := newEnv(t)
+		id, token := e.device(t, "todo")
+		s, _ := e.login(t, "192.168.1.9:5000", "todo", id, token)
+		e.clock.Advance(3 * time.Hour)
+		s.Close()
+		want := e.clock.Now()
+		if seen := lastSeen(e, id); !seen.Equal(want) {
+			t.Errorf("LastSeen %v, want %v, when the session closed", seen, want)
+		}
+		// It is on disk too, for a server that starts again.
+		again, err := devices.Open(filepath.Join(e.dir, "devices.json"), e.clock.Now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seen := again.List()[0].LastSeen; !seen.Equal(want) {
+			t.Errorf("LastSeen on disk %v, want %v", seen, want)
+		}
+		// A session closed already says nothing more of the device.
+		e.clock.Advance(time.Hour)
+		e.hub.Closed(s)
+		if seen := lastSeen(e, id); !seen.Equal(want) {
+			t.Errorf("LastSeen %v after a second close, want %v", seen, want)
+		}
+	})
+
+	t.Run("a session that never authenticated", func(t *testing.T) {
+		e := newEnv(t)
+		id, _ := e.device(t, "todo")
+		want := lastSeen(e, id)
+		e.clock.Advance(time.Hour)
+		s, _ := e.connect(t, "192.168.1.9:5000")
+		s.HandleText(helloFrame("todo", id, "wrong"))
+		s.Close()
+		if seen := lastSeen(e, id); !seen.Equal(want) {
+			t.Errorf("LastSeen %v, want %v: a wrong token is not the device", seen, want)
+		}
+	})
+
+	t.Run("a removed device", func(t *testing.T) {
+		e := newEnv(t)
+		id, token := e.device(t, "todo")
+		_, fc := e.login(t, "192.168.1.9:5000", "todo", id, token)
+		e.clock.Advance(time.Hour)
+		e.hub.RemoveDevice(id)
+		waitFor(t, "the removed device's session to close", fc.isClosed)
+		if ids := e.deviceIDs(); len(ids) != 0 {
+			t.Errorf("devices %v, want none", ids)
+		}
+	})
+}
+
 // breakDocument puts a directory where a commit leaves app's journal, so that
 // every read and write of it fails, and returns the function that repairs it.
 func (e *env) breakDocument(t *testing.T, app string) func() {

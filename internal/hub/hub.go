@@ -805,11 +805,18 @@ func (h *Hub) Forget(app, device string) {
 	}
 }
 
-// Closed unregisters s. It does nothing for a session that is not registered.
+// Closed unregisters s and records that its device was seen until now: a
+// connection may have been open for hours since its hello. It does nothing
+// for a session that is not registered, and records nothing for a device
+// that is gone, or is not this server's own (the replica's).
 func (h *Hub) Closed(s *protocol.Session) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	m, ok := h.sessions[s]
 	delete(h.sessions, s)
+	h.mu.Unlock()
+	if ok {
+		h.d.Devices.Touch(m.device)
+	}
 }
 
 // Sessions lists the authenticated sessions, sorted by app, device and
