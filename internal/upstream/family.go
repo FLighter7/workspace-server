@@ -735,8 +735,11 @@ func (l *Link) waitingLocked() []Waiting {
 	var out []Waiting
 	for _, id := range l.fam.Pending {
 		w := Waiting{ServerID: id, Name: id}
-		if s := l.serverOf(id); s != nil {
-			w.Name = s.Name
+		for _, d := range l.d.Devices.List() {
+			if d.IsServer() && d.Server != nil && d.Server.ServerID == id {
+				w.Name = d.ShownName()
+				break
+			}
 		}
 		out = append(out, w)
 	}
@@ -748,7 +751,7 @@ func (l *Link) waitingLocked() []Waiting {
 func (l *Link) toEntries(reg wsclient.Registry) ([]devices.Entry, []devices.Tombstone) {
 	entries := make([]devices.Entry, 0, len(reg.Devices))
 	for _, d := range reg.Devices {
-		e := devices.Entry{ID: d.ID, App: d.App, Kind: d.Kind, Name: d.Name, TokenHash: d.TokenHash, Machine: d.Machine, MachineName: d.MachineName}
+		e := devices.Entry{ID: d.ID, App: d.App, Kind: d.Kind, Name: d.Name, TokenHash: d.TokenHash, Machine: d.Machine, MachineName: d.MachineName, ServerName: d.ServerName}
 		if d.PairedAt != "" {
 			if at, err := time.Parse(time.RFC3339, d.PairedAt); err == nil {
 				e.PairedAt = at.UTC()
@@ -781,7 +784,7 @@ func (l *Link) toEntries(reg wsclient.Registry) ([]devices.Entry, []devices.Tomb
 func (l *Link) ownRegistry() *wsclient.Registry {
 	reg := &wsclient.Registry{Devices: []wsclient.Device{}}
 	for _, e := range l.d.Devices.Entries() {
-		d := wsclient.Device{ID: e.ID, App: e.App, Kind: e.Kind, Name: e.Name, TokenHash: e.TokenHash, Machine: e.Machine, MachineName: e.MachineName}
+		d := wsclient.Device{ID: e.ID, App: e.App, Kind: e.Kind, Name: e.Name, TokenHash: e.TokenHash, Machine: e.Machine, MachineName: e.MachineName, ServerName: e.ServerName}
 		if !e.PairedAt.IsZero() {
 			d.PairedAt = e.PairedAt.UTC().Format(time.RFC3339)
 		}

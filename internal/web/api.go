@@ -437,12 +437,24 @@ func (a *api) listMachines(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
-// renameRequest is the body of PUT /api/machines/{id}.
+// renameRequest is the body of PUT /api/machines/{id} and PUT
+// /api/devices/{id}.
 type renameRequest struct {
 	Name *string `json:"name"`
 }
 
 func (a *api) renameMachine(w http.ResponseWriter, r *http.Request) {
+	rename(w, r, a.b.RenameMachine)
+}
+
+// renameServer names the server of a server-kind device. A device of an app
+// is named by its machine (renameMachine), so it is not found here.
+func (a *api) renameServer(w http.ResponseWriter, r *http.Request) {
+	rename(w, r, a.b.RenameServer)
+}
+
+// rename answers a renameRequest for the {id} of the path with set.
+func rename(w http.ResponseWriter, r *http.Request, set func(id, name string) error) {
 	var req renameRequest
 	if !readJSON(w, r, &req) {
 		return
@@ -451,11 +463,13 @@ func (a *api) renameMachine(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeInvalid, "name is missing")
 		return
 	}
-	switch err := a.b.RenameMachine(r.PathValue("id"), *req.Name); {
+	switch err := set(r.PathValue("id"), *req.Name); {
 	case err == nil:
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, devices.ErrNoMachine):
 		notFound(w, "machine")
+	case errors.Is(err, devices.ErrNoDevice):
+		notFound(w, "device")
 	case errors.Is(err, devices.ErrInvalidName):
 		writeError(w, http.StatusBadRequest, codeInvalid, err.Error())
 	default:

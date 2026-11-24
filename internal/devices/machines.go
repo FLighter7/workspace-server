@@ -33,7 +33,8 @@ var (
 	// ErrNoDevice is returned for a device the registry does not hold as its
 	// own device of an app: unknown, a server, or a device of the main.
 	ErrNoDevice = errors.New("no such paired app")
-	// ErrInvalidName is returned for a machine name that is empty.
+	// ErrInvalidName is returned for a machine's or a server's name that is
+	// empty.
 	ErrInvalidName = errors.New("the name is empty")
 )
 

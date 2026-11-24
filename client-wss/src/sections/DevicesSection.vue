@@ -59,6 +59,7 @@
 					:device="device"
 					:handing-over="handingOver === device.id"
 					@hand-over="handOver(device)"
+					@rename="openRename('server', device.id)"
 					@delete="deleteServer(device)"
 				/>
 			</ul>
@@ -79,7 +80,7 @@
 					:devices="card.devices"
 					:heading-tag="servers.length ? 'h3' : 'h2'"
 					@apps="openApps(card.id)"
-					@rename="openRename(card.id)"
+					@rename="openRename('machine', card.id)"
 					@delete="deleteMachine(card)"
 				/>
 			</ul>
@@ -94,7 +95,7 @@
 			:apps="apps"
 			@changed="onChanged"
 		/>
-		<RenameMachineDialog v-model="renameOpen" :machine="renaming" @saved="onRenamed" />
+		<RenameDialog v-model="renameOpen" :target="renaming" @saved="onRenamed" />
 		<InviteDialog v-model="inviteOpen" :main="mainName ?? ''" />
 	</section>
 </template>
@@ -107,7 +108,8 @@ import { serverApi } from '@/api/client';
 import type { AppInfo, DeviceInfo, MachineInfo } from '@/api/types';
 import MachineAppsDialog from '@/components/MachineAppsDialog.vue';
 import MachineCard from '@/components/MachineCard.vue';
-import RenameMachineDialog from '@/components/RenameMachineDialog.vue';
+import RenameDialog from '@/components/RenameDialog.vue';
+import type { RenameTarget } from '@/components/renameTarget';
 import ServerCard from '@/components/ServerCard.vue';
 import StatusLine from '@/components/StatusLine.vue';
 import { errorMessage, info, type Message } from '@/composables/messages';
@@ -144,7 +146,8 @@ const appsOpen = ref(false);
 /** The device whose apps the dialog lists, by id: its copy follows the polls. */
 const listingId = ref<string | null>(null);
 const renameOpen = ref(false);
-const renamingId = ref<string | null>(null);
+/** The device or the linked server being renamed, by id: its copy follows the polls. */
+const renamingId = ref<{ kind: 'machine' | 'server'; id: string } | null>(null);
 
 /** The servers linked to this one: its subordinates. */
 const servers = computed(() => devices.value.filter((device) => device.kind === 'server'));
@@ -177,9 +180,21 @@ const cards = computed<Card[]>(() => {
 });
 
 const listing = computed(() => cards.value.find((card) => card.id === listingId.value) ?? null);
-const renaming = computed(
-	() => cards.value.find((card) => card.id === renamingId.value)?.machine ?? null,
-);
+const renaming = computed<RenameTarget | null>(() => {
+	const { kind, id } = renamingId.value ?? {};
+	if (kind === 'machine') {
+		const machine = cards.value.find((card) => card.id === id)?.machine;
+		if (!machine) return null;
+		return { name: machine.name, rename: (name) => serverApi.renameMachine(machine.id, name) };
+	}
+	const device = servers.value.find((server) => server.id === id);
+	if (!device) return null;
+	return {
+		name: device.name,
+		hint: device.server && t('serverRenameHint', { name: device.server.name }),
+		rename: (name) => serverApi.renameServer(device.id, name),
+	};
+});
 
 onMounted(async () => {
 	try {
@@ -228,8 +243,8 @@ function openApps(id: string): void {
 	appsOpen.value = true;
 }
 
-function openRename(id: string): void {
-	renamingId.value = id;
+function openRename(kind: 'machine' | 'server', id: string): void {
+	renamingId.value = { kind, id };
 	renameOpen.value = true;
 }
 
@@ -277,7 +292,7 @@ usePolling(loadDevices);
 async function deleteServer(device: DeviceInfo): Promise<void> {
 	const question = {
 		title: 'deleteMachineTitle',
-		name: device.server?.name ?? device.name,
+		name: device.name,
 		text: 'removeServerText',
 		ok: 'delete',
 	} as const;
@@ -294,7 +309,7 @@ async function handOver(device: DeviceInfo): Promise<void> {
 	if (!server || handingOver.value !== null) return;
 	const question = {
 		title: 'handOverTitle',
-		name: server.name,
+		name: device.name,
 		text: 'handOverText',
 		ok: 'handOverOk',
 	} as const;
@@ -305,7 +320,7 @@ async function handOver(device: DeviceInfo): Promise<void> {
 		const result = await serverApi.handOver(server.serverId);
 		message.value = {
 			key: result.done ? 'handedOver' : 'handOverPending',
-			values: { name: server.name },
+			values: { name: device.name },
 		};
 	} catch (error) {
 		message.value = upstreamError(error);

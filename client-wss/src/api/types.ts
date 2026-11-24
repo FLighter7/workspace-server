@@ -102,6 +102,7 @@ export interface DeviceInfo {
 	app: string;
 	/** "server": a server linked to this one, its subordinate. */
 	kind?: 'server';
+	/** What the user calls a server, or else what it announced; a device of an app's own. */
 	name: string;
 	/** The machine a device of an app is paired on (MachineInfo); absent for a server. */
 	machine?: string;

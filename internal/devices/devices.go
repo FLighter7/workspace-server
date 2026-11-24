@@ -45,7 +45,9 @@ const KindServer = "server"
 // this server's main, which this server admits on the main's word (see
 // SetReplica); it is never written to the file. Machine is the physical
 // device a device of an app is paired on (see Machine); a server-kind
-// device has none.
+// device has none. ServerName is what the user calls a server-kind device's
+// server, "" while it goes by the name it announced (see RenameServer); it
+// is kept by server id, beside the devices, and filled in by List and Get.
 type Device struct {
 	ID        string    `json:"id"`
 	App       string    `json:"app"`
@@ -57,10 +59,25 @@ type Device struct {
 	LastSeen  time.Time `json:"lastSeen"`
 	Server    *Server   `json:"server,omitempty"`
 	Replica   bool      `json:"-"`
+
+	ServerName string `json:"-"`
 }
 
 // IsServer reports whether d is a server-kind device.
 func (d Device) IsServer() bool { return d.Kind == KindServer }
+
+// ShownName is what d is called: for a server the name the user gave it, or
+// else the one it announced; the name it paired with for any other device,
+// and for a server that has not announced itself.
+func (d Device) ShownName() string {
+	switch {
+	case d.ServerName != "":
+		return d.ServerName
+	case d.Server != nil:
+		return d.Server.Name
+	}
+	return d.Name
+}
 
 var tokenHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -68,6 +85,8 @@ type file struct {
 	Devices  []Device    `json:"devices"`
 	Machines []Machine   `json:"machines,omitempty"`
 	Removed  []Tombstone `json:"removed,omitempty"`
+	// ServerNames are the names the user gave servers, by server id.
+	ServerNames map[string]string `json:"serverNames,omitempty"`
 }
 
 // Registry is the set of paired devices. It is safe for concurrent use.
@@ -82,6 +101,9 @@ type Registry struct {
 	replica  []Device    // the main's devices, on a subordinate; see SetReplica
 	// replicaMachines are the machines the main's registry names.
 	replicaMachines []Machine
+	// serverNames are the names the user gave the servers of the family, by
+	// server id; see RenameServer.
+	serverNames map[string]string
 	// touched records when Touch last wrote the file for a device. Writes made
 	// by other operations are not recorded here.
 	touched map[string]time.Time
@@ -93,8 +115,8 @@ type Registry struct {
 // unknown kind, an invalid app id (a server-kind entry has none), a
 // tokenHash that is not 64 lowercase hex digits, or a server that is not
 // valid or not a server-kind device's, or a removed entry with an id that is
-// not valid, or a machine with an id that is not valid or repeated. Times
-// are read into UTC. A device of an app on no machine, or on one the file
+// not valid, or a machine with an id that is not valid or repeated, or a
+// name of a server whose id is not valid. Times are read into UTC. A device of an app on no machine, or on one the file
 // does not hold, gets one, and a machine with no devices is dropped; the
 // file is written then. now supplies the clock for PairedAt, LastSeen and
 // write throttling.
@@ -156,7 +178,17 @@ func Open(path string, now func() time.Time) (*Registry, error) {
 		machines[m.ID] = true
 		m.Name = cleanName(m.Name)
 	}
-	r.devices, r.machines, r.removed = f.Devices, f.Machines, f.Removed
+	for id, name := range f.ServerNames {
+		if !serverIDPattern.MatchString(id) {
+			return nil, fmt.Errorf("%s: serverNames: server id %q is not valid", path, id)
+		}
+		if strings.TrimSpace(name) == "" {
+			delete(f.ServerNames, id)
+			continue
+		}
+		f.ServerNames[id] = cleanName(name)
+	}
+	r.devices, r.machines, r.removed, r.serverNames = f.Devices, f.Machines, f.Removed, f.ServerNames
 	if r.tidyMachinesLocked() {
 		if err := r.write(); err != nil {
 			log.Printf("devices: write %s after giving its devices machines: %v", path, err)
@@ -281,8 +313,10 @@ func (r *Registry) Remove(id string) bool {
 	if i < 0 {
 		return false
 	}
+	gone := r.devices[i]
 	r.devices = append(r.devices[:i:i], r.devices[i+1:]...)
 	r.buryLocked(id)
+	r.forgetServerNameLocked(gone)
 	delete(r.touched, id)
 	if err := r.write(); err != nil {
 		log.Printf("devices: write %s after removing a device: %v", r.path, err)
@@ -328,7 +362,7 @@ func (r *Registry) Get(id string) (Device, bool) {
 // The caller holds r.mu.
 func (r *Registry) getLocked(id string) (Device, bool) {
 	if i := r.indexOf(id); i >= 0 {
-		return r.devices[i], true
+		return r.namedLocked(r.devices[i]), true
 	}
 	return r.replicaLocked(id)
 }
@@ -339,6 +373,9 @@ func (r *Registry) getLocked(id string) (Device, bool) {
 func (r *Registry) List() []Device {
 	r.mu.Lock()
 	out := append([]Device(nil), r.devices...)
+	for i := range out {
+		out[i] = r.namedLocked(out[i])
+	}
 	r.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool {
 		a, b := out[i], out[j]
@@ -381,7 +418,7 @@ func (r *Registry) write() error {
 	if list == nil {
 		list = []Device{}
 	}
-	data, err := json.MarshalIndent(file{Devices: list, Machines: r.machines, Removed: r.removed}, "", "  ")
+	data, err := json.MarshalIndent(file{Devices: list, Machines: r.machines, Removed: r.removed, ServerNames: r.serverNames}, "", "  ")
 	if err != nil {
 		return err
 	}

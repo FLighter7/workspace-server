@@ -1,5 +1,5 @@
 <style lang="scss" module>
-// What kind of device it is, its name (and its ID, if any, under it), its state
+// What kind of device it is, its name (and a line under it, if any), its state
 // and its buttons, icons, at the right. A long name wraps and leaves them where
 // they are; a phone puts the state under the name.
 .head {
@@ -39,10 +39,6 @@
 
 .name {
 	margin: 0;
-	overflow-wrap: anywhere;
-}
-
-.id {
 	overflow-wrap: anywhere;
 }
 
@@ -120,13 +116,12 @@
 						<component :is="headingTag" :class="['text-title-large', $style.name]">
 							<bdi>{{ name }}</bdi>
 						</component>
-						<code v-if="id" :class="[$style.id, 'text-medium-emphasis']"
-							>{{ t('appId') }}: {{ id }}</code
-						>
+						<slot name="subtitle" />
 					</div>
 					<span v-if="connected" :class="['text-body-medium', $style.state, $style.on]">{{
 						t('connectedNow')
 					}}</span>
+					<span v-else-if="away" :class="['text-body-medium', $style.state]">{{ away }}</span>
 					<span
 						v-else
 						:class="['text-body-medium', $style.state]"
@@ -138,7 +133,7 @@
 					</div>
 				</div>
 
-				<dl :class="$style.tiles">
+				<dl v-if="$slots.tiles" :class="$style.tiles">
 					<slot name="tiles" />
 				</dl>
 
@@ -154,23 +149,23 @@ import { useFormat } from '@/composables/useFormat';
 
 /**
  * A card of the Devices page, the same for one of the user's devices and for a
- * linked server: an icon of what kind it is, its name with its ID, if it has
- * one to show, under it, as on an app's card, its state (connected now, or when
- * it was last seen), its buttons, then tiles (the `tiles` slot,
- * each a `<div>` of a `<dt>` and a `<dd>`) and whatever else it shows.
+ * linked server: an icon of what kind it is, its name with a line under it, if
+ * any (the `subtitle` slot), its state (connected now, or when it was last
+ * seen), its buttons, then tiles (the `tiles` slot, each a `<div>` of a `<dt>`
+ * and a `<dd>`), if any, and whatever else it shows.
  */
 withDefaults(
 	defineProps<{
 		name: string;
-		/** Shown under the name; none for one of the user's devices. */
-		id?: string;
 		icon: string;
 		connected: boolean;
 		lastSeen: string;
+		/** The state while it is not connected, in place of when it was last seen. */
+		away?: string;
 		/** The name's heading: h3 under a heading of the section's, h2 with none. */
 		headingTag?: 'h2' | 'h3';
 	}>(),
-	{ id: undefined, headingTag: 'h2' },
+	{ away: undefined, headingTag: 'h2' },
 );
 
 const { t } = useI18n();

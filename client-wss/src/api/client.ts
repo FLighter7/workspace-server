@@ -97,6 +97,9 @@ export const serverApi = {
 	openFolder: (id: string) => request<null>('POST', `${app(id)}/open`),
 
 	devices: () => request<DeviceInfo[]>('GET', '/api/devices'),
+	/** Gives a linked server a name of the user's; the server keeps its own. */
+	renameServer: (id: string, name: string) =>
+		request<null>('PUT', `/api/devices/${encodeURIComponent(id)}`, { name }),
 	removeDevice: (id: string) => request<null>('DELETE', `/api/devices/${encodeURIComponent(id)}`),
 	/** Puts a device of an app on machine, or on a new machine for ""; answers with where it is now. */
 	moveDevice: (id: string, machine: string) =>

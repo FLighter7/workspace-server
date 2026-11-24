@@ -76,7 +76,7 @@ func (h *Hub) subDivergences(app string) []subDivergence {
 	names := map[string]string{}
 	for _, d := range h.d.Devices.List() {
 		if d.IsServer() && d.Server != nil {
-			names[d.Server.ServerID] = d.Server.Name
+			names[d.Server.ServerID] = d.ShownName()
 		}
 	}
 	out := doc.Servers[:0]
@@ -341,7 +341,7 @@ func (h *Hub) Diverged(s *protocol.Session, app string, since *string) *protocol
 		}
 		return nil
 	}
-	sd := subDivergence{ServerID: d.Server.ServerID, Name: d.Server.Name, Since: *since}
+	sd := subDivergence{ServerID: d.Server.ServerID, Name: d.ShownName(), Since: *since}
 	if i >= 0 {
 		list[i] = sd // a new divergence: a choice made for the one before is not for it
 	} else {

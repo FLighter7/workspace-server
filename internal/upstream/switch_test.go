@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -66,7 +67,7 @@ func (n *node) admitted(app, id, token string) bool {
 // the laptop and hands its devices over; the tablet, the desk's other
 // subordinate, relinks to the laptop. A device paired with the desk is
 // admitted everywhere without pairing again, and its write reaches every
-// server.
+// server. The names the user gave the servers on the desk's page go along.
 func TestPlannedSwitch(t *testing.T) {
 	desk := startNode(t, "Desk")
 	laptop := startNode(t, "Laptop")
@@ -76,6 +77,22 @@ func TestPlannedSwitch(t *testing.T) {
 	makeFamily(t, desk, laptop, tablet)
 	waitFor(t, "the laptop to hold the desk's document", func() bool { return laptop.etag("todo") == v1 })
 	deskWritten := desk.written("todo")
+	for _, d := range desk.devices.List() {
+		if d.Server != nil && d.Server.Name == "Tablet" {
+			if err := desk.devices.RenameServer(d.ID, "Kitchen tablet"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	desk.hub.DevicesChanged()
+	waitFor(t, "the laptop to learn the tablet's name", func() bool {
+		for _, e := range laptop.link.snapshot().Devices {
+			if e.ServerName == "Kitchen tablet" {
+				return true
+			}
+		}
+		return false
+	})
 
 	followed, err := laptop.link.Promote(ctx(t), false)
 	if err != nil || !followed {
@@ -103,14 +120,14 @@ func TestPlannedSwitch(t *testing.T) {
 	if laptop.link.Status().Linked {
 		t.Error("the laptop is still linked")
 	}
-	servers := map[string]bool{}
+	servers := map[string]string{}
 	for _, d := range laptop.devices.List() {
 		if d.IsServer() && d.Server != nil {
-			servers[d.Server.Name] = true
+			servers[d.Server.Name] = d.ShownName()
 		}
 	}
-	if !servers["Desk"] || !servers["Tablet"] || servers["Laptop"] {
-		t.Errorf("the laptop's linked servers %v, want the desk and the tablet", servers)
+	if want := map[string]string{"Desk": "Desk", "Tablet": "Kitchen tablet"}; !maps.Equal(servers, want) {
+		t.Errorf("the laptop's linked servers %v, want %v", servers, want)
 	}
 
 	// The phone syncs through the new main; the write reaches both others.

@@ -251,6 +251,9 @@ type DeviceEntry struct {
 	// is paired on, and the name the main gives it.
 	Machine     string `json:"machine,omitempty"`
 	MachineName string `json:"machineName,omitempty"`
+	// ServerName is the name the user gave a server-kind device's server on
+	// the main's page, empty while it goes by the one it announced.
+	ServerName string `json:"serverName,omitempty"`
 }
 
 // Tombstone is a device removed from the family, by id, and when (RFC 3339

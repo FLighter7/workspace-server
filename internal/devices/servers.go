@@ -3,6 +3,7 @@ package devices
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -74,6 +75,8 @@ func (s Server) equal(o Server) bool {
 // server that adopts the entry as its own (see Merge), and so do Machine and
 // MachineName, the machine a device of an app is paired on, so that the
 // family shows one phone the same way whichever server is its main.
+// ServerName, for the same reason, is the name the user gave a server-kind
+// entry's server, "" while it goes by the one it announced.
 type Entry struct {
 	ID          string    `json:"id"`
 	App         string    `json:"app"`
@@ -84,6 +87,7 @@ type Entry struct {
 	Server      *Server   `json:"server,omitempty"`
 	Machine     string    `json:"machine,omitempty"`
 	MachineName string    `json:"machineName,omitempty"`
+	ServerName  string    `json:"serverName,omitempty"`
 }
 
 // IsServer reports whether e is a server-kind device.
@@ -112,6 +116,10 @@ func (e Entry) Validate() error {
 		return fmt.Errorf("machine %q is not valid, or belongs to a server", e.Machine)
 	case utf8.RuneCountInString(e.MachineName) > maxNameRunes:
 		return fmt.Errorf("machineName must be at most %d characters", maxNameRunes)
+	case e.ServerName != "" && !e.IsServer():
+		return errors.New("only a server-kind device has a serverName")
+	case utf8.RuneCountInString(e.ServerName) > maxNameRunes:
+		return fmt.Errorf("serverName must be at most %d characters", maxNameRunes)
 	}
 	return nil
 }
@@ -130,20 +138,96 @@ func SameAdmission(a, b []Entry) bool {
 func Same(a, b []Entry) bool {
 	return slices.EqualFunc(a, b, func(x, y Entry) bool {
 		return x.key() == y.key() && x.Name == y.Name && x.PairedAt.Equal(y.PairedAt) &&
-			x.Machine == y.Machine && x.MachineName == y.MachineName &&
+			x.Machine == y.Machine && x.MachineName == y.MachineName && x.ServerName == y.ServerName &&
 			((x.Server == nil && y.Server == nil) || (x.Server != nil && y.Server != nil && x.Server.equal(*y.Server)))
 	})
 }
 
 // entryOf is device d as it travels, on machine, named machineName.
 func entryOf(d Device, machine, machineName string) Entry {
-	e := Entry{ID: d.ID, App: d.App, Kind: d.Kind, Name: d.Name, TokenHash: d.TokenHash, PairedAt: d.PairedAt, Machine: machine, MachineName: machineName}
+	e := Entry{ID: d.ID, App: d.App, Kind: d.Kind, Name: d.Name, TokenHash: d.TokenHash, PairedAt: d.PairedAt, Machine: machine, MachineName: machineName, ServerName: d.ServerName}
 	if d.Server != nil {
 		s := *d.Server
 		s.Hosts = slices.Clone(s.Hosts)
 		e.Server = &s
 	}
 	return e
+}
+
+// RenameServer gives the server of the server-kind device id a name of the
+// user's, shown in place of the one it announced: to this server's page, to
+// the devices that learn of it (Subordinates) and to the rest of the family
+// (Entries). The server itself keeps its own. The name is trimmed and cut to
+// 64 runes; an empty one is ErrInvalidName, and the name it announced takes
+// the user's away, so that it goes by its own again. A device that is
+// unknown, not a server-kind one of this server's own, or not announced yet
+// is ErrNoDevice.
+//
+// The name is kept by server id, not with the device: the registry of a
+// main that steps down is cleared (Clear), and the server that takes the
+// role over gets a new device here when this one is the main again
+// (MintServer), under the name the user gave it. It goes when the user
+// removes the server.
+func (r *Registry) RenameServer(id, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ErrInvalidName
+	}
+	name = cleanName(name)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	i := r.indexOf(id)
+	if i < 0 || !r.devices[i].IsServer() || r.devices[i].Server == nil {
+		return ErrNoDevice
+	}
+	s := r.devices[i].Server
+	if name == s.Name {
+		name = ""
+	}
+	if r.serverNames[s.ServerID] == name {
+		return nil
+	}
+	prev := r.serverNames
+	r.nameServerLocked(s.ServerID, name)
+	if err := r.write(); err != nil {
+		r.serverNames = prev
+		return fmt.Errorf("write %s: %w", r.path, err)
+	}
+	return nil
+}
+
+// nameServerLocked keeps name for the server id, or none for "", in a new
+// map, so that the caller can put the one before back. The caller holds r.mu.
+func (r *Registry) nameServerLocked(id, name string) {
+	names := map[string]string{}
+	maps.Copy(names, r.serverNames)
+	names[id] = name
+	if name == "" {
+		delete(names, id)
+	}
+	r.serverNames = names
+}
+
+// forgetServerNameLocked drops the name the user gave gone's server, once no
+// other device here is that server. The caller holds r.mu, and has removed
+// gone.
+func (r *Registry) forgetServerNameLocked(gone Device) {
+	if gone.Server == nil || slices.ContainsFunc(r.devices, func(d Device) bool {
+		return d.Server != nil && d.Server.ServerID == gone.Server.ServerID
+	}) {
+		return
+	}
+	r.nameServerLocked(gone.Server.ServerID, "")
+}
+
+// namedLocked is d with the name the user gave its server. The caller holds
+// r.mu.
+func (r *Registry) namedLocked(d Device) Device {
+	if d.IsServer() && d.Server != nil {
+		d.ServerName = r.serverNames[d.Server.ServerID]
+	}
+	return d
 }
 
 // Tombstone is a device removed from the family: by its id, which no device
@@ -198,7 +282,7 @@ func (r *Registry) Entries() []Entry {
 	out := make([]Entry, 0, len(r.devices))
 	for _, d := range r.devices {
 		machine, name := r.machineOf(d)
-		out = append(out, entryOf(d, machine, name))
+		out = append(out, entryOf(r.namedLocked(d), machine, name))
 	}
 	r.mu.Unlock()
 	slices.SortFunc(out, func(a, b Entry) int {
@@ -239,7 +323,8 @@ func (s Self) is(e Entry) bool {
 // kept. A device this server already has keeps its own entry, and so does a
 // server it already has under another id. A device taken keeps its machine,
 // under the name this server gives that machine when it has it already, or
-// else the entry's. An entry for this server itself
+// else the entry's, and a server taken the name the user gave it likewise.
+// An entry for this server itself
 // (self) is not taken. It returns the devices of this server's own that
 // removed drops, whose sessions the caller closes. Entries that are not
 // valid are left out.
@@ -274,7 +359,7 @@ func (r *Registry) Merge(list []Entry, removed []Tombstone, self Self) ([]Device
 			return d.ID == e.ID || (e.IsServer() && e.Server != nil && d.IsServer() && d.Server != nil && d.Server.ServerID == e.Server.ServerID)
 		})
 	}
-	prevMachines := r.machines
+	prevMachines, prevNames := r.machines, r.serverNames
 	for _, e := range list {
 		if e.Validate() != nil || gone[e.ID] || self.is(e) || has(e) {
 			continue
@@ -287,6 +372,9 @@ func (r *Registry) Merge(list []Entry, removed []Tombstone, self Self) ([]Device
 			s := *e.Server
 			s.Hosts = slices.Clone(s.Hosts)
 			d.Server = &s
+			if e.ServerName != "" && r.serverNames[s.ServerID] == "" {
+				r.nameServerLocked(s.ServerID, cleanName(e.ServerName))
+			}
 		}
 		kept = append(kept, d)
 		changed = true
@@ -297,8 +385,11 @@ func (r *Registry) Merge(list []Entry, removed []Tombstone, self Self) ([]Device
 	}
 	prevDevices, prevRemoved := r.devices, r.removed
 	r.devices, r.removed = kept, capTombstones(all)
+	for _, d := range dropped {
+		r.forgetServerNameLocked(d)
+	}
 	if err := r.write(); err != nil {
-		r.devices, r.removed, r.machines = prevDevices, prevRemoved, prevMachines
+		r.devices, r.removed, r.machines, r.serverNames = prevDevices, prevRemoved, prevMachines, prevNames
 		return nil, fmt.Errorf("write %s: %w", r.path, err)
 	}
 	for _, d := range dropped {
@@ -309,7 +400,9 @@ func (r *Registry) Merge(list []Entry, removed []Tombstone, self Self) ([]Device
 
 // Clear forgets this server's own devices and removals, once they have been
 // handed over to the main it now follows, whose registry then holds them:
-// the server admits them on the main's word from then on (the replica).
+// the server admits them on the main's word from then on (the replica). The
+// names the user gave servers stay: the new main's own is in no registry but
+// this one.
 func (r *Registry) Clear() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -393,9 +486,9 @@ func (r *Registry) SetServer(id string, s Server) (bool, error) {
 	return true, nil
 }
 
-// Subordinates returns what the server-kind devices announced, sorted by
-// name and server id: the servers a main lists in every welcome. A
-// server-kind device that has not announced itself yet is left out.
+// Subordinates returns what the server-kind devices announced, each under
+// the name the user gave it when they did, sorted by name and server id: the
+// servers a main lists in every welcome. A server-kind device that has not announced itself yet is left out.
 func (r *Registry) Subordinates() []Server {
 	r.mu.Lock()
 	out := []Server{}
@@ -403,6 +496,7 @@ func (r *Registry) Subordinates() []Server {
 		if d.IsServer() && d.Server != nil {
 			s := *d.Server
 			s.Hosts = slices.Clone(s.Hosts)
+			s.Name = r.namedLocked(d).ShownName()
 			out = append(out, s)
 		}
 	}
@@ -423,7 +517,9 @@ func (r *Registry) Subordinates() []Server {
 // id wins. A server-kind device among them (another server of the family)
 // is admitted to link sessions only (see Authenticate). An entry that is not
 // valid is left out. The machines the entries name are kept too, for
-// ReplicaMachines.
+// ReplicaMachines, and so are the names the user gave the servers among
+// them, which the main has the last word on: this server shows them once it
+// is the main.
 func (r *Registry) SetReplica(entries []Entry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -433,7 +529,7 @@ func (r *Registry) SetReplica(entries []Entry) {
 		if e.Validate() != nil {
 			continue
 		}
-		d := Device{ID: e.ID, App: e.App, Kind: e.Kind, Name: e.Name, TokenHash: e.TokenHash, PairedAt: e.PairedAt, Machine: e.Machine, Replica: true}
+		d := Device{ID: e.ID, App: e.App, Kind: e.Kind, Name: e.Name, TokenHash: e.TokenHash, PairedAt: e.PairedAt, Machine: e.Machine, Replica: true, ServerName: e.ServerName}
 		if e.Machine != "" && !slices.ContainsFunc(r.replicaMachines, func(m Machine) bool { return m.ID == e.Machine }) {
 			r.replicaMachines = append(r.replicaMachines, Machine{ID: e.Machine, Name: entryMachineName(e)})
 		}
@@ -441,6 +537,9 @@ func (r *Registry) SetReplica(entries []Entry) {
 			s := *e.Server
 			s.Hosts = slices.Clone(s.Hosts)
 			d.Server = &s
+			if r.serverNames[s.ServerID] != e.ServerName {
+				r.nameServerLocked(s.ServerID, e.ServerName)
+			}
 		}
 		r.replica = append(r.replica, d)
 	}

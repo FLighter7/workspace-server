@@ -2877,6 +2877,7 @@
 					"name": "Laptop",
 					"tokenHash": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752",
 					"pairedAt": "2026-11-11T09:00:00Z",
+					"serverName": "Work laptop",
 					"server": {
 						"serverId": "Lp7tOp0123ab",
 						"name": "Laptop",
@@ -2914,6 +2915,7 @@
 							"name": "Laptop",
 							"tokenHash": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752",
 							"pairedAt": "2026-11-11T09:00:00Z",
+							"serverName": "Work laptop",
 							"server": {
 								"serverId": "Lp7tOp0123ab",
 								"name": "Laptop",
@@ -2951,6 +2953,7 @@
 						"name": "Laptop",
 						"tokenHash": "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752",
 						"pairedAt": "2026-11-11T09:00:00Z",
+						"serverName": "Work laptop",
 						"server": {
 							"serverId": "Lp7tOp0123ab",
 							"name": "Laptop",

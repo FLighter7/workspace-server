@@ -179,9 +179,27 @@ func TestTwoServersLinkPullAndPush(t *testing.T) {
 	// The main knows the subordinate as a device with no app, beside the
 	// phone.
 	_, devs := main.send(t, http.MethodGet, "/api/devices", "")
-	var list []struct{ App, Name string }
+	var list []web.DeviceInfo
 	if err := json.Unmarshal([]byte(devs), &list); err != nil || len(list) != 2 || list[0].App != "" || list[1].App != "todo" {
-		t.Errorf("the main's devices %s, want one server-kind device and the phone", devs)
+		t.Fatalf("the main's devices %s, want one server-kind device and the phone", devs)
+	}
+	if list[0].Name != subStatus.Name {
+		t.Errorf("the subordinate is called %q, want its own name %q", list[0].Name, subStatus.Name)
+	}
+
+	// Renamed on the main's page, it is called so there; its own name stays.
+	if code, resp := main.send(t, http.MethodPut, "/api/devices/"+list[0].ID, `{"name":"Work laptop"}`); code != http.StatusNoContent {
+		t.Fatalf("PUT a name = %d %s", code, resp)
+	}
+	_, devs = main.send(t, http.MethodGet, "/api/devices", "")
+	if err := json.Unmarshal([]byte(devs), &list); err != nil || list[0].Name != "Work laptop" || list[0].Server.Name != subStatus.Name {
+		t.Errorf("after the rename: %s", devs)
+	}
+	if code, resp := main.send(t, http.MethodPut, "/api/devices/"+list[1].ID, `{"name":"x"}`); code != http.StatusNotFound {
+		t.Errorf("PUT a name on the phone's app = %d %s, want 404", code, resp)
+	}
+	if got := sub.status(t).Name; got != subStatus.Name {
+		t.Errorf("the subordinate calls itself %q after the rename on the main", got)
 	}
 
 	if code, resp := sub.send(t, http.MethodDelete, "/api/data", ""); code != http.StatusAccepted {

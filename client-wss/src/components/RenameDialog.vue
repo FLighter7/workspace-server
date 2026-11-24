@@ -1,10 +1,10 @@
 <template>
 	<VDialog v-model="open" max-width="560" :aria-labelledby="titleId" @after-enter="focusInput">
-		<VCard v-if="machine" variant="elevated">
+		<VCard v-if="target" variant="elevated">
 			<VCardTitle :id="titleId" tag="h2" class="text-wrap">
 				<I18nT keypath="renameTitle" scope="global">
 					<template #name>
-						<bdi>{{ machine.name }}</bdi>
+						<bdi>{{ target.name }}</bdi>
 					</template>
 				</I18nT>
 			</VCardTitle>
@@ -19,6 +19,8 @@
 						:counter="64"
 						maxlength="64"
 						:rules="[rules.required]"
+						:hint="target.hint"
+						persistent-hint
 					/>
 					<StatusLine :message="message" />
 				</VCardText>
@@ -39,19 +41,19 @@
 import { ref, useId, useTemplateRef, watch } from 'vue';
 import { I18nT, useI18n } from 'vue-i18n';
 import type { VForm } from 'vuetify/components';
-import { serverApi } from '@/api/client';
-import type { MachineInfo } from '@/api/types';
 import { errorMessage, type Message } from '@/composables/messages';
 import { useRules } from '@/composables/rules';
 import { useReturnFocus } from '@/composables/useReturnFocus';
+import type { RenameTarget } from './renameTarget';
 import StatusLine from './StatusLine.vue';
 
 /**
- * A new name for one of the user's devices: "Alex's phone" instead of the
- * "iPhone" it took from the first app paired on it. The name is the server's,
- * so every page of the family shows it.
+ * A new name for one of the user's devices ("Alex's phone" instead of the
+ * "iPhone" it took from the first app paired on it) or for a linked server,
+ * whose own name a hint under the field gives. The name is the server's, so
+ * every page of the family shows it.
  */
-const props = defineProps<{ machine: MachineInfo | null }>();
+const props = defineProps<{ target: RenameTarget | null }>();
 const open = defineModel<boolean>({ required: true });
 const emit = defineEmits<{ saved: [] }>();
 
@@ -70,7 +72,7 @@ useReturnFocus(open);
 // copy of the device must not undo what is being typed.
 watch(open, (isOpen) => {
 	if (!isOpen) return;
-	name.value = props.machine?.name ?? '';
+	name.value = props.target?.name ?? '';
 	busy.value = false;
 	message.value = null;
 });
@@ -80,16 +82,16 @@ function focusInput(): void {
 }
 
 async function save(): Promise<void> {
-	const machine = props.machine;
-	if (!machine) return;
-	if (name.value.trim() === machine.name) {
+	const target = props.target;
+	if (!target) return;
+	if (name.value.trim() === target.name) {
 		open.value = false;
 		return;
 	}
 	if (!(await form.value?.validate())?.valid) return;
 	busy.value = true;
 	try {
-		await serverApi.renameMachine(machine.id, name.value.trim());
+		await target.rename(name.value.trim());
 	} catch (error) {
 		message.value = errorMessage(error);
 		busy.value = false;

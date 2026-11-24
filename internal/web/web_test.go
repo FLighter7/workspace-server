@@ -294,6 +294,19 @@ func (f *fakeBackend) OpenFolder(id string) error {
 
 func (f *fakeBackend) Devices() []DeviceInfo { return f.devices }
 
+func (f *fakeBackend) RenameServer(id, name string) error {
+	if f.renameErr != nil {
+		return f.renameErr
+	}
+	for i, d := range f.devices {
+		if d.ID == id && d.Kind == devices.KindServer {
+			f.devices[i].Name = name
+			return nil
+		}
+	}
+	return devices.ErrNoDevice
+}
+
 func (f *fakeBackend) Machines() []MachineInfo { return f.machines }
 
 func (f *fakeBackend) RenameMachine(id, name string) error {
@@ -1089,6 +1102,26 @@ func TestMachines(t *testing.T) {
 		t.Errorf("removing M1 removed %v, want its devices", f.removed)
 	}
 	wantError(t, serve(h, request(http.MethodDelete, "/api/machines/M1", "")), http.StatusNotFound, "notFound")
+}
+
+// A linked server takes a name of the user's; a device of an app takes none.
+func TestRenameServer(t *testing.T) {
+	f := newFake()
+	f.devices = []DeviceInfo{
+		{ID: "S1", Kind: devices.KindServer, Name: "Laptop"},
+		{ID: "D1", App: "todo", Name: "iPhone Safari", Machine: "M1"},
+	}
+	h := newTestHandler(f)
+
+	wantStatus(t, serve(h, request(http.MethodPut, "/api/devices/S1", `{"name":"Work laptop"}`)), http.StatusNoContent)
+	if f.devices[0].Name != "Work laptop" {
+		t.Errorf("rename: devices = %+v", f.devices)
+	}
+	wantError(t, serve(h, request(http.MethodPut, "/api/devices/D1", `{"name":"x"}`)), http.StatusNotFound, "notFound")
+	wantError(t, serve(h, request(http.MethodPut, "/api/devices/nope", `{"name":"x"}`)), http.StatusNotFound, "notFound")
+	wantError(t, serve(h, request(http.MethodPut, "/api/devices/S1", `{}`)), http.StatusBadRequest, "invalid")
+	f.renameErr = devices.ErrInvalidName
+	wantError(t, serve(h, request(http.MethodPut, "/api/devices/S1", `{"name":" "}`)), http.StatusBadRequest, "invalid")
 }
 
 // A pairing code, of this server or of the main, is issued for the machine

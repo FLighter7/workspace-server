@@ -144,7 +144,8 @@ type Server struct {
 // SHA-256 in lowercase hex; its kind, name and pairing time (RFC 3339) when
 // the main names them, what a server-kind device announced, and the machine
 // (a physical device of the user's) a device of an app is paired on, with
-// the name the main gives it.
+// the name the main gives it; and the name the user gave a server-kind
+// device's server, when they did.
 type Device struct {
 	ID          string  `json:"id"`
 	App         string  `json:"app"`
@@ -155,6 +156,7 @@ type Device struct {
 	Server      *Server `json:"server,omitempty"`
 	Machine     string  `json:"machine,omitempty"`
 	MachineName string  `json:"machineName,omitempty"`
+	ServerName  string  `json:"serverName,omitempty"`
 }
 
 // Tombstone is a device removed from the family: its id, and when (RFC
@@ -994,6 +996,7 @@ func readRegistry(frame map[string]json.RawMessage) (Registry, error) {
 		Server    json.RawMessage `json:"server"`
 		Machine   string          `json:"machine"`
 		MName     string          `json:"machineName"`
+		SName     string          `json:"serverName"`
 	}
 	if json.Unmarshal(frame["devices"], &raw) != nil || raw == nil {
 		return Registry{}, protocolError("a malformed devices")
@@ -1003,7 +1006,7 @@ func readRegistry(frame map[string]json.RawMessage) (Registry, error) {
 		if d.ID == nil || d.App == nil || d.TokenHash == nil {
 			return Registry{}, protocolError("a malformed devices")
 		}
-		dev := Device{ID: *d.ID, App: *d.App, Kind: d.Kind, Name: d.Name, TokenHash: *d.TokenHash, PairedAt: d.PairedAt, Machine: d.Machine, MachineName: d.MName}
+		dev := Device{ID: *d.ID, App: *d.App, Kind: d.Kind, Name: d.Name, TokenHash: *d.TokenHash, PairedAt: d.PairedAt, Machine: d.Machine, MachineName: d.MName, ServerName: d.SName}
 		var s Server
 		if d.Server != nil && json.Unmarshal(d.Server, &s) == nil && s.valid() {
 			dev.Server = &s

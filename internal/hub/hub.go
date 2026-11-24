@@ -485,7 +485,7 @@ func (h *Hub) Announce(s *protocol.Session, server protocol.ServerInfo, handover
 func fromWire(reg protocol.Registry) ([]devices.Entry, []devices.Tombstone, error) {
 	list := make([]devices.Entry, 0, len(reg.Devices))
 	for _, d := range reg.Devices {
-		e := devices.Entry{ID: d.ID, App: d.App, Kind: d.Kind, Name: d.Name, TokenHash: d.TokenHash, Machine: d.Machine, MachineName: d.MachineName}
+		e := devices.Entry{ID: d.ID, App: d.App, Kind: d.Kind, Name: d.Name, TokenHash: d.TokenHash, Machine: d.Machine, MachineName: d.MachineName, ServerName: d.ServerName}
 		if d.PairedAt != "" {
 			at, err := time.Parse(time.RFC3339, d.PairedAt)
 			if err != nil {
@@ -514,7 +514,7 @@ func fromWire(reg protocol.Registry) ([]devices.Entry, []devices.Tombstone, erro
 func ToWire(list []devices.Entry, removed []devices.Tombstone) protocol.Registry {
 	out := protocol.Registry{Devices: make([]protocol.DeviceEntry, 0, len(list))}
 	for _, e := range list {
-		d := protocol.DeviceEntry{ID: e.ID, App: e.App, Kind: e.Kind, Name: e.Name, TokenHash: e.TokenHash, Machine: e.Machine, MachineName: e.MachineName}
+		d := protocol.DeviceEntry{ID: e.ID, App: e.App, Kind: e.Kind, Name: e.Name, TokenHash: e.TokenHash, Machine: e.Machine, MachineName: e.MachineName, ServerName: e.ServerName}
 		if !e.PairedAt.IsZero() {
 			d.PairedAt = e.PairedAt.UTC().Format(time.RFC3339)
 		}
@@ -581,10 +581,7 @@ func (h *Hub) Invite(s *protocol.Session, machine string) (string, time.Time, *p
 	}
 	name := m.device
 	if d, ok := h.d.Devices.Get(m.device); ok {
-		name = d.Name
-		if d.Server != nil {
-			name = d.Server.Name
-		}
+		name = d.ShownName()
 	}
 	h.d.Logf("issued a pairing code for a browser on the subordinate %q; it replaces any code this server's page showed", name)
 	return code, expires, nil

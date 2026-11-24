@@ -48,10 +48,10 @@ const laptop: DeviceInfo = {
 	id: 'Server0000000001',
 	app: '',
 	kind: 'server',
-	name: 'Laptop pairing name',
+	name: 'Laptop',
 	pairedAt: '2026-11-11T10:00:00Z',
 	lastSeen: '2026-11-12T10:00:00Z',
-	connected: false,
+	connected: true,
 	server: {
 		serverId: 'Lp7tOp0123ab',
 		name: 'Laptop',
@@ -119,18 +119,63 @@ describe('DevicesSection on a main', () => {
 		vi.spyOn(serverApi, 'upstream').mockResolvedValue(asMain);
 	});
 
-	it('marks a linked server as one, with what it announced', async () => {
+	it('marks a linked server as one, with when it was paired', async () => {
 		mountPage(Page);
 		await settle();
 		expect(headings('h2')).toEqual(['Linked servers', 'Devices']);
 		expect(headings('h3')).toEqual(['Laptop', "Alex's phone"]);
-		expect(text()).toContain('ID: Lp7tOp0123ab');
-		expect(text()).toContain('192.168.1.30');
-		expect(text()).toContain('47801');
-		// Not connected: when it was last seen, in short, as in a device's Apps dialog.
-		expect(text()).toContain(`Last seen: ${formatWhen(laptop.lastSeen, 'en')}`);
+		const paired = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' });
+		expect(text()).toContain(`Paired ${paired.format(new Date(laptop.pairedAt))}`);
 		expect(text()).toContain('Connected now');
 		expect(button('Pair')).toBeDefined();
+	});
+
+	it("unfolds a server's ID and how it is reached", async () => {
+		mountPage(Page);
+		await settle();
+		const details = labelled('Details of Laptop');
+		const facts = document.getElementById(
+			details.getAttribute('aria-controls') ?? '',
+		) as HTMLElement;
+		expect(details.getAttribute('aria-expanded')).toBe('false');
+		expect(facts.style.display).toBe('none');
+		details.click();
+		await settle();
+		expect(details.getAttribute('aria-expanded')).toBe('true');
+		expect(facts.style.display).not.toBe('none');
+		for (const value of ['Lp7tOp0123ab', '192.168.1.30', '47801']) {
+			expect(facts.textContent).toContain(value);
+		}
+	});
+
+	it('says when a server away was last seen, and offers no hand-over to it', async () => {
+		vi.spyOn(serverApi, 'devices').mockResolvedValue([{ ...laptop, connected: false }]);
+		mountPage(Page);
+		await settle();
+		// In short, as in a device's Apps dialog.
+		expect(text()).toContain(`Last seen: ${formatWhen(laptop.lastSeen, 'en')}`);
+		expect(button('Make it the main').disabled).toBe(true);
+	});
+
+	it('renames a linked server, which keeps its own name', async () => {
+		vi.spyOn(serverApi, 'devices').mockResolvedValue([{ ...laptop, name: 'Work laptop' }]);
+		const rename = vi.spyOn(serverApi, 'renameServer').mockResolvedValue(null);
+		mountPage(Page);
+		await settle();
+		expect(headings('h3')).toEqual(['Work laptop']);
+		labelled('Rename Work laptop').click();
+		await settle();
+		const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+		expect(dialog.textContent).toContain('The server itself keeps its own name: Laptop.');
+		const input = dialog.querySelector('input') as HTMLInputElement;
+		expect(input.value).toBe('Work laptop');
+		input.value = 'Travel laptop';
+		input.dispatchEvent(new Event('input'));
+		await settle();
+		button('Save', dialog).click();
+		await settle();
+		expect(rename).toHaveBeenCalledWith('Server0000000001', 'Travel laptop');
+		expect(text()).toContain('Renamed.');
 	});
 
 	it('says what deleting a server does', async () => {
@@ -257,13 +302,18 @@ describe('DevicesSection on a main', () => {
 		expect(text()).toContain('That server is not connected now.');
 	});
 
-	it('shows a server that has not announced itself by its pairing name', async () => {
-		vi.spyOn(serverApi, 'devices').mockResolvedValue([{ ...laptop, server: undefined }]);
+	it('shows a server that has not announced itself by its name alone', async () => {
+		vi.spyOn(serverApi, 'devices').mockResolvedValue([
+			{ ...laptop, connected: false, server: undefined },
+		]);
 		mountPage(Page);
 		await settle();
-		expect(headings('h3')).toEqual(['Laptop pairing name']);
+		expect(headings('h3')).toEqual(['Laptop']);
 		expect(text()).toContain('Not connected yet');
 		expect(button('Make it the main')).toBeUndefined();
+		expect(labelled('Details of Laptop')).toBeNull();
+		expect(labelled('Rename Laptop')).toBeNull();
+		expect(labelled('Delete Laptop')).not.toBeNull();
 	});
 });
 

@@ -417,11 +417,22 @@ func (s *server) Devices() []web.DeviceInfo {
 			Connected: connected[d.ID],
 		}
 		if si := d.Server; si != nil {
+			// What the user calls it, or else what it calls itself.
+			info.Name = d.ShownName()
 			info.Server = &web.LinkedServer{ServerID: si.ServerID, Name: si.Name, Port: si.Port, Hosts: append([]string{}, si.Hosts...)}
 		}
 		out = append(out, info)
 	}
 	return out
+}
+
+// RenameServer names a linked server, and tells the subordinates.
+func (s *server) RenameServer(id, name string) error {
+	if err := s.devices.RenameServer(id, name); err != nil {
+		return err
+	}
+	s.hub.DevicesChanged()
+	return nil
 }
 
 func (s *server) RemoveDevice(id string) bool {

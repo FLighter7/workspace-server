@@ -18,6 +18,7 @@ test.describe.configure({ mode: 'serial' });
 
 interface Status {
 	serverId: string;
+	name: string;
 	mdnsName: string;
 }
 
@@ -93,9 +94,26 @@ test("the main's Devices shows the linked server as a server, and the main offer
 	const card = page.getByRole('listitem').filter({
 		has: page.getByRole('heading', { level: 3, name: 'Laptop' }),
 	});
-	await expect(card).toContainText(subStatus.serverId);
-	await expect(card).toContainText(subStatus.mdnsName);
 	await expect(card).toContainText('Connected now');
+	await expect(card.getByText(subStatus.serverId)).toBeHidden();
+	const details = card.getByRole('button', { name: 'Details of Laptop' });
+	await details.click();
+	await expect(details).toHaveAttribute('aria-expanded', 'true');
+	await expect(card.getByText(subStatus.serverId)).toBeVisible();
+	await expect(card.getByText(subStatus.mdnsName)).toBeVisible();
+
+	// A name of the user's, on the main alone; its own name brings that back.
+	await card.getByRole('button', { name: 'Rename Laptop' }).click();
+	const rename = page.getByRole('dialog', { name: 'Rename Laptop' });
+	await expect(rename).toContainText('The server itself keeps its own name: Laptop.');
+	await rename.getByLabel('Name').fill('Work computer');
+	await rename.getByRole('button', { name: 'Save' }).click();
+	await expect(page.getByRole('heading', { level: 3, name: 'Work computer' })).toBeVisible();
+	expect((await sub.api<Status>('GET', '/api/status')).name).toBe('Laptop');
+	await page.getByRole('button', { name: 'Rename Work computer' }).click();
+	await page.getByRole('dialog').getByLabel('Name').fill('Laptop');
+	await page.getByRole('dialog').getByRole('button', { name: 'Save' }).click();
+	await expect(page.getByRole('heading', { level: 3, name: 'Laptop' })).toBeVisible();
 
 	await card.getByRole('button', { name: 'Delete Laptop' }).click();
 	const dialog = page.getByRole('dialog', { name: 'Delete Laptop?' });

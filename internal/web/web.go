@@ -119,7 +119,8 @@ type Divergence struct {
 
 // DeviceInfo is one paired device. A server-kind device (a subordinate
 // linked to this server) has Kind "server" and no App; Server is what it
-// announced, nil until it has. Machine is the machine a device of an app is
+// announced, nil until it has, and Name what the user calls it, or else the
+// name it announced, or paired with. Machine is the machine a device of an app is
 // paired on.
 type DeviceInfo struct {
 	ID        string        `json:"id"`
@@ -183,6 +184,10 @@ type Backend interface {
 	// an error wrapping apps.ErrNotFound; any other error is internal.
 	OpenFolder(id string) error
 	Devices() []DeviceInfo
+	// RenameServer gives the server of the server-kind device id a name of
+	// the user's. Its errors wrap devices.ErrNoDevice or
+	// devices.ErrInvalidName, or are internal.
+	RenameServer(id, name string) error
 	// RemoveDevice removes the device and closes its session. It reports
 	// false when there is no such device.
 	RemoveDevice(id string) bool
@@ -307,6 +312,7 @@ func newHandler(b Backend, port func() int, ui fs.FS) http.Handler {
 	mux.HandleFunc("DELETE /api/apps/{id}", a.deleteApp)
 	mux.HandleFunc("POST /api/apps/{id}/open", a.openApp)
 	mux.HandleFunc("GET /api/devices", a.listDevices)
+	mux.HandleFunc("PUT /api/devices/{id}", a.renameServer)
 	mux.HandleFunc("DELETE /api/devices/{id}", a.removeDevice)
 	mux.HandleFunc("POST /api/devices/{id}/move", a.moveDevice)
 	mux.HandleFunc("GET /api/machines", a.listMachines)
