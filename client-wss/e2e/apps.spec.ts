@@ -178,9 +178,11 @@ test("the quota is changed on the main's page, and the laptop follows it, read-o
 	const subCard = todoCard(laptop);
 	await expect(laptop.getByRole('button', { name: 'Change the quota of Photos' })).toBeVisible();
 	await expect(subCard).toContainText('of 30 MB');
-	await expect(subCard).toContainText(
-		"The main server, Desk, sets the quota: change it on the main's page.",
-	);
+	// Said once, over the cards, where the main's quotas are changed.
+	const note = 'Maximum data sizes can be changed on this same page on the main server.';
+	await expect(laptop.getByText(note)).toBeVisible();
+	await expect(subCard).not.toContainText(note);
+	await laptop.screenshot({ path: join(SHOTS, 'apps-linked.png') });
 	await expect(subCard.getByRole('button', { name: /Change the quota/ })).toHaveCount(0);
 	// A new app takes a quota of its own, until the main serves it too.
 	await laptop.getByRole('button', { name: 'Add an app' }).click();

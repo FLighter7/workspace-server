@@ -419,7 +419,7 @@ describe('AppsSection on a main', () => {
 		vi.spyOn(serverApi, 'addApp').mockResolvedValue(null);
 		mountPage(AppsSection);
 		await settle();
-		expect(text()).toContain('The server cannot be reached.');
+		expect(text()).toContain('Connection to the server failed.');
 
 		await openAddDialog();
 		const id = document.querySelector('form input') as HTMLInputElement;
@@ -428,7 +428,7 @@ describe('AppsSection on a main', () => {
 		await settle();
 		id.closest('form')?.dispatchEvent(new Event('submit'));
 		await settle();
-		expect(text()).not.toContain('The server cannot be reached.');
+		expect(text()).not.toContain('Connection to the server failed.');
 		expect(card('Todo')).toBeTruthy();
 	});
 
@@ -578,24 +578,34 @@ describe('AppsSection on a subordinate', () => {
 		upstream.mockResolvedValue(asSubordinate);
 	});
 
-	it('shows the quota of an app the main lists without changing it, and says the main sets it', async () => {
-		apps.mockResolvedValue([{ ...todo, followsMain: true }, notes]);
+	it('shows the quota of an app the main lists without changing it, and says once where to', async () => {
+		const mail = { ...todo, id: 'mail', name: 'Mail', followsMain: true };
+		apps.mockResolvedValue([{ ...todo, followsMain: true }, mail, notes]);
 		mountPage(AppsSection);
 		await settle();
 		expect(byLabel('Change the quota of Todo')).toBeNull();
 		expect(folderButton('Todo')).not.toBeNull();
-		expect(card('Todo').textContent).toContain(
-			"The main server, Desk, sets the quota: change it on the main's page.",
+		expect(byLabel('Change the quota of Mail')).toBeNull();
+		// Said once for every such app, right after the Add button, and in no card.
+		expect(byLabel('Add an app')?.nextElementSibling?.textContent).toBe(
+			'Maximum data sizes can be changed on this same page on the main server.',
 		);
+		expect(text().split('Maximum data sizes')).toHaveLength(2);
 		// An app only this server serves is its own.
 		expect(byLabel('Change the quota of Notes')).not.toBeNull();
-		expect(card('Notes').textContent).not.toContain('sets the quota');
 		// A new app takes a quota, which the main's replaces if it serves the app too.
 		await openAddDialog();
 		expect([...document.querySelectorAll('form input')]).toHaveLength(3);
 		expect(text()).toContain(
 			"If the main server serves an app with this ID too, the main's quota replaces it.",
 		);
+	});
+
+	it('says nothing about the main while every app is its own', async () => {
+		mountPage(AppsSection);
+		await settle();
+		expect(card('Todo')).toBeTruthy();
+		expect(text()).not.toContain('Maximum data sizes');
 	});
 
 	it('names the main it diverged from, and a sync the quota holds', async () => {

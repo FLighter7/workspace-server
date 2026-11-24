@@ -44,7 +44,7 @@
 	"quotaAddHint": "{range}. You can change it later.",
 	"quotaAddLinkedHint": "{range}. If the main server serves an app with this ID too, the main's quota replaces it.",
 	"quotaSaved": "The quota of {app} is now {quota}.",
-	"quotaFollowsMain": "The main server, {name}, sets the quota: change it on the main's page.",
+	"quotaFollowsMain": "Maximum data sizes can be changed on this same page on the main server.",
 	"quotaFull": "The app's files have reached the quota: devices cannot add more until you raise it or files are removed in the app.",
 	"divergedMark": "Diverged: choose on a device",
 	"divergedText": "The app's files here and on {name} differ. The app does not sync between the two servers until you choose which copy to keep: open the app on any of its devices, and it asks.",

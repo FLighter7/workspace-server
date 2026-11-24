@@ -22,6 +22,7 @@
 		>
 			{{ t('add') }}
 		</VBtn>
+		<p v-if="followsMain" class="text-medium-emphasis mb-4">{{ t('quotaFollowsMain') }}</p>
 		<StatusLine :message="appsMessage" />
 		<p v-if="loaded && apps.length === 0" class="text-medium-emphasis">{{ t('noApps') }}</p>
 
@@ -30,7 +31,6 @@
 				v-for="app in apps"
 				:key="app.id"
 				:app="app"
-				:main-name="mainName"
 				:opening="opening === app.id"
 				:device-count="deviceCount(app)"
 				:online="online(app)"
@@ -83,8 +83,8 @@ import { rescueFocus } from '@/composables/useReturnFocus';
 import s from '@/styles/section.module.scss';
 
 /**
- * The Add button and the apps this server serves, nothing else (no total over
- * the cards). One card each (AppCard): its files, the space they take of its
+ * The Add button, where the main sets quotas a line saying so, and the apps
+ * this server serves, nothing else (no total over the cards). One card each (AppCard): its files, the space they take of its
  * quota, its folder, and what needs the user (a divergence
  * to choose on a device, a sync the quota holds). This section does what the
  * cards ask: changing the quota (not for an app a subordinate follows its main
@@ -127,10 +127,11 @@ const listingDevices = computed(() =>
  * (AppInfo.followsMain); an app only it serves is its own.
  */
 const linked = computed(() => upstream.value?.linked === true);
-const mainName = computed(() => upstream.value?.name ?? '');
+/** Some app's quota is the main's: said once, over the cards, which offer no Change for it. */
+const followsMain = computed(() => apps.value.some((app) => app.followsMain));
 
 /**
- * The apps, and the link for the main's name. The link is read on its own:
+ * The apps, and the link, for what Add says. The link is read on its own:
  * a failure there leaves the list as it comes. An error shown by an earlier
  * poll goes once the server answers again.
  */
@@ -151,7 +152,7 @@ async function loadUpstream(): Promise<void> {
 	try {
 		upstream.value = await serverApi.upstream();
 	} catch {
-		// The list says what matters; the main's name waits for the next poll.
+		// The list says what matters; the link waits for the next poll.
 	}
 }
 

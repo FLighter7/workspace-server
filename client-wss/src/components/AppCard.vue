@@ -137,10 +137,6 @@
 	}
 }
 
-.note {
-	margin: 0.75rem 0 0;
-}
-
 .error {
 	color: rgb(var(--v-theme-error));
 }
@@ -244,17 +240,6 @@
 					</div>
 					<p v-if="app.size >= app.quota" :class="$style.error">{{ t('quotaFull') }}</p>
 				</div>
-				<I18nT
-					v-if="app.followsMain"
-					keypath="quotaFollowsMain"
-					tag="p"
-					scope="global"
-					:class="[$style.note, 'text-medium-emphasis']"
-				>
-					<template #name>
-						<bdi>{{ mainName }}</bdi>
-					</template>
-				</I18nT>
 			</VCardText>
 		</VCard>
 	</li>
@@ -282,8 +267,6 @@ import UsageBar from './UsageBar.vue';
  */
 const props = defineProps<{
 	app: AppInfo;
-	/** The name of the main server, for an app whose quota the main sets. */
-	mainName: string;
 	/** The app's folder is being opened. */
 	opening: boolean;
 	/** How many devices it has, as its Devices tile lists them. */

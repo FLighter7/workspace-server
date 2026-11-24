@@ -44,7 +44,7 @@
 	"quotaAddHint": "{range}. Można go później zmienić.",
 	"quotaAddLinkedHint": "{range}. Jeśli serwer główny też obsługuje aplikację o tym identyfikatorze, zastępuje go limit serwera głównego.",
 	"quotaSaved": "Limit {app} wynosi teraz {quota}.",
-	"quotaFollowsMain": "Limit ustala serwer główny, {name}: zmień go na stronie serwera głównego.",
+	"quotaFollowsMain": "Maksymalne rozmiary danych można zmienić na tej samej stronie na serwerze głównym.",
 	"quotaFull": "Pliki aplikacji wypełniły limit: urządzenia nie mogą dodać więcej, dopóki go nie zwiększysz albo w aplikacji nie zostaną usunięte pliki.",
 	"divergedMark": "Kopie się rozeszły: wybierz na urządzeniu",
 	"divergedText": "Pliki aplikacji tutaj i na {name} się różnią. Aplikacja nie synchronizuje się między tymi dwoma serwerami, dopóki nie wybierzesz, którą kopię zachować: otwórz aplikację na dowolnym z jej urządzeń, a ona zapyta.",
