@@ -245,6 +245,7 @@
 	"removeServerText": "Serwer na tamtym komputerze przestanie synchronizować się z tym, a urządzenia nie będą już synchronizować się przez niego. Jego dane tam zostaną. Aby powiązać go ponownie, potrzebny będzie nowy kod.",
 	"errNotMain": "Ten serwer jest powiązany z serwerem głównym: urządzenia parują się z serwerem głównym.",
 	"errFollowsMain": "Ten serwer jest powiązany z serwerem głównym, który ustala limity. Zmień limit na stronie serwera głównego.",
+	"serversInfo": "O powiązanych serwerach",
 	"serversIntro": "Każdy przechowuje kopię aplikacji tego serwera, a urządzenia sparowane tutaj synchronizują się z nim, gdy ten serwer jest poza zasięgiem.",
 	"promoteButton": "Ustaw ten serwer jako główny",
 	"promoteTitle": "Ustawić ten serwer jako główny?",

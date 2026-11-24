@@ -245,6 +245,7 @@
 	"removeServerText": "The server on that computer stops syncing with this one, and devices no longer sync through it. Its data stays there. To link it again, it needs a new code.",
 	"errNotMain": "This server is linked to a main server: devices pair with the main.",
 	"errFollowsMain": "This server is linked to a main server, which sets the quotas. Change the quota on the main's page.",
+	"serversInfo": "About linked servers",
 	"serversIntro": "Each keeps a copy of this server's apps, and devices paired here sync with it whenever this server is out of reach.",
 	"promoteButton": "Make this server the main",
 	"promoteTitle": "Make this server the main?",

@@ -130,6 +130,19 @@ describe('DevicesSection on a main', () => {
 		expect(button('Pair')).toBeDefined();
 	});
 
+	it('says what linked servers are in a dialog', async () => {
+		mountPage(Page);
+		await settle();
+		expect(text()).not.toContain("Each keeps a copy of this server's apps");
+		labelled('About linked servers').click();
+		await settle();
+		const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+		expect(dialog.textContent).toContain('Linked servers');
+		expect(dialog.textContent).toContain("Each keeps a copy of this server's apps");
+		button('Close', dialog).click();
+		await settle();
+	});
+
 	it("unfolds a server's ID and how it is reached", async () => {
 		mountPage(Page);
 		await settle();

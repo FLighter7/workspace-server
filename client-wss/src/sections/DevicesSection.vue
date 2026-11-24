@@ -6,6 +6,22 @@
 .action {
 	min-width: 150px;
 }
+
+// The heading's margins, with the information icon by it.
+.title {
+	display: flex;
+	align-items: center;
+	gap: 0.25rem;
+
+	h2 {
+		margin: 0;
+	}
+}
+
+// Taller than the heading's line, which keeps its height.
+.info {
+	margin-block: -0.5rem;
+}
 </style>
 
 <template>
@@ -50,8 +66,19 @@
 		<StatusLine :message="message" />
 
 		<div v-if="servers.length">
-			<h2 :class="['text-title-large', s.subtitle]">{{ t('serversTitle') }}</h2>
-			<p class="text-medium-emphasis mb-3">{{ t('serversIntro') }}</p>
+			<div :class="[s.subtitle, $style.title]">
+				<h2 class="text-title-large">{{ t('serversTitle') }}</h2>
+				<VBtn
+					:class="['text-medium-emphasis', $style.info]"
+					:icon="mdiInformationOutline"
+					variant="text"
+					density="comfortable"
+					:title="t('serversInfo')"
+					:aria-label="t('serversInfo')"
+					aria-haspopup="dialog"
+					@click="infoOpen = true"
+				/>
+			</div>
 			<ul :class="s.cards">
 				<ServerCard
 					v-for="device in servers"
@@ -86,6 +113,7 @@
 			</ul>
 		</div>
 
+		<InfoDialog v-model="infoOpen" :title="t('serversTitle')" :text="t('serversIntro')" />
 		<PairDialog v-model="pairOpen" />
 		<MachineAppsDialog
 			v-model="appsOpen"
@@ -103,9 +131,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { I18nT, useI18n } from 'vue-i18n';
-import { mdiPlus } from '@mdi/js';
+import { mdiInformationOutline, mdiPlus } from '@mdi/js';
 import { serverApi } from '@/api/client';
 import type { AppInfo, DeviceInfo, MachineInfo } from '@/api/types';
+import InfoDialog from '@/components/InfoDialog.vue';
 import MachineAppsDialog from '@/components/MachineAppsDialog.vue';
 import MachineCard from '@/components/MachineCard.vue';
 import RenameDialog from '@/components/RenameDialog.vue';
@@ -135,6 +164,7 @@ const machines = ref<MachineInfo[]>([]);
 const apps = ref<AppInfo[]>([]);
 const loaded = ref(false);
 const message = ref<Message | null>(null);
+const infoOpen = ref(false);
 const pairOpen = ref(false);
 const inviteOpen = ref(false);
 /** The main's name while this server is its subordinate; null on a main. */
