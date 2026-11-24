@@ -6,18 +6,47 @@
 	border-block-start: thin solid rgba(var(--v-border-color), var(--v-border-opacity));
 }
 
-// Details and "Make it the main" at the two edges of the card: their text
-// starts and ends where the card's does.
+// Details and "Make it the main" at the two edges of the card: plain buttons,
+// whose text alone changes colour, since a background would stick out of those
+// edges.
 .buttons {
 	display: flex;
 	flex-wrap: wrap;
 	justify-content: space-between;
-	gap: 0.25rem 0.5rem;
-	margin-inline: -1rem;
+	gap: 0.25rem 1rem;
+}
+
+.text {
+	padding: 0;
+	transition: color 0.2s;
+
+	// Plain fades its text until it is hovered, under the contrast it needs.
+	&:not(:disabled) {
+		opacity: 1;
+	}
+
+	// Plain has no overlay to show the focus with.
+	&:focus-visible {
+		outline: 2px solid rgb(var(--v-theme-primary));
+		outline-offset: 2px;
+	}
+}
+
+.details {
+	color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
+
+	&:hover {
+		color: rgb(var(--v-theme-on-surface));
+	}
 }
 
 .main {
 	margin-inline-start: auto;
+	color: rgb(var(--v-theme-primary));
+
+	&:hover {
+		color: color-mix(in srgb, rgb(var(--v-theme-primary)) 50%, rgb(var(--v-theme-on-surface)));
+	}
 }
 
 .chevron {
@@ -76,8 +105,9 @@
 		<div v-if="server" :class="$style.foot">
 			<div :class="$style.buttons">
 				<VBtn
-					class="text-medium-emphasis"
-					variant="text"
+					:class="[$style.text, $style.details]"
+					variant="plain"
+					:ripple="false"
 					:aria-label="t('detailsLabel', { name: device.name })"
 					:aria-expanded="open"
 					:aria-controls="detailsId"
@@ -89,9 +119,9 @@
 					</template>
 				</VBtn>
 				<VBtn
-					:class="$style.main"
-					color="primary"
-					variant="text"
+					:class="[$style.text, $style.main]"
+					variant="plain"
+					:ripple="false"
 					:disabled="!device.connected"
 					:loading="handingOver"
 					@click="emit('handOver')"
