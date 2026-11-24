@@ -97,8 +97,8 @@ test("the main's Devices shows the linked server as a server, and the main offer
 	await expect(card).toContainText(subStatus.mdnsName);
 	await expect(card).toContainText('Connected now');
 
-	await card.getByRole('button', { name: 'Remove' }).click();
-	const dialog = page.getByRole('dialog', { name: 'Remove Laptop?' });
+	await card.getByRole('button', { name: 'Delete Laptop' }).click();
+	const dialog = page.getByRole('dialog', { name: 'Delete Laptop?' });
 	await expect(dialog).toContainText(
 		'The server on that computer stops syncing with this one, and devices no longer sync through it.',
 	);
@@ -246,10 +246,10 @@ test("a server links by the main's QR code, read by the camera; the main's remov
 		const card = mainPage.getByRole('listitem').filter({
 			has: mainPage.getByRole('heading', { level: 3, name: 'Laptop' }),
 		});
-		await card.getByRole('button', { name: 'Remove' }).click();
+		await card.getByRole('button', { name: 'Delete Laptop' }).click();
 		await mainPage
-			.getByRole('dialog', { name: 'Remove Laptop?' })
-			.getByRole('button', { name: 'Remove' })
+			.getByRole('dialog', { name: 'Delete Laptop?' })
+			.getByRole('button', { name: 'Delete' })
 			.click();
 		await expect(mainPage.getByRole('heading', { level: 2, name: 'Linked servers' })).toHaveCount(
 			0,

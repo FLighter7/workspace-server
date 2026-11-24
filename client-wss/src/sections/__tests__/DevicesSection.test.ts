@@ -5,6 +5,7 @@ import { ApiError, serverApi } from '@/api/client';
 import type { DeviceInfo, UpstreamStatus } from '@/api/types';
 import ConfirmDialog from '@/components/ConfirmDialog.vue';
 import { resetNotices, noticeState } from '@/composables/useNotify';
+import { formatWhen } from '@/composables/useFormat';
 import { invitedCode, ownCode } from '@/composables/usePairingCode';
 import { mountPage, settle } from '@/testing/mountPage';
 import DevicesSection from '../DevicesSection.vue';
@@ -123,24 +124,28 @@ describe('DevicesSection on a main', () => {
 		await settle();
 		expect(headings('h2')).toEqual(['Linked servers', 'Devices']);
 		expect(headings('h3')).toEqual(['Laptop', "Alex's phone"]);
-		expect(text()).toContain('Lp7tOp0123ab');
+		expect(text()).toContain('ID: Lp7tOp0123ab');
 		expect(text()).toContain('192.168.1.30');
 		expect(text()).toContain('47801');
+		// Not connected: when it was last seen, in short, as in a device's Apps dialog.
+		expect(text()).toContain(`Last seen: ${formatWhen(laptop.lastSeen, 'en')}`);
+		expect(text()).toContain('Connected now');
 		expect(button('Pair')).toBeDefined();
 	});
 
-	it('says what removing a server does', async () => {
+	it('says what deleting a server does', async () => {
 		const remove = vi.spyOn(serverApi, 'removeDevice').mockResolvedValue(null);
 		mountPage(Page);
 		await settle();
-		button('Remove').click();
+		labelled('Delete Laptop').click();
 		await settle();
 		const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
-		expect(dialog.textContent).toContain('Remove Laptop?');
+		expect(dialog.textContent).toContain('Delete Laptop?');
 		expect(dialog.textContent).toContain('The server on that computer stops syncing with this one');
-		button('Remove', dialog).click();
+		button('Delete', dialog).click();
 		await settle();
 		expect(remove).toHaveBeenCalledWith('Server0000000001');
+		expect(text()).toContain('Deleted');
 	});
 
 	it('shows each device once, with its apps, by name', async () => {
@@ -152,6 +157,19 @@ describe('DevicesSection on a main', () => {
 		expect(labelled("Apps on Alex's phone: 2, connected now: 1")).not.toBeNull();
 		expect(labelled('Apps on Desk: 1')).not.toBeNull();
 		expect(text()).toContain('Connected now');
+	});
+
+	it('says when the first app of a device was paired', async () => {
+		vi.spyOn(serverApi, 'devices').mockResolvedValue([phoneNotes, phone]);
+		mountPage(Page);
+		await settle();
+		const tiles = [...document.querySelectorAll('dl > div')].map((e) => e.textContent?.trim());
+		expect(tiles).toEqual([
+			`Paired${new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' }).format(
+				new Date(phone.pairedAt),
+			)}`,
+			expect.stringContaining('Apps'),
+		]);
 	});
 
 	it("lists a device's apps, and moves one to a device of its own", async () => {

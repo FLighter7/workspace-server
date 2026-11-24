@@ -53,44 +53,14 @@
 			<h2 :class="['text-title-large', s.subtitle]">{{ t('serversTitle') }}</h2>
 			<p class="text-medium-emphasis mb-3">{{ t('serversIntro') }}</p>
 			<ul :class="s.cards">
-				<ItemCard v-for="device in servers" :key="device.id" heading-tag="h3">
-					<template #title>
-						<bdi>{{ device.server?.name ?? device.name }}</bdi>
-					</template>
-					<template #side>
-						<StateBadge :tone="device.connected ? 'on' : 'off'">
-							{{ device.connected ? t('connectedNow') : t('notConnected') }}
-						</StateBadge>
-					</template>
-					<FactList>
-						<template v-if="device.server">
-							<FactItem :label="t('serverId')">
-								<code>{{ device.server.serverId }}</code>
-							</FactItem>
-							<FactItem :label="t('addresses')">
-								<ul :class="s.plain">
-									<li v-for="host in device.server.hosts" :key="host">
-										<code>{{ host }}</code>
-									</li>
-								</ul>
-							</FactItem>
-							<FactItem :label="t('udpPort')">{{ device.server.port }}</FactItem>
-						</template>
-						<FactItem v-else :label="t('addresses')">{{ t('serverNotAnnounced') }}</FactItem>
-						<FactItem :label="t('pairedAt')">{{ format.time(device.pairedAt) }}</FactItem>
-						<FactItem :label="t('lastSeen')">{{ format.time(device.lastSeen) }}</FactItem>
-					</FactList>
-					<template #actions>
-						<VBtn
-							v-if="device.server"
-							:loading="handingOver === device.id"
-							@click="handOver(device)"
-						>
-							{{ t('handOverButton') }}
-						</VBtn>
-						<VBtn @click="removeServer(device)">{{ t('remove') }}</VBtn>
-					</template>
-				</ItemCard>
+				<ServerCard
+					v-for="device in servers"
+					:key="device.id"
+					:device="device"
+					:handing-over="handingOver === device.id"
+					@hand-over="handOver(device)"
+					@delete="deleteServer(device)"
+				/>
 			</ul>
 		</div>
 
@@ -135,18 +105,14 @@ import { I18nT, useI18n } from 'vue-i18n';
 import { mdiPlus } from '@mdi/js';
 import { serverApi } from '@/api/client';
 import type { AppInfo, DeviceInfo, MachineInfo } from '@/api/types';
-import FactItem from '@/components/FactItem.vue';
-import FactList from '@/components/FactList.vue';
-import ItemCard from '@/components/ItemCard.vue';
 import MachineAppsDialog from '@/components/MachineAppsDialog.vue';
 import MachineCard from '@/components/MachineCard.vue';
 import RenameMachineDialog from '@/components/RenameMachineDialog.vue';
-import StateBadge from '@/components/StateBadge.vue';
+import ServerCard from '@/components/ServerCard.vue';
 import StatusLine from '@/components/StatusLine.vue';
 import { errorMessage, info, type Message } from '@/composables/messages';
 import { upstreamError } from '@/composables/upstream';
-import { ask, type Question } from '@/composables/useConfirm';
-import { useFormat } from '@/composables/useFormat';
+import { ask } from '@/composables/useConfirm';
 import { usePolling } from '@/composables/usePolling';
 import { rescueFocus } from '@/composables/useReturnFocus';
 import s from '@/styles/section.module.scss';
@@ -154,14 +120,13 @@ import InviteDialog from './InviteDialog.vue';
 import PairDialog from './PairDialog.vue';
 
 /**
- * The user's devices, each a card with the apps paired on it, and under them
- * the servers linked to this one. A phone with two apps is one card: the
+ * The servers linked to this one, and under them the user's devices, each a
+ * card with the apps paired on it. A phone with two apps is one card: the
  * server cannot tell by itself that two pairings come from one phone, so the
  * user says so when the code is issued (Pair a device asks which device it is
  * for), or later by moving a pairing from one device to another.
  */
 const { t } = useI18n();
-const format = useFormat();
 
 const devices = ref<DeviceInfo[]>([]);
 const machines = ref<MachineInfo[]>([]);
@@ -288,8 +253,13 @@ async function deleteMachine(card: Card): Promise<void> {
 		ok: 'delete',
 	} as const;
 	if (!(await ask(question))) return;
+	await deleting(() => serverApi.removeMachine(card.machine.id));
+}
+
+/** Deletes a device or a server, says so, and lists what is left. */
+async function deleting(request: () => Promise<unknown>): Promise<void> {
 	try {
-		await serverApi.removeMachine(card.machine.id);
+		await request();
 	} catch (error) {
 		message.value = errorMessage(error);
 		return;
@@ -303,15 +273,16 @@ async function deleteMachine(card: Card): Promise<void> {
 // stays on the button that has it.
 usePolling(loadDevices);
 
-/** A linked server is removed: the link between the two servers ends. */
-async function removeServer(device: DeviceInfo): Promise<void> {
+/** A linked server is deleted, after a question: the link between the two servers ends. */
+async function deleteServer(device: DeviceInfo): Promise<void> {
 	const question = {
-		title: 'removeTitle',
+		title: 'deleteMachineTitle',
 		name: device.server?.name ?? device.name,
 		text: 'removeServerText',
-		ok: 'remove',
+		ok: 'delete',
 	} as const;
-	await remove(device, question, 'removed');
+	if (!(await ask(question))) return;
+	await deleting(() => serverApi.removeDevice(device.id));
 }
 
 /**
@@ -343,19 +314,6 @@ async function handOver(device: DeviceInfo): Promise<void> {
 		handingOver.value = null;
 	}
 	await loadUpstream();
-	await loadDevices();
-	await rescueFocus();
-}
-
-async function remove(device: DeviceInfo, question: Question, done: 'removed'): Promise<void> {
-	if (!(await ask(question))) return;
-	try {
-		await serverApi.removeDevice(device.id);
-	} catch (error) {
-		message.value = errorMessage(error);
-		return;
-	}
-	message.value = info(done);
 	await loadDevices();
 	await rescueFocus();
 }

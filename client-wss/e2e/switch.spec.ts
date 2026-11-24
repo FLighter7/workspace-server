@@ -176,13 +176,13 @@ test('with the desk switched off, the laptop is made the main by force, behind a
 	const st = await laptop.api<Upstream>('GET', '/api/upstream');
 	expect(st).toMatchObject({ linked: false, term: 3 });
 
-	// The desk stays listed, so that it can be removed if it is gone for good.
+	// The desk stays listed, so that it can be deleted if it is gone for good.
 	await nav(page).getByRole('link', { name: 'Devices' }).click();
 	await expect(
 		page
 			.getByRole('listitem')
 			.filter({ has: page.getByRole('heading', { level: 3, name: 'Desk' }) }),
-	).toContainText('Not connected');
+	).toContainText('Last seen');
 
 	await expectNoCspViolations(page);
 	await page.context().close();

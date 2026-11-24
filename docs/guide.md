@@ -114,7 +114,7 @@ On the first start the server creates its folder and an entry for the `todo` app
     - **Delete the server and all data** stops the server and removes it from the computer, like `delete`: its data, its folders, the program file and the autostart.
 - **Devices** (Устройства):
   - **Pair a device** at the top opens the pairing code; on a server linked to a main, devices pair with the main instead;
-  - lists servers linked to this one first, under **Linked servers**, then your devices (under **Devices** when there are linked servers), each once, however many apps are paired on it: its name, when it was last seen or "Connected now", and the number of its apps. Clicking that number lists the apps on the device, each with when it paired and whether it is connected now;
+  - lists servers linked to this one first, under **Linked servers**, then your devices (under **Devices** when there are linked servers), each once, however many apps are paired on it: its name, "Connected now" or when it was last seen, when it was paired, and the number of its apps. Clicking that number lists the apps on the device, each with when it paired and whether it is connected now;
   - the pencil renames a device, say "Alex's phone" instead of "iPhone";
   - the trash can (**Delete**) ends a device's access for all its apps, after a question; in the list of its apps, the crossed-out link icon (**Disconnect**) ends one app's. To sync again, the app pairs again;
   - if two cards are one device (paired before the server knew), open one's apps and move them to the other with the arrows icon; the arrows also move an app to a device of its own.
@@ -181,7 +181,7 @@ While an app's copies have diverged, the laptop cannot be made the main in the p
 
 - The laptop's **Upstream server** shows the main, whether it is connected, when it was linked, the last sync and the apps synced. If an app writes to the main too often within a minute, it stops syncing with the main, so that a runaway app does not keep rewriting the data on both servers; the section lists it, and its devices still sync with the laptop. Press **Resume** beside it to sync it with the main again at once; a restart of the laptop's server resumes it too. If the app keeps writing that often, it stops again.
 - If an app's files would go over its quota, here or on the main, the app cannot sync with the main: the laptop's **Upstream server** lists it as held by the quota, and its card on the **Apps** page says so. Raise the quota on the main's page, or remove files in the app on a device; the laptop keeps trying, and the app syncs once its files fit.
-- The main's **Devices** lists the laptop's server under **Linked servers**, with its addresses. **Remove** there stops it syncing with the main; its data stays on the laptop.
+- The main's **Devices** lists the laptop's server under **Linked servers**, with its addresses. The trash can (**Delete**) there stops it syncing with the main; its data stays on the laptop.
 - **Unlink** on the laptop's page makes it a main again. Nothing is deleted on either side, and the main's devices no longer sync through the laptop. If the main cannot be reached at that moment, the page says so: remove the laptop on the main's page later.
 
 ### Making the laptop the main
